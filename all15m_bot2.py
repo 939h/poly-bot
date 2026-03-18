@@ -1,11 +1,13 @@
 """
-Polymarket All 15-Minute Up/Down Bot v2 (BTC, ETH, SOL, XRP)
+Polymarket All 15-Minute Up/Down Bot v3 (BTC, ETH, SOL, XRP)
+With Telegram notifications for every trade event.
+
 Strategy:
   1. Only buy in first 5 minutes of window
   2. Buy if YES or NO drops to 25c (once per asset per window)
   3. Sell half at 50c (2x)
-  4. Hold rest to resolution — pays $1 per share if wins
-  5. Stop loss: sell all if price drops to 12c
+  4. Stop loss at 12c
+  5. Hold rest to resolution
   6. No new buys in last 3 minutes
 
 Requirements:
@@ -40,7 +42,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("all15m_bot2.log"),
+        logging.FileHandler("all15m_bot3.log"),
     ],
     force=True,
 )
@@ -51,20 +53,38 @@ log = logging.getLogger(__name__)
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN          = True
+DRY_RUN          = os.getenv("DRY_RUN", "true").lower() == "false"
 ASSETS           = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES       = 10
-BUY_PRICE        = 0.25    # Buy when price drops to 25c
-SELL_HALF_PRICE  = 0.50    # Sell half at 2x (50c)
-STOP_LOSS_PRICE  = 0.12    # Stop loss — sell all if drops to 12c
-ENTRY_WINDOW     = 810     # Only buy in first 5 minutes (300s)
-NO_BUY_LAST_SECS = 90     # No new buys in last 3 minutes
+BUY_PRICE        = 0.25
+SELL_HALF_PRICE  = 0.50
+STOP_LOSS_PRICE  = 0.12
+ENTRY_WINDOW     = 300     # First 5 minutes only
+NO_BUY_LAST_SECS = 180     # No buy in last 3 minutes
 WINDOW_SECS      = 900     # 15-minute window
 POLL_SECS        = 1
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-PNL_FILE  = "all15m_pnl2.csv"
+PNL_FILE  = "all15m_pnl3.csv"
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
+
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+def tg(msg: str):
+    """Send a Telegram message. Silently fails if not configured."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 # ── PnL Tracker ───────────────────────────────────────────────────────────────
 
@@ -136,22 +156,21 @@ class PnLTracker:
             "buy_shares":    shares,
             "buy_price":     price,
             "buy_cost":      cost,
-            "sell1_shares":  0.0,
-            "sell1_price":   0.0,
-            "sell1_revenue": 0.0,
-            "sell2_shares":  0.0,
-            "sell2_price":   0.0,
-            "sell2_revenue": 0.0,
-            "total_revenue": 0.0,
-            "total_pnl":     0.0,
+            "sell1_shares":  0.0, "sell1_price":   0.0, "sell1_revenue": 0.0,
+            "sell2_shares":  0.0, "sell2_price":   0.0, "sell2_revenue": 0.0,
+            "total_revenue": 0.0, "total_pnl":     0.0,
             "status":        "OPEN",
             "shares_held":   shares,
             "half_sold":     False,
         }
         self.trades.append(trade)
-        log.info(
-            f"  PnL | [{asset.upper()}] BUY {shares} {side} @ {price:.2%} = ${cost:.4f} USDC | "
-            f"target sell-half={SELL_HALF_PRICE:.0%} stop-loss={STOP_LOSS_PRICE:.0%}"
+        mode = "[DRY RUN] " if not (os.getenv("DRY_RUN","true").lower()=="false") else ""
+        log.info(f"  PnL | [{asset.upper()}] BUY {shares} {side} @ {price:.2%} = ${cost:.4f} USDC")
+        tg(
+            f"🟢 <b>{mode}BUY</b> — {asset.upper()} {side}\n"
+            f"📊 {shares} shares @ {price:.0%}\n"
+            f"💰 Cost: ${cost:.4f} USDC\n"
+            f"🎯 Sell half @ {SELL_HALF_PRICE:.0%} | Stop @ {STOP_LOSS_PRICE:.0%}"
         )
         self._rewrite()
         return len(self.trades) - 1
@@ -170,9 +189,15 @@ class PnLTracker:
         t["shares_held"]   = t["buy_shares"] - sell_shares
         t["half_sold"]     = True
         log.info(f"  PnL | [{t['asset'].upper()}] SELL HALF ({reason}) {sell_shares} {t['side']} @ {price:.2%} = ${revenue:.4f}")
+        tg(
+            f"🟡 <b>SELL HALF ({reason})</b> — {t['asset'].upper()} {t['side']}\n"
+            f"📊 {sell_shares} shares @ {price:.0%}\n"
+            f"💰 Revenue: ${revenue:.4f} USDC\n"
+            f"📌 Holding {int(t['shares_held'])} shares to resolution"
+        )
         self._rewrite()
 
-    def record_sell_all(self, trade_idx, price, reason="50c"):
+    def record_sell_all(self, trade_idx, price, reason="SELL-ALL"):
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
@@ -189,22 +214,25 @@ class PnLTracker:
         t["total_revenue"] = total_rev
         t["total_pnl"]     = total_pnl
         t["status"]        = "CLOSED"
-        log.info(
-            f"  PnL | [{t['asset'].upper()}] SELL ALL ({reason}) {held} {t['side']} @ {price:.2%} = ${revenue:.4f} | "
-            f"total_pnl={'+' if total_pnl>=0 else ''}{total_pnl:.4f} USDC"
+        emoji = "🔴" if reason == "STOP-LOSS" else "✅"
+        log.info(f"  PnL | [{t['asset'].upper()}] {reason} {held} {t['side']} @ {price:.2%} | pnl={'+' if total_pnl>=0 else ''}{total_pnl:.4f}")
+        tg(
+            f"{emoji} <b>{reason}</b> — {t['asset'].upper()} {t['side']}\n"
+            f"📊 {held} shares @ {price:.0%}\n"
+            f"💰 Revenue: ${revenue:.4f} USDC\n"
+            f"📈 Total PnL: {'+' if total_pnl>=0 else ''}{total_pnl:.4f} USDC"
         )
         self._rewrite()
 
     def record_resolved(self, trade_idx, won):
-        """Market resolved — hold shares pay $1 if won, $0 if lost."""
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
         if t["status"] != "OPEN":
             return
-        held    = t["shares_held"]
-        price   = 1.0 if won else 0.0
-        revenue = round(held * price, 4)
+        held       = t["shares_held"]
+        price      = 1.0 if won else 0.0
+        revenue    = round(held * price, 4)
         t["sell2_shares"]  = held
         t["sell2_price"]   = price
         t["sell2_revenue"] = revenue
@@ -214,9 +242,12 @@ class PnLTracker:
         t["total_revenue"] = total_rev
         t["total_pnl"]     = total_pnl
         t["status"]        = "WIN" if won else "LOSS"
-        log.info(
-            f"  PnL | [{t['asset'].upper()}] RESOLVED {'WIN' if won else 'LOSS'} | "
-            f"hold_revenue=${revenue:.4f} | total_pnl={'+' if total_pnl>=0 else ''}{total_pnl:.4f} USDC"
+        emoji = "🏆" if won else "❌"
+        log.info(f"  PnL | [{t['asset'].upper()}] {'WIN' if won else 'LOSS'} | total_pnl={'+' if total_pnl>=0 else ''}{total_pnl:.4f}")
+        tg(
+            f"{emoji} <b>RESOLVED {'WIN' if won else 'LOSS'}</b> — {t['asset'].upper()} {t['side']}\n"
+            f"📊 Hold {held} shares → ${revenue:.4f}\n"
+            f"📈 Total PnL: {'+' if total_pnl>=0 else ''}{total_pnl:.4f} USDC"
         )
         self._rewrite()
 
@@ -228,17 +259,17 @@ class PnLTracker:
         open_  = [t for t in self.trades if t["status"] == "OPEN"]
         total  = round(sum(t["total_pnl"] for t in closed), 4)
         spent  = round(sum(t["buy_cost"] for t in self.trades), 4)
-        log.info("=" * 55)
-        log.info("  PnL SUMMARY — ALL MARKETS")
+        lines  = ["📊 <b>PnL SUMMARY</b>"]
         for asset in ASSETS:
             ac  = [t for t in closed if t["asset"] == asset]
             ap  = round(sum(t["total_pnl"] for t in ac), 4)
-            log.info(f"  {asset.upper()}: {len(ac)} trades | pnl={'+' if ap>=0 else ''}{ap:.4f}")
-        log.info(f"  Total trades : {len(self.trades)} ({len(open_)} open)")
-        log.info(f"  Total spent  : ${spent:.4f} USDC")
-        log.info(f"  Net PnL      : {'+' if total>=0 else ''}{total:.4f} USDC")
-        log.info(f"  Log saved to : {self.path}")
-        log.info("=" * 55)
+            lines.append(f"  {asset.upper()}: {len(ac)} trades | {'+' if ap>=0 else ''}{ap:.4f}")
+        lines.append(f"Total trades: {len(self.trades)} ({len(open_)} open)")
+        lines.append(f"Total spent: ${spent:.4f}")
+        lines.append(f"Net PnL: {'+' if total>=0 else ''}{total:.4f} USDC")
+        msg = "\n".join(lines)
+        log.info(msg)
+        tg(msg)
 
     def _rewrite(self):
         running = 0.0
@@ -272,14 +303,11 @@ def get_server_time():
     except Exception:
         return int(datetime.now(timezone.utc).timestamp())
 
-
 def get_current_window_start(server_ts):
     return (server_ts // WINDOW_SECS) * WINDOW_SECS
 
-
 def build_slug(asset, window_ts):
     return f"{asset}-updown-15m-{window_ts}"
-
 
 def fetch_market_by_slug(slug):
     try:
@@ -299,7 +327,6 @@ def fetch_market_by_slug(slug):
         log.error(f"Gamma API error ({slug}): {e}")
         return None
 
-
 def get_tokens(market):
     raw = market.get("clobTokenIds") or market.get("clob_token_ids", [])
     if isinstance(raw, str):
@@ -311,13 +338,11 @@ def get_tokens(market):
         return None, None
     return raw[0].strip(), raw[1].strip()
 
-
 def get_midpoint(client, token_id):
     try:
         return float(client.get_midpoint(token_id)["mid"])
     except Exception:
         return 0.0
-
 
 def build_client():
     pk       = os.getenv("POLY_PRIVATE_KEY")
@@ -336,23 +361,19 @@ def build_client():
     log.info("Connected to Polymarket CLOB.")
     return client
 
-
 def market_buy(client, token_id, shares, price, label):
     amount = round(shares * price, 4)
     if DRY_RUN:
         log.info(f"  [DRY RUN] MARKET BUY {shares} {label} @ {price:.2%} = ${amount:.4f} USDC")
         return price
     try:
-        order = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount, side=BUY)
-        )
-        resp = client.post_order(order, OrderType.FOK)
+        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount, side=BUY))
+        resp  = client.post_order(order, OrderType.FOK)
         log.info(f"  MARKET BUY executed: {label} | {resp}")
         return price
     except Exception as e:
         log.error(f"  MARKET BUY failed ({label}): {e}")
         return None
-
 
 def market_sell(client, token_id, shares, price, label):
     amount = round(shares * price, 4)
@@ -360,16 +381,13 @@ def market_sell(client, token_id, shares, price, label):
         log.info(f"  [DRY RUN] MARKET SELL {shares} {label} @ {price:.2%} = ${amount:.4f} USDC")
         return price
     try:
-        order = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount, side=SELL)
-        )
-        resp = client.post_order(order, OrderType.FOK)
+        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount, side=SELL))
+        resp  = client.post_order(order, OrderType.FOK)
         log.info(f"  MARKET SELL executed: {label} | {resp}")
         return price
     except Exception as e:
         log.error(f"  MARKET SELL failed ({label}): {e}")
         return None
-
 
 def resolve_pending_on_startup(pnl):
     unresolved = pnl.load_from_csv()
@@ -403,18 +421,24 @@ def resolve_pending_on_startup(pnl):
             live_pending[(asset, w)] = items
     return live_pending
 
-
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 
 def run():
     client = build_client()
     pnl    = PnLTracker()
 
+    mode_str = "DRY RUN" if DRY_RUN else "LIVE"
+    log.info("=" * 55)
+    log.info(f"  MODE: {mode_str}")
     if DRY_RUN:
-        log.info("=" * 55)
-        log.info("  DRY RUN MODE — no real orders will be placed")
-        log.info("  Set DRY_RUN = False to go live")
-        log.info("=" * 55)
+        log.info("  Set DRY_RUN=false in Railway Variables to go live")
+    log.info("=" * 55)
+
+    tg(
+        f"🤖 <b>Bot Started — {mode_str}</b>\n"
+        f"Markets: {', '.join(a.upper() for a in ASSETS)}\n"
+        f"Buy @ {BUY_PRICE:.0%} | Sell half @ {SELL_HALF_PRICE:.0%} | Stop @ {STOP_LOSS_PRICE:.0%}"
+    )
 
     pending          = resolve_pending_on_startup(pnl)
     traded           = set(pending.keys())
@@ -427,12 +451,8 @@ def run():
             for i in items
         ]
 
-    log.info(f"Bot started — monitoring: {', '.join(a.upper() for a in ASSETS)}")
-    log.info(
-        f"Strategy: BUY {BUY_SHARES} @ {BUY_PRICE:.0%} (first {ENTRY_WINDOW//60}min only) | "
-        f"SELL HALF @ {SELL_HALF_PRICE:.0%} | STOP LOSS @ {STOP_LOSS_PRICE:.0%} | "
-        f"HOLD rest to resolution | No buy in last {NO_BUY_LAST_SECS//60}min"
-    )
+    log.info(f"Monitoring: {', '.join(a.upper() for a in ASSETS)}")
+    log.info(f"Buy @ {BUY_PRICE:.0%} (first {ENTRY_WINDOW//60}min) | Sell half @ {SELL_HALF_PRICE:.0%} | Stop @ {STOP_LOSS_PRICE:.0%} | Hold rest to resolution")
 
     while True:
         try:
@@ -444,7 +464,6 @@ def run():
             for asset in ASSETS:
                 key = (asset, window_start)
 
-                # ── Pre-cache tokens ──────────────────────────────────────────
                 if key not in token_cache:
                     mkt = fetch_market_by_slug(build_slug(asset, window_start))
                     if mkt:
@@ -463,7 +482,6 @@ def run():
                     pos_asset, pos_window = pos_key
                     pos_tokens = token_cache.get(pos_key)
                     if not pos_tokens:
-                        # try to fetch tokens for older windows
                         old_mkt = fetch_market_by_slug(build_slug(pos_asset, pos_window))
                         if old_mkt:
                             yt2, nt2 = get_tokens(old_mkt)
@@ -472,8 +490,8 @@ def run():
                                 pos_tokens = (yt2, nt2)
                     if not pos_tokens:
                         continue
-
                     pyt, pnt = pos_tokens
+
                     for pos in list(positions):
                         idx      = pos["trade_idx"]
                         side     = pos["side"]
@@ -501,7 +519,7 @@ def run():
                                 pnl.record_sell_half(idx, sp, "2X")
                                 pos["half_sold"] = True
 
-                    # Resolve windows that have closed
+                    # Resolve closed windows
                     if server_ts > pos_window + WINDOW_SECS + 30:
                         try:
                             mkt = fetch_market_by_slug(build_slug(pos_asset, pos_window))
@@ -517,47 +535,38 @@ def run():
                         except Exception as e:
                             log.error(f"  Resolution error: {e}")
 
-                # ── Skip already-traded ───────────────────────────────────────
                 if key in traded:
                     continue
-
-                # ── Only buy in first 5 minutes ───────────────────────────────
                 if secs_into > ENTRY_WINDOW:
                     continue
-
-                # ── No buy in last 3 minutes ──────────────────────────────────
                 if secs_left < NO_BUY_LAST_SECS:
                     continue
 
-                # ── Check buy trigger ─────────────────────────────────────────
                 yes_price = get_midpoint(client, yes_token)
                 no_price  = get_midpoint(client, no_token)
 
                 if round(yes_price, 2) <= BUY_PRICE:
-                    log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%} — buying!")
+                    log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%}")
                     fill = market_buy(client, yes_token, BUY_SHARES, yes_price, f"{asset.upper()}-YES")
                     if fill is not None:
                         idx = pnl.record_buy(asset, window_start, "YES", BUY_SHARES, fill)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
-                        active_positions.setdefault(key, []).append(
-                            {"trade_idx": idx, "side": "YES", "half_sold": False}
-                        )
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "half_sold": False})
                         traded.add(key)
 
                 elif round(no_price, 2) <= BUY_PRICE:
-                    log.info(f"  [{asset.upper()}] TRIGGER: NO @ {no_price:.2%} — buying!")
+                    log.info(f"  [{asset.upper()}] TRIGGER: NO @ {no_price:.2%}")
                     fill = market_buy(client, no_token, BUY_SHARES, no_price, f"{asset.upper()}-NO")
                     if fill is not None:
                         idx = pnl.record_buy(asset, window_start, "NO", BUY_SHARES, fill)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
-                        active_positions.setdefault(key, []).append(
-                            {"trade_idx": idx, "side": "NO", "half_sold": False}
-                        )
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "half_sold": False})
                         traded.add(key)
 
         except KeyboardInterrupt:
             log.info("Bot stopped by user.")
             pnl.print_summary()
+            tg("🛑 Bot stopped by user.")
             break
         except Exception as e:
             log.error(f"Unexpected error: {e}")
