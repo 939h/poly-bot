@@ -1,5 +1,5 @@
 """
-Polymarket 15-Min Up/Down Bot — Fresh v5
+Polymarket 15-Min Up/Down Bot — Fresh v6
 Markets: BTC, ETH, SOL, XRP
 With Google Sheets PnL + Railway deployment
 
@@ -79,7 +79,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("fresh_bot5.log"),
+        logging.FileHandler("fresh_bot6.log"),
     ],
     force=True,
 )
@@ -97,7 +97,7 @@ log = logging.getLogger(__name__)
 ob_logger = logging.getLogger("orderbook")
 ob_logger.setLevel(logging.INFO)
 ob_logger.propagate = False  # never show in CMD
-_ob_handler = logging.FileHandler("fresh_bot5.log")
+_ob_handler = logging.FileHandler("fresh_bot6.log")
 _ob_handler.setFormatter(logging.Formatter("%(asctime)s [ORDERBOOK] %(message)s"))
 ob_logger.addHandler(_ob_handler)
 
@@ -112,7 +112,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.98    # Sell main shares at 95c
+SELL_PRICE      = 0.98    # Sell main shares at 98c
 INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
@@ -122,7 +122,7 @@ POLL_SECS       = 1
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-PNL_FILE  = "fresh_bot5_pnl.csv"
+PNL_FILE  = "fresh_bot6_pnl.csv"
 
 SHEET_ID  = os.getenv("GOOGLE_SHEET_ID", "1X9EVZBcMUvRuloX2fi71SajlbpmVglSzAhfdsN6AGk4")
 
@@ -177,7 +177,7 @@ def sheet_full_sync(sheet, trades):
                 running if t["status"] != "OPEN" else "OPEN"
             ])
         sheet.clear()
-        sheet.update("A1", rows)
+        sheet.update(rows, "A1")
         log.info(f"  Sheets | Synced {len(trades)} trades to Google Sheets ✓")
     except Exception as e:
         log.error(f"Sheet sync error: {e}")
@@ -604,7 +604,7 @@ def run():
                                     pnl.record_insurance(idx, INS_SHARES, opp_price)
                                     pos["ins_bought"] = True
 
-                        # Cut loss at 50% of buy price
+                        # Cut loss at 50% of buy price — then flip to opposite side
                         buy_price      = pnl.trades[idx]["buy_price"]
                         cut_loss_price = round(buy_price * 0.50, 4)
                         if price <= cut_loss_price:
@@ -613,6 +613,25 @@ def run():
                             if sp is not None:
                                 pnl.record_sell(idx, sp, "CUT-LOSS")
                                 positions.remove(pos)
+
+                                # ── Flip to opposite side immediately ─────────
+                                opp_side  = "NO" if side == "YES" else "YES"
+                                opp_price = get_midpoint(client, opp_id)
+                                log.info(f"  [{pos_asset.upper()}] FLIP → buying {opp_side} @ {opp_price:.2%}")
+                                flip_fill = market_buy(client, opp_id, BUY_SHARES, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
+                                if flip_fill is not None:
+                                    flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_SHARES, flip_fill)
+                                    positions.append({
+                                        "trade_idx": flip_idx,
+                                        "side":       opp_side,
+                                        "ins_bought": False,
+                                    })
+                                    pending.setdefault(pos_key, []).append({
+                                        "trade_idx": flip_idx,
+                                        "asset":     pos_asset,
+                                        "side":      opp_side,
+                                    })
+                                    log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
                             continue
 
                         # Sell main at 95c
