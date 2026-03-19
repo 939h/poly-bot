@@ -1,5 +1,5 @@
 """
-Polymarket 15-Min Up/Down Bot — Fresh v3
+Polymarket 15-Min Up/Down Bot — Fresh v4
 Markets: BTC, ETH, SOL, XRP
 With Google Sheets PnL + Railway deployment
 
@@ -79,7 +79,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("fresh_bot3.log"),
+        logging.FileHandler("fresh_bot4.log"),
     ],
     force=True,
 )
@@ -97,7 +97,7 @@ log = logging.getLogger(__name__)
 ob_logger = logging.getLogger("orderbook")
 ob_logger.setLevel(logging.INFO)
 ob_logger.propagate = False  # never show in CMD
-_ob_handler = logging.FileHandler("fresh_bot3.log")
+_ob_handler = logging.FileHandler("fresh_bot4.log")
 _ob_handler.setFormatter(logging.Formatter("%(asctime)s [ORDERBOOK] %(message)s"))
 ob_logger.addHandler(_ob_handler)
 
@@ -112,7 +112,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.98    # Sell main shares at 95c
+SELL_PRICE      = 0.95    # Sell main shares at 95c
 INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
@@ -122,7 +122,7 @@ POLL_SECS       = 1
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-PNL_FILE  = "fresh_bot3_pnl.csv"
+PNL_FILE  = "fresh_bot4_pnl.csv"
 
 SHEET_ID  = os.getenv("GOOGLE_SHEET_ID", "1X9EVZBcMUvRuloX2fi71SajlbpmVglSzAhfdsN6AGk4")
 
@@ -311,8 +311,8 @@ class PnLTracker:
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
-        t["status"]       = "SOLD"
-        log.info(f"  PnL | [{t['asset'].upper()}] SOLD {t['buy_shares']} {t['side']} @ {price:.2%} | pnl={'+' if pnl>=0 else ''}{pnl:.4f} USDC")
+        t["status"]       = reason  # "95c", "CUT-LOSS"
+        log.info(f"  PnL | [{t['asset'].upper()}] {reason} {t['buy_shares']} {t['side']} @ {price:.2%} | pnl={'+' if pnl>=0 else ''}{pnl:.4f} USDC")
         self._rewrite()
 
     def record_resolved(self, trade_idx, won):
@@ -615,6 +615,17 @@ def run():
                                 if ins_r is not None:
                                     pnl.record_insurance(idx, INS_SHARES, opp_price)
                                     pos["ins_bought"] = True
+
+                        # Cut loss at 50% of buy price
+                        buy_price      = pnl.trades[idx]["buy_price"]
+                        cut_loss_price = round(buy_price * 0.50, 4)
+                        if price <= cut_loss_price:
+                            log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%} cut @ {cut_loss_price:.2%})")
+                            sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}")
+                            if sp is not None:
+                                pnl.record_sell(idx, sp, "CUT-LOSS")
+                                positions.remove(pos)
+                            continue
 
                         # Sell main at 95c
                         if price >= SELL_PRICE:
