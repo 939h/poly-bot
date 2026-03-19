@@ -1,5 +1,5 @@
 """
-Polymarket 15-Min Up/Down Bot — Fresh v4
+Polymarket 15-Min Up/Down Bot — Fresh v5
 Markets: BTC, ETH, SOL, XRP
 With Google Sheets PnL + Railway deployment
 
@@ -79,7 +79,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("fresh_bot4.log"),
+        logging.FileHandler("fresh_bot5.log"),
     ],
     force=True,
 )
@@ -97,7 +97,7 @@ log = logging.getLogger(__name__)
 ob_logger = logging.getLogger("orderbook")
 ob_logger.setLevel(logging.INFO)
 ob_logger.propagate = False  # never show in CMD
-_ob_handler = logging.FileHandler("fresh_bot4.log")
+_ob_handler = logging.FileHandler("fresh_bot5.log")
 _ob_handler.setFormatter(logging.Formatter("%(asctime)s [ORDERBOOK] %(message)s"))
 ob_logger.addHandler(_ob_handler)
 
@@ -112,7 +112,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.99    # Sell main shares at 95c
+SELL_PRICE      = 0.95    # Sell main shares at 95c
 INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
@@ -122,7 +122,7 @@ POLL_SECS       = 1
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
-PNL_FILE  = "fresh_bot4_pnl.csv"
+PNL_FILE  = "fresh_bot5_pnl.csv"
 
 SHEET_ID  = os.getenv("GOOGLE_SHEET_ID", "1X9EVZBcMUvRuloX2fi71SajlbpmVglSzAhfdsN6AGk4")
 
@@ -140,59 +140,47 @@ def connect_sheet():
         creds_dict = json.loads(creds_json)
         scopes     = ["https://www.googleapis.com/auth/spreadsheets"]
         creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client     = gspread.authorize(creds)
-        sheet      = client.open_by_key(SHEET_ID).sheet1
-        # Write headers if sheet is empty
-        if sheet.row_count == 0 or not sheet.get_all_values():
-            sheet.append_row([
-                "datetime", "asset", "window", "side",
-                "buy_shares", "buy_price", "buy_cost",
-                "ins_shares", "ins_price", "ins_cost",
-                "sell_shares", "sell_price", "sell_revenue",
-                "ins_result", "ins_revenue",
-                "status", "pnl_usdc", "running_total"
-            ])
+        gc         = gspread.authorize(creds)
+        sheet      = gc.open_by_key(SHEET_ID).sheet1
         log.info("Google Sheets connected!")
         return sheet
     except Exception as e:
-        log.error(f"Google Sheets error: {e}")
+        log.error(f"Google Sheets connect error: {e}")
         return None
 
 
-def sheet_update_row(sheet, trade):
-    """Find and update existing row or append new one."""
+def sheet_full_sync(sheet, trades):
+    """Wipe sheet and rewrite all trades from scratch — always accurate."""
     if sheet is None:
         return
     try:
-        running = 0.0
-        all_rows = sheet.get_all_values()
-        # Calculate running total
-        for row in all_rows[1:]:
-            if len(row) >= 17 and row[16] not in ("OPEN", "pnl_usdc", ""):
-                try:
-                    running = round(running + float(row[16]), 4)
-                except Exception:
-                    pass
-        running = round(running + trade["pnl_usdc"], 4) if trade["status"] != "OPEN" else 0
-
-        new_row = [
-            trade["datetime"], trade["asset"], trade["window"], trade["side"],
-            trade["buy_shares"], trade["buy_price"], trade["buy_cost"],
-            trade["ins_shares"], trade["ins_price"], trade["ins_cost"],
-            trade["sell_shares"], trade["sell_price"], trade["sell_revenue"],
-            trade["ins_result"], trade["ins_revenue"],
-            trade["status"], trade["pnl_usdc"],
-            running if trade["status"] != "OPEN" else "OPEN"
+        headers = [
+            "datetime", "asset", "window", "side",
+            "buy_shares", "buy_price", "buy_cost",
+            "ins_shares", "ins_price", "ins_cost",
+            "sell_shares", "sell_price", "sell_revenue",
+            "ins_result", "ins_revenue",
+            "status", "pnl_usdc", "running_total"
         ]
-        # Try to find existing row by window+asset+side
-        for i, row in enumerate(all_rows[1:], start=2):
-            if len(row) >= 4 and str(row[2]) == str(trade["window"]) and row[1] == trade["asset"] and row[3] == trade["side"]:
-                sheet.update(f"A{i}:R{i}", [new_row])
-                return
-        # Not found — append
-        sheet.append_row(new_row)
+        rows    = [headers]
+        running = 0.0
+        for t in trades:
+            if t["status"] != "OPEN":
+                running = round(running + t["pnl_usdc"], 4)
+            rows.append([
+                t["datetime"], t["asset"], t["window"], t["side"],
+                t["buy_shares"], t["buy_price"], t["buy_cost"],
+                t["ins_shares"], t["ins_price"], t["ins_cost"],
+                t["sell_shares"], t["sell_price"], t["sell_revenue"],
+                t["ins_result"], t["ins_revenue"],
+                t["status"], t["pnl_usdc"],
+                running if t["status"] != "OPEN" else "OPEN"
+            ])
+        sheet.clear()
+        sheet.update("A1", rows)
+        log.info(f"  Sheets | Synced {len(trades)} trades to Google Sheets ✓")
     except Exception as e:
-        log.error(f"Sheet update error: {e}")
+        log.error(f"Sheet sync error: {e}")
 
 # ── PnL Tracker ───────────────────────────────────────────────────────────────
 
@@ -391,9 +379,9 @@ class PnLTracker:
                     t["status"], t["pnl_usdc"],
                     running if t["status"] != "OPEN" else "OPEN"
                 ])
-        # Sync latest trade to Google Sheets
-        if self.sheet and self.trades:
-            sheet_update_row(self.sheet, self.trades[-1])
+        # Sync all trades to Google Sheets
+        if self.sheet:
+            sheet_full_sync(self.sheet, self.trades)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
