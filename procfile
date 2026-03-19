@@ -1,1 +1,1 @@
-worker: python -u all15m_bot2.py
+worker: python -u fresh_bot3.py
