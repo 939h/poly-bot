@@ -112,7 +112,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.95    # Sell main shares at 95c
+SELL_PRICE      = 0.99    # Sell main shares at 95c
 INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
