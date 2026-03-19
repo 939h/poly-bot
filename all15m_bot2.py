@@ -110,12 +110,12 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
-BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
+BUY_PRICE_MIN   = 0.5     # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
 SELL_PRICE      = 0.98    # Sell main shares at 98c
 INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+ENTRY_AFTER     = 6       #Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
