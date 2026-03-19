@@ -177,7 +177,7 @@ def sheet_full_sync(sheet, trades):
                 running if t["status"] != "OPEN" else "OPEN"
             ])
         sheet.clear()
-        sheet.update("A1", rows)
+        sheet.update(rows, "A1")
         log.info(f"  Sheets | Synced {len(trades)} trades to Google Sheets ✓")
     except Exception as e:
         log.error(f"Sheet sync error: {e}")
