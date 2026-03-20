@@ -604,7 +604,7 @@ def run():
                                     pnl.record_insurance(idx, INS_SHARES, opp_price)
                                     pos["ins_bought"] = True
 
-                        # Cut loss at 50% of buy price — then flip to opposite side
+                        # Cut loss at 50% of buy price — then flip to opposite side (once only)
                         buy_price      = pnl.trades[idx]["buy_price"]
                         cut_loss_price = round(buy_price * 0.50, 4)
                         if price <= cut_loss_price:
@@ -614,24 +614,28 @@ def run():
                                 pnl.record_sell(idx, sp, "CUT-LOSS")
                                 positions.remove(pos)
 
-                                # ── Flip to opposite side immediately ─────────
-                                opp_side  = "NO" if side == "YES" else "YES"
-                                opp_price = get_midpoint(client, opp_id)
-                                log.info(f"  [{pos_asset.upper()}] FLIP → buying {opp_side} @ {opp_price:.2%}")
-                                flip_fill = market_buy(client, opp_id, BUY_SHARES, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
-                                if flip_fill is not None:
-                                    flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_SHARES, flip_fill)
-                                    positions.append({
-                                        "trade_idx": flip_idx,
-                                        "side":       opp_side,
-                                        "ins_bought": False,
-                                    })
-                                    pending.setdefault(pos_key, []).append({
-                                        "trade_idx": flip_idx,
-                                        "asset":     pos_asset,
-                                        "side":      opp_side,
-                                    })
-                                    log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
+                                # ── Flip to opposite side — only if not already a flip ─────────
+                                if not pos.get("is_flip"):
+                                    opp_side  = "NO" if side == "YES" else "YES"
+                                    opp_price = get_midpoint(client, opp_id)
+                                    log.info(f"  [{pos_asset.upper()}] FLIP → buying {opp_side} @ {opp_price:.2%}")
+                                    flip_fill = market_buy(client, opp_id, BUY_SHARES, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
+                                    if flip_fill is not None:
+                                        flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_SHARES, flip_fill)
+                                        positions.append({
+                                            "trade_idx": flip_idx,
+                                            "side":       opp_side,
+                                            "ins_bought": False,
+                                            "is_flip":    True,  # no more flipping from this position
+                                        })
+                                        pending.setdefault(pos_key, []).append({
+                                            "trade_idx": flip_idx,
+                                            "asset":     pos_asset,
+                                            "side":      opp_side,
+                                        })
+                                        log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
+                                else:
+                                    log.info(f"  [{pos_asset.upper()} {side}] Already flipped once — no more flips this window")
                             continue
 
                         # Sell main at 95c
@@ -678,7 +682,7 @@ def run():
                     if fill is not None:
                         idx = pnl.record_buy(asset, window_start, "YES", BUY_SHARES, fill)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "ins_bought": False})
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "ins_bought": False, "is_flip": False})
                         traded.add(key)
 
                 elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
@@ -687,7 +691,7 @@ def run():
                     if fill is not None:
                         idx = pnl.record_buy(asset, window_start, "NO", BUY_SHARES, fill)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "ins_bought": False})
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "ins_bought": False, "is_flip": False})
                         traded.add(key)
 
         except KeyboardInterrupt:
