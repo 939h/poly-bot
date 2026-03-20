@@ -21,8 +21,10 @@ import json
 import time
 import logging
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+MYT = timezone(timedelta(hours=8))  # Malaysia Time UTC+8
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -113,8 +115,8 @@ BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
 SELL_PRICE      = 0.98    # Sell main shares at 98c
-INS_SHARES      = 20      # Insurance shares (opposite side)
-INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
+INS_SHARES      = 0      # Insurance shares (opposite side)
+INS_MAX_PRICE   = 0   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
@@ -247,7 +249,7 @@ class PnLTracker:
         cost     = round(shares * price, 4)
         ins_cost = round(ins_shares * ins_price, 4)
         trade = {
-            "datetime":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "datetime":     datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S MYT"),
             "asset":        asset,
             "window":       window,
             "side":         side,
@@ -618,22 +620,25 @@ def run():
                                 if not pos.get("is_flip"):
                                     opp_side  = "NO" if side == "YES" else "YES"
                                     opp_price = get_midpoint(client, opp_id)
-                                    log.info(f"  [{pos_asset.upper()}] FLIP → buying {opp_side} @ {opp_price:.2%}")
-                                    flip_fill = market_buy(client, opp_id, BUY_SHARES, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
-                                    if flip_fill is not None:
-                                        flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_SHARES, flip_fill)
-                                        positions.append({
-                                            "trade_idx": flip_idx,
-                                            "side":       opp_side,
-                                            "ins_bought": False,
-                                            "is_flip":    True,  # no more flipping from this position
-                                        })
-                                        pending.setdefault(pos_key, []).append({
-                                            "trade_idx": flip_idx,
-                                            "asset":     pos_asset,
-                                            "side":      opp_side,
-                                        })
-                                        log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
+                                    if opp_price >= 0.75:
+                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped — {opp_side} @ {opp_price:.2%} too expensive (>=75c)")
+                                    else:
+                                        log.info(f"  [{pos_asset.upper()}] FLIP → buying {opp_side} @ {opp_price:.2%}")
+                                        flip_fill = market_buy(client, opp_id, BUY_SHARES, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
+                                        if flip_fill is not None:
+                                            flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_SHARES, flip_fill)
+                                            positions.append({
+                                                "trade_idx": flip_idx,
+                                                "side":       opp_side,
+                                                "ins_bought": False,
+                                                "is_flip":    True,
+                                            })
+                                            pending.setdefault(pos_key, []).append({
+                                                "trade_idx": flip_idx,
+                                                "asset":     pos_asset,
+                                                "side":      opp_side,
+                                            })
+                                            log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
                                 else:
                                     log.info(f"  [{pos_asset.upper()} {side}] Already flipped once — no more flips this window")
                             continue
