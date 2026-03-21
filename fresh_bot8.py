@@ -130,7 +130,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.98    # Sell main shares at 98c
+SELL_PRICE      = 0.999    # Sell main shares at 98c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
