@@ -130,7 +130,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.98    # Sell main shares at 98c
+SELL_PRICE      = 0.999    # Sell main shares at 99.9c (hold to resolution)
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
@@ -590,8 +590,8 @@ def run():
 
                 yes_token, no_token = tokens
 
-                # ── Record orderbook to Google Sheets (min 10-15 only) ───────
-                if secs_into >= ENTRY_AFTER:
+                # ── Record orderbook to Google Sheets (min 10-15 only, within window) ───────
+                if ENTRY_AFTER <= secs_into <= WINDOW_SECS:
                     yes_price_ob = get_midpoint(client, yes_token)
                     no_price_ob  = get_midpoint(client, no_token)
                     if yes_price_ob > 0 and no_price_ob > 0:
@@ -643,7 +643,7 @@ def run():
                                 if sp is not None:
                                     ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                              f"*** SELL FLIP {side} @ {price:.2%} ***")
-                                    pnl.record_sell(idx, sp, "SOLD-98c")
+                                    pnl.record_sell(idx, sp, "SOLD-99c")
                                     positions.remove(pos)
                             continue
 
@@ -701,22 +701,26 @@ def run():
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** SELL {side} @ {price:.2%} ***")
-                                pnl.record_sell(idx, sp, "SOLD-98c")
+                                pnl.record_sell(idx, sp, "SOLD-99c")
                                 positions.remove(pos)
 
-                    # Resolve closed windows
+                    # Resolve closed windows — only if market has officially resolved
+                    # (price monitoring above continues to sell at 99.9c even after window)
                     if server_ts > pos_window + WINDOW_SECS + 30:
                         try:
                             mkt = fetch_market_by_slug(build_slug(pos_asset, pos_window))
                             if mkt:
                                 result = mkt.get("result") or mkt.get("winner") or mkt.get("resolutionResult")
                                 if result:
-                                    for pos in list(positions):
+                                    # Only resolve positions that haven't already sold at 99.9c
+                                    remaining = [p for p in list(positions) if p in positions]
+                                    for pos in remaining:
                                         won = (result.strip().upper() == pos["side"].upper())
                                         pnl.record_resolved(pos["trade_idx"], won)
-                                    del active_positions[pos_key]
-                                    if pos_key in pending:
-                                        del pending[pos_key]
+                                    if remaining:
+                                        del active_positions[pos_key]
+                                        if pos_key in pending:
+                                            del pending[pos_key]
                         except Exception as e:
                             log.error(f"  Resolution error: {e}")
 
