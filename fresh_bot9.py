@@ -130,9 +130,9 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
-SELL_PRICE      = 0.999    # Sell main shares at 99.9c (hold to resolution)
+SELL_PRICE      = 0.97    # Sell main shares at 99.9c (hold to resolution)
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
-STOP_BUY_AT     = 780     # Stop buying after 14 minutes (840s)
+STOP_BUY_AT     = 780     # Stop buying after 13 minutes (720s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
 
@@ -198,15 +198,17 @@ def sheet_full_sync(sheet, trades):
 
 
 def get_or_create_orderbook_sheet(gc_client):
-    """Get or create the Orderbook tab in the same Google Sheet."""
+    """Get or create the Orderbook tab — clears old data on startup."""
     try:
         spreadsheet = gc_client.open_by_key(SHEET_ID)
         try:
             ob_sheet = spreadsheet.worksheet("Orderbook")
         except Exception:
             ob_sheet = spreadsheet.add_worksheet(title="Orderbook", rows=10000, cols=6)
-            ob_sheet.update([["datetime", "asset", "yes_price", "no_price", "event", "pnl_usdc"]], "A1")
-            log.info("  Sheets | Created Orderbook tab ✓")
+        # Always clear and reset headers on startup
+        ob_sheet.clear()
+        ob_sheet.update([["time", "asset", "yes", "no", "event", "pnl"]], "A1")
+        log.info("  Sheets | Orderbook tab cleared and ready ✓")
         return ob_sheet
     except Exception as e:
         log.error(f"Orderbook sheet error: {e}")
@@ -220,7 +222,7 @@ _ob_sheet  = None
 def ob_record(asset, yes_price, no_price, event="", pnl=0.0):
     """Add a row to the orderbook buffer."""
     global _ob_buffer
-    now = datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(MYT).strftime("%m/%d %H:%M:%S")  # shorter: 03/21 19:25:01
     _ob_buffer.append([
         now,
         asset.upper(),
