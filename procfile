@@ -1,1 +1,1 @@
-worker: python -u fresh_bot8.py
+worker: python -u fresh_bot10.py
