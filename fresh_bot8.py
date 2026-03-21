@@ -1,17 +1,33 @@
 """
 Polymarket 15-Min Up/Down Bot — Fresh v8
 Markets: BTC, ETH, SOL, XRP
-With Google Sheets PnL + Railway deployment
 
 Strategy:
-  1. Buy YES or NO if price hits 80-85c between min 10-14
-  2. Watch opposite side — buy 20 insurance shares when opposite <= 1.5c
-  3. Sell insurance at 20c
-  4. Sell main shares at 95c, cut loss at 50% of buy price
-  5. Orderbook recorded silently to log file
+  1. BUY — enter YES or NO when price hits 80-85c between min 10-14 of window
+  2. SELL — exit at 98c (target)
+  3. CUT LOSS — sell if price drops to 50% of buy price
+  4. FLIP — after cut loss, immediately buy opposite side IF:
+             opposite side is between 60c and 75c (sweet spot)
+             below 60c = too risky/chaotic, skip
+             above 75c = too expensive, skip
+             only flip once per window (no chain flipping)
+  5. ORDERBOOK — record every second price to Google Sheets Sheet2 (min 10-15 only)
+  6. PNL — synced live to Google Sheets Sheet1
+
+PnL status values:
+  OPEN          = active normal trade
+  OPEN-FLIP     = active flip trade
+  SOLD-98c      = sold at 98c target
+  SOLD-98c-FLIP = flip trade sold at 98c target
+  CUT-LOSS      = cut loss on normal trade (flip may follow)
+  CUT-LOSS-FLIP = cut loss on flip trade (no more flips)
+  WIN           = held to resolution, won
+  WIN-FLIP      = flip trade won at resolution
+  LOSS          = held to resolution, lost
+  LOSS-FLIP     = flip trade lost at resolution
 
 Requirements:
-    pip install py-clob-client python-dotenv requests colorama gspread
+    pip install py-clob-client python-dotenv requests colorama gspread google-auth
 """
 
 import os
@@ -610,11 +626,39 @@ def run():
                         price    = get_midpoint(client, token_id)
                         if price <= 0:
                             continue
-                        # Cut loss at 50% of buy price — then flip to opposite side (once only)
+
                         buy_price      = pnl.trades[idx]["buy_price"]
                         cut_loss_price = round(buy_price * 0.50, 4)
+                        recover_price  = round(buy_price * 0.55, 4)  # recovery threshold
+
+                        # ── 30-second cut loss confirmation ───────────────────
                         if price <= cut_loss_price:
-                            log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%} cut @ {cut_loss_price:.2%})")
+                            now_ts = int(time.time())
+
+                            if "cut_loss_triggered_at" not in pos:
+                                # First time hitting threshold — start timer
+                                pos["cut_loss_triggered_at"] = now_ts
+                                log.info(f"  [{pos_asset.upper()} {side}] Price {price:.2%} hit 50% — starting 30s confirmation timer...")
+                                ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                         f"CUT-LOSS PENDING {side} @ {price:.2%} — watching 30s")
+                                continue
+
+                            secs_since_trigger = now_ts - pos["cut_loss_triggered_at"]
+
+                            if secs_since_trigger < 30:
+                                # Still in confirmation window — check if recovering
+                                if price >= recover_price:
+                                    # Price bounced back above 55% — cancel cut
+                                    log.info(f"  [{pos_asset.upper()} {side}] Price recovered to {price:.2%} — cut loss CANCELLED, holding")
+                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                             f"CUT-LOSS CANCELLED {side} — recovered to {price:.2%}")
+                                    del pos["cut_loss_triggered_at"]
+                                else:
+                                    log.info(f"  [{pos_asset.upper()} {side}] Still below 50% @ {price:.2%} — {30-secs_since_trigger}s left...")
+                                continue
+
+                            # 30 seconds passed — price still below 50%, execute cut
+                            log.info(f"  [{pos_asset.upper()} {side}] 30s confirmed — executing CUT LOSS @ {price:.2%}")
                             sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}")
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
@@ -626,7 +670,11 @@ def run():
                                 if not pos.get("is_flip"):
                                     opp_side  = "NO" if side == "YES" else "YES"
                                     opp_price = get_midpoint(client, opp_id)
-                                    if opp_price >= 0.75:
+                                    if opp_price < 0.60:
+                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped — {opp_side} @ {opp_price:.2%} too cheap (<60c, too risky)")
+                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                                 f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too cheap")
+                                    elif opp_price >= 0.75:
                                         log.info(f"  [{pos_asset.upper()}] FLIP skipped — {opp_side} @ {opp_price:.2%} too expensive (>=75c)")
                                         ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                                  f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too expensive")
@@ -652,6 +700,18 @@ def run():
                                             log.info(f"  [{pos_asset.upper()}] FLIP complete — now holding {opp_side} @ {flip_fill:.2%}")
                                 else:
                                     log.info(f"  [{pos_asset.upper()} {side}] Already flipped once — no more flips this window")
+                            continue
+
+                        # ── Flip trade — hold to 98c or resolution, no cut loss ─
+                        if pos.get("is_flip"):
+                            if price >= SELL_PRICE:
+                                log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
+                                sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}-FLIP")
+                                if sp is not None:
+                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                             f"*** SELL FLIP {side} @ {price:.2%} ***")
+                                    pnl.record_sell(idx, sp, "SOLD-98c")
+                                    positions.remove(pos)
                             continue
 
                         # Sell main at 98c
