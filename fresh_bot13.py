@@ -523,6 +523,40 @@ def market_sell(client, token_id, shares, price, label):
         log.error(f"  MARKET SELL failed ({label}): {e}")
         return None
 
+def resolve_pending_on_startup(pnl):
+    """On restart, load CSV and resolve any OPEN trades whose windows have closed."""
+    unresolved = pnl.load_from_csv()
+    if not unresolved:
+        return {}
+    grouped = {}
+    for item in unresolved:
+        key = (item["asset"], item["window"])
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(item)
+    live_pending = {}
+    server_ts = get_server_time()
+    for (asset, w), items in grouped.items():
+        if server_ts < w + WINDOW_SECS + 30:
+            live_pending[(asset, w)] = items
+            continue
+        try:
+            mkt = fetch_market_by_slug(build_slug(asset, w))
+            if mkt:
+                result = mkt.get("result") or mkt.get("winner") or mkt.get("resolutionResult")
+                if result:
+                    for item in items:
+                        won = (result.strip().upper() == item["side"].upper())
+                        pnl.record_resolved(item["trade_idx"], won)
+                else:
+                    live_pending[(asset, w)] = items
+            else:
+                live_pending[(asset, w)] = items
+        except Exception:
+            live_pending[(asset, w)] = items
+    return live_pending
+
+
 def build_redeem_service(clob_client):
     """Build PolyWeb3Service for redeem operations. Returns None if not configured."""
     if not POLY_WEB3_OK:
