@@ -47,11 +47,11 @@ CTF_ABI = [{
     "outputs": []
 }]
 
-def send_tx(w3, contract_func, account, private_key, desc):
+def send_tx(w3, contract_func, account, private_key, desc, nonce):
     try:
         tx = contract_func.build_transaction({
             "from":     account,
-            "nonce":    w3.eth.get_transaction_count(account),
+            "nonce":    nonce,
             "gas":      100000,
             "gasPrice": w3.eth.gas_price,
         })
@@ -84,10 +84,11 @@ def main():
     ctf  = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS),  abi=CTF_ABI)
     neg  = w3.eth.contract(address=Web3.to_checksum_address(NEG_RISK_ADDRESS), abi=CTF_ABI)
 
-    send_tx(w3, usdc.functions.approve(CTF_ADDRESS, MAX_INT),      account, PRIVATE_KEY, "USDC approve -> CTF Exchange")
-    send_tx(w3, usdc.functions.approve(NEG_RISK_ADDRESS, MAX_INT), account, PRIVATE_KEY, "USDC approve -> Neg Risk Adapter")
-    send_tx(w3, ctf.functions.setApprovalForAll(CTF_ADDRESS, True),      account, PRIVATE_KEY, "CTF setApprovalForAll -> CTF Exchange")
-    send_tx(w3, neg.functions.setApprovalForAll(NEG_RISK_ADDRESS, True), account, PRIVATE_KEY, "CTF setApprovalForAll -> Neg Risk Adapter")
+    nonce = w3.eth.get_transaction_count(account)
+    send_tx(w3, usdc.functions.approve(CTF_ADDRESS, MAX_INT),           account, PRIVATE_KEY, "USDC approve -> CTF Exchange",        nonce)
+    send_tx(w3, usdc.functions.approve(NEG_RISK_ADDRESS, MAX_INT),      account, PRIVATE_KEY, "USDC approve -> Neg Risk Adapter",    nonce+1)
+    send_tx(w3, ctf.functions.setApprovalForAll(CTF_ADDRESS, True),     account, PRIVATE_KEY, "CTF setApprovalForAll -> CTF Exchange", nonce+2)
+    send_tx(w3, ctf.functions.setApprovalForAll(NEG_RISK_ADDRESS, True),account, PRIVATE_KEY, "CTF setApprovalForAll -> Neg Risk",   nonce+3)
 
     print("\nDone! You can now trade on Polymarket.")
 
