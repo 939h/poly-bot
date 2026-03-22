@@ -22,6 +22,8 @@ PUBLIC_KEY  = os.getenv("POLY_FUNDER_ADDRESS")
 
 # Polymarket contract addresses on Polygon
 USDC_ADDRESS     = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon
+CTF_ADDRESS      = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"  # CTF Exchange
+NEG_RISK_ADDRESS = "0xC5d563A36AE78145C45a50134d48A1215220f80a"  # Neg Risk Adapter
 
 MAX_INT = 2**256 - 1
 
@@ -62,6 +64,13 @@ def send_tx(w3, contract_func, account, private_key, desc):
         print(f"  {desc} -> ERROR: {e}")
 
 def main():
+    if not PRIVATE_KEY:
+        print("ERROR: POLY_PRIVATE_KEY not set in Railway Variables")
+        return
+    if not PUBLIC_KEY:
+        print("ERROR: POLY_FUNDER_ADDRESS not set in Railway Variables")
+        return
+
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     if not w3.is_connected():
         print("Failed to connect to Polygon RPC")
