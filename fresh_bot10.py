@@ -125,9 +125,9 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = False
+DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol"]
-BUY_SHARES      = 5
+BUY_SHARES      = 10
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
 SELL_PRICE      = 0.97     # Sell main shares at 97c
@@ -477,7 +477,7 @@ def build_client():
             api_secret=api_sec,
             api_passphrase=api_pass,
         ),
-        signature_type=0, funder=funder or None,
+        signature_type=1, funder=funder or None,
     )
     log.info("Connected to Polymarket CLOB.")
     return client
