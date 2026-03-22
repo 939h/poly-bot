@@ -1,1 +1,1 @@
-worker: python -u fresh_bot10.py
+worker: python approve.py
