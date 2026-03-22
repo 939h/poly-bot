@@ -1,6 +1,6 @@
 """
 Polymarket 15-Min Up/Down Bot — Fresh v10
-Markets: BTC, ETH, SOL, XRP
+Markets: BTC, ETH, SOL
 
 Strategy:
   1. BUY — enter YES or NO when price hits 80-85c between min 10-14 of window
@@ -17,8 +17,8 @@ Strategy:
 PnL status values:
   OPEN          = active normal trade
   OPEN-FLIP     = active flip trade
-  SOLD-98c      = sold at 98c target
-  SOLD-98c-FLIP = flip trade sold at 98c target
+  SOLD-99c      = sold at 99c target
+  SOLD-99c-FLIP = flip trade sold at 99c target
   CUT-LOSS      = cut loss on normal trade (flip may follow)
   CUT-LOSS-FLIP = cut loss on flip trade (no more flips)
   WIN           = held to resolution, won
@@ -125,9 +125,9 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = True
-ASSETS          = ["btc", "eth", "sol", "xrp"]
-BUY_SHARES      = 10
+DRY_RUN         = false
+ASSETS          = ["btc", "eth", "sol"]
+BUY_SHARES      = 5
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
 SELL_PRICE      = 0.97     # Sell main shares at 97c
@@ -321,7 +321,7 @@ class PnLTracker:
         self._rewrite()
         return len(self.trades) - 1
 
-    def record_sell(self, trade_idx, price, reason="SOLD-98c"):
+    def record_sell(self, trade_idx, price, reason="SOLD-99c"):
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
@@ -333,11 +333,10 @@ class PnLTracker:
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
-        # Append FLIP suffix if this was a flip trade
-        if t["status"] == "OPEN-FLIP":
-            t["status"] = reason + "-FLIP"
-        else:
-            t["status"] = reason
+        # Append -FLIP suffix only if this was a flip trade and reason doesn't already have it
+        is_flip = t["status"] == "OPEN-FLIP"
+        base    = reason.replace("-FLIP", "")  # strip any accidental -FLIP from reason
+        t["status"] = (base + "-FLIP") if is_flip else base
         log.info(f"  PnL | [{t['asset'].upper()}] {t['status']} {t['buy_shares']} {t['side']} @ {price:.2%} | pnl={'+' if pnl>=0 else ''}{pnl:.4f} USDC")
         self._rewrite()
 
@@ -640,22 +639,12 @@ def run():
                         if price <= 0:
                             continue
 
-                        # Flip trade — sell at 98c or cut at 2c, no 50% cut loss
+                        # Flip trade — sell at 99c only, NO cut loss, hold to resolution
                         if pos.get("is_flip"):
-                            if price <= 0.02:
-                                log.info(f"  [{pos_asset.upper()} {side}] FLIP CUT @ {price:.2%} (<=2c)")
-                                sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}-FLIP")
-                                if sp is not None:
-                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                             f"*** FLIP CUT {side} @ {price:.2%} ***")
-                                    pnl.record_sell(idx, sp, "CUT-LOSS-FLIP")
-                                    positions.remove(pos)
-                            elif price >= SELL_PRICE:
+                            if price >= SELL_PRICE:
                                 log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
                                 sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}-FLIP")
                                 if sp is not None:
-                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                             f"*** SELL FLIP {side} @ {price:.2%} ***")
                                     pnl.record_sell(idx, sp, "SOLD-99c")
                                     positions.remove(pos)
                             continue
