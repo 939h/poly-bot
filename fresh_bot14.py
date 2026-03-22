@@ -473,18 +473,25 @@ def get_midpoint(client, token_id):
     except Exception:
         return 0.0
 
-def get_token_balance(client, token_id):
-    """Get actual shares held for a specific token from live positions."""
-    try:
-        positions = client.get_positions()
-        for pos in positions:
-            tid = pos.get("asset", {}).get("token_id") or pos.get("token_id", "")
-            if tid == token_id:
-                return round(float(pos["size"]), 4)
-        return 0.0
-    except Exception as e:
-        log.error(f"  get_positions failed: {e}")
-        return None
+def get_token_balance(client, token_id, retries=3):
+    """Get actual shares held for a specific token from live positions. Retries on zero."""
+    for attempt in range(retries):
+        try:
+            positions = client.get_positions()
+            for pos in positions:
+                tid = pos.get("asset", {}).get("token_id") or pos.get("token_id", "")
+                if tid == token_id:
+                    bal = round(float(pos["size"]), 4)
+                    if bal > 0:
+                        return bal
+            if attempt < retries - 1:
+                log.warning(f"  get_positions: token not found (attempt {attempt+1}/{retries}), retrying...")
+                time.sleep(1)
+        except Exception as e:
+            log.error(f"  get_positions failed (attempt {attempt+1}): {e}")
+            if attempt < retries - 1:
+                time.sleep(1)
+    return 0.0
 
 def build_client():
     pk       = os.getenv("POLY_PRIVATE_KEY")
@@ -521,18 +528,20 @@ def market_buy(client, token_id, amount, price, label):
         log.error(f"  MARKET BUY failed ({label}): {e}")
         return None
 
-def market_sell(client, token_id, price, label):
-    """Sell 100% of actual shares held for token_id."""
+def market_sell(client, token_id, price, label, fallback_shares=None):
+    """Sell 100% of actual shares held. Falls back to fallback_shares if positions API returns 0."""
     if DRY_RUN:
-        log.info(f"  [DRY RUN] MARKET SELL {label} @ {price:.2%} (querying live balance)")
+        log.info(f"  [DRY RUN] MARKET SELL {label} @ {price:.2%}")
         return price
     actual = get_token_balance(client, token_id)
-    if actual is None:
-        log.error(f"  MARKET SELL skipped ({label}): could not fetch balance")
-        return None
     if actual <= 0:
-        log.warning(f"  MARKET SELL skipped ({label}): zero balance")
-        return None
+        if fallback_shares and fallback_shares > 0:
+            # Round down 2% as buffer to avoid overselling estimated shares
+            actual = round(fallback_shares * 0.98, 4)
+            log.warning(f"  MARKET SELL ({label}): get_positions=0, using fallback={actual} shares (98% of {fallback_shares})")
+        else:
+            log.error(f"  MARKET SELL skipped ({label}): zero balance and no fallback")
+            return None
     try:
         order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=actual, side=SELL))
         resp  = client.post_order(order, OrderType.FOK)
@@ -847,7 +856,8 @@ def run():
                         if pos.get("is_flip"):
                             if price >= SELL_PRICE:
                                 log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
-                                sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}-FLIP")
+                                fb = pnl.trades[idx]["buy_shares"]
+                                sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}-FLIP", fallback_shares=fb)
                                 if sp is not None:
                                     pnl.record_sell(idx, sp, "SOLD-99c")
                                     positions.remove(pos)
@@ -859,7 +869,8 @@ def run():
                         # Cut loss instantly at 50% of buy price
                         if price <= cut_loss_price:
                             log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%})")
-                            sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}")
+                            fb = pnl.trades[idx]["buy_shares"]
+                            sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}", fallback_shares=fb)
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** CUT-LOSS {side} @ {price:.2%} ***")
@@ -903,7 +914,8 @@ def run():
                         # Sell main at 97c
                         if price >= SELL_PRICE:
                             log.info(f"  [{pos_asset.upper()} {side}] TRIGGER SELL @ {price:.2%}!")
-                            sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}")
+                            fb = pnl.trades[idx]["buy_shares"]
+                            sp = market_sell(client, token_id, price, f"{pos_asset.upper()}-{side}", fallback_shares=fb)
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** SELL {side} @ {price:.2%} ***")
