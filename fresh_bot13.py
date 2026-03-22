@@ -62,6 +62,9 @@ try:
 except ImportError:
     POLY_WEB3_OK = False
     print("Warning: poly-web3 not installed — auto-redeem disabled. Run: pip install poly-web3")
+
+try:
+    import gspread
     from google.oauth2.service_account import Credentials
     GSHEETS_OK = True
 except ImportError:
