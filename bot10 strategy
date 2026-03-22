@@ -1,0 +1,43 @@
+Here's the full fresh_bot10.py strategy:
+
+Assets: BTC, ETH, SOL only (XRP removed)
+Entry
+
+Buy YES or NO when price hits 82-84c
+Only between minute 10-13 of each 15-min window
+One trade per asset per window
+
+Skip hours (MYT)
+
+02:30 - 03:59 — sleep 15 min
+21:00 - 22:59 — sleep 15 min
+All other hours trade normally
+
+Sell
+
+Target 97c — sell instantly when hit
+During or after window close — keeps monitoring
+
+Cut Loss (normal trade)
+
+Instantly cut if price drops to 50% of buy price
+e.g. bought 83c → cut at 41.5c
+
+Flip after cut loss
+
+Buy opposite side immediately
+Only if opposite is between 50-75c
+Below 50c → skip
+Above 75c → skip
+Only flip once per window
+
+Flip trade rules
+
+No cut loss on flip trades
+Sell at 97c if hit
+Hold to resolution otherwise — can go to 0c, no action
+
+Google Sheets
+
+Sheet1 — live PnL
+Sheet2 — orderbook (min 10-15 only, clears on redeploy)
