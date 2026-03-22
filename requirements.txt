@@ -5,3 +5,4 @@ colorama
 gspread
 google-auth
 web3
+poly-web3
