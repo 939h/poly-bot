@@ -16,7 +16,7 @@ from web3 import Web3
 load_dotenv()
 
 # Polygon RPC
-RPC_URL     = "https://polygon-rpc.com"
+RPC_URL     = "https://polygon-bor-rpc.publicnode.com"
 PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY")
 PUBLIC_KEY  = os.getenv("POLY_FUNDER_ADDRESS")
 
