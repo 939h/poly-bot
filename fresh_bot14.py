@@ -519,15 +519,14 @@ def market_buy(client, token_id, shares, price, label):
         return None, None
 
 def market_sell(client, token_id, shares, price, label):
-    # shares here = actual filled shares from buy, sell exact amount
-    amount = round(shares * price, 4)
+    # SELL side: amount = shares to sell (NOT USDC)
     if DRY_RUN:
-        log.info(f"  [DRY RUN] MARKET SELL {shares} {label} @ {price:.2%} = ${amount:.4f} USDC")
+        log.info(f"  [DRY RUN] MARKET SELL {shares} {label} @ {price:.2%} = ${round(shares*price,4):.4f} USDC est.")
         return price
     try:
-        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount, side=SELL))
+        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=shares, side=SELL))
         resp  = client.post_order(order, OrderType.FOK)
-        log.info(f"  MARKET SELL executed: {label} | {resp}")
+        log.info(f"  MARKET SELL executed: {label} | shares={shares} | {resp}")
         return price
     except Exception as e:
         log.error(f"  MARKET SELL failed ({label}): {e}")
