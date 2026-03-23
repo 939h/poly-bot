@@ -877,38 +877,35 @@ def run():
                                 pnl.record_sell(idx, sp, "CUT-LOSS")
                                 positions.remove(pos)
 
-                                # Flip to opposite side — only if not already a flip
-                                if not pos.get("is_flip"):
-                                    opp_side  = "NO" if side == "YES" else "YES"
-                                    opp_price = get_midpoint(client, opp_id)
-                                    if opp_price < 0.50:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too cheap (<50c)")
-                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                 f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too cheap")
-                                    elif opp_price >= 0.75:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too expensive (>=75c)")
-                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                 f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too expensive")
-                                    else:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP -> buying {opp_side} @ {opp_price:.2%}")
-                                        flip_fill = market_buy(client, opp_id, BUY_AMOUNT, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
-                                        if flip_fill is not None:
-                                            ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                     f"*** FLIP BUY {opp_side} @ {opp_price:.2%} ***")
-                                            flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_AMOUNT, flip_fill, "OPEN-FLIP")
-                                            positions.append({
-                                                "trade_idx": flip_idx,
-                                                "side":      opp_side,
-                                                "is_flip":   True,
-                                            })
-                                            pending.setdefault(pos_key, []).append({
-                                                "trade_idx": flip_idx,
-                                                "asset":     pos_asset,
-                                                "side":      opp_side,
-                                            })
-                                            log.info(f"  [{pos_asset.upper()}] FLIP complete -- now holding {opp_side} @ {flip_fill:.2%}")
+                                # Flip to opposite side
+                                opp_side  = "NO" if side == "YES" else "YES"
+                                opp_price = get_midpoint(client, opp_id)
+                                if opp_price < 0.50:
+                                    log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too cheap (<50c)")
+                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                             f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too cheap")
+                                elif opp_price >= 0.75:
+                                    log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too expensive (>=75c)")
+                                    ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                             f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too expensive")
                                 else:
-                                    log.info(f"  [{pos_asset.upper()} {side}] Already flipped once -- no more flips this window")
+                                    log.info(f"  [{pos_asset.upper()}] FLIP -> buying {opp_side} @ {opp_price:.2%}")
+                                    flip_fill = market_buy(client, opp_id, BUY_AMOUNT, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
+                                    if flip_fill is not None:
+                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
+                                                 f"*** FLIP BUY {opp_side} @ {opp_price:.2%} ***")
+                                        flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_AMOUNT, flip_fill, "OPEN-FLIP")
+                                        positions.append({
+                                            "trade_idx": flip_idx,
+                                            "side":      opp_side,
+                                            "is_flip":   True,
+                                        })
+                                        pending.setdefault(pos_key, []).append({
+                                            "trade_idx": flip_idx,
+                                            "asset":     pos_asset,
+                                            "side":      opp_side,
+                                        })
+                                        log.info(f"  [{pos_asset.upper()}] FLIP complete -- now holding {opp_side} @ {flip_fill:.2%}")
                             continue
 
                         # Sell main at 97c
