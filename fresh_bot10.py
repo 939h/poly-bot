@@ -130,7 +130,7 @@ ASSETS          = ["btc"]
 BUY_SHARES      = 2
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
-SELL_PRICE      = 0.97     # Sell main shares at 97c
+SELL_PRICE      = 0.95     # Sell main shares at 97c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
