@@ -126,7 +126,7 @@ def record_orderbook(asset, yes_price, no_price):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 DRY_RUN         = True
-ASSETS          = ["btc", "eth", "sol"]
+ASSETS          = ["btc",]
 BUY_SHARES      = 5
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
