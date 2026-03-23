@@ -129,10 +129,10 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = True
 ASSETS          = ["eth"]
 BUY_AMOUNT      = 1       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
-BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
-SELL_PRICE      = 0.88     # Sell main shares at 97c
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+BUY_PRICE_MIN   = 0.50    # Buy if price >= 80c
+BUY_PRICE_MAX   = 0.55    # Buy if price <= 85c
+SELL_PRICE      = 0.60     # Sell main shares at 97c
+ENTRY_AFTER     = 1     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
