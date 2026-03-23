@@ -130,8 +130,8 @@ DRY_RUN         = False
 ASSETS          = ["eth"]
 BUY_AMOUNT      = 1       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.75    # Buy if price >= 80c
-BUY_PRICE_MAX   = 0.80    # Buy if price <= 85c
-SELL_PRICE      = 0.81     # Sell main shares at 97c
+BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
+SELL_PRICE      = 0.86     # Sell main shares at 97c
 ENTRY_AFTER     = 360     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
