@@ -125,13 +125,13 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = True
-ASSETS          = ["btc",]
-BUY_SHARES      = 5
-BUY_PRICE_MIN   = 0.72    # Buy if price >= 80c
+DRY_RUN         = False
+ASSETS          = ["btc"]
+BUY_SHARES      = 2
+BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
 SELL_PRICE      = 0.97     # Sell main shares at 97c
-ENTRY_AFTER     = 1     # Start buying after 10 minutes (600s)
+ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
@@ -661,10 +661,20 @@ def run():
                         buy_price      = pnl.trades[idx]["buy_price"]
                         cut_loss_price = round(buy_price * 0.50, 4)
 
-                        # Cut loss instantly at 50% of buy price
+                        # Cut loss instantly at 50% of buy price — retry up to 3 times
                         if price <= cut_loss_price:
                             log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%})")
-                            sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}")
+                            sp = None
+                            for attempt in range(3):
+                                retry_price = get_midpoint(client, token_id)
+                                if retry_price <= 0:
+                                    retry_price = price
+                                sp = market_sell(client, token_id, BUY_SHARES, retry_price, f"{pos_asset.upper()}-{side}")
+                                if sp is not None:
+                                    break
+                                if attempt < 2:
+                                    log.warning(f"  [{pos_asset.upper()} {side}] CUT LOSS sell failed, retrying ({attempt+2}/3)...")
+                                    time.sleep(1)
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** CUT-LOSS {side} @ {price:.2%} ***")
