@@ -128,10 +128,10 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
-BUY_AMOUNT      = 1       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
+BUY_AMOUNT      = 2       # USDC to spend per trade
+BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.95    # Sell main shares at 97c
+SELL_PRICE      = 0.99    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
