@@ -127,12 +127,12 @@ def record_orderbook(asset, yes_price, no_price):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 DRY_RUN         = False
-ASSETS          = ["btc", "eth", "sol"]
+ASSETS          = ["eth"]
 BUY_AMOUNT      = 1       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
-BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
-SELL_PRICE      = 0.95     # Sell main shares at 97c
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+BUY_PRICE_MIN   = 0.72    # Buy if price >= 80c
+BUY_PRICE_MAX   = 0.80    # Buy if price <= 85c
+SELL_PRICE      = 0.82     # Sell main shares at 97c
+ENTRY_AFTER     = 300     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
@@ -513,14 +513,17 @@ def market_buy(client, token_id, shares, price, label):
         return None, None
 
 def market_sell(client, token_id, shares, price, label):
-    amount = round(shares * price, 4)
+    # SELL side: amount = shares to sell directly (NOT USDC)
+    sell_amount = math.floor(shares * 100) / 100  # floor to 2dp
+    if sell_amount <= 0:
+        sell_amount = shares
     if DRY_RUN:
-        log.info(f"  [DRY RUN] MARKET SELL {shares} {label} @ {price:.2%} = ${amount:.4f} USDC")
+        log.info(f"  [DRY RUN] MARKET SELL {sell_amount} {label} @ {price:.2%}")
         return price
     try:
-        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount, side=SELL))
+        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=sell_amount, side=SELL))
         resp  = client.post_order(order, OrderType.FOK)
-        log.info(f"  MARKET SELL executed: {label} | {resp}")
+        log.info(f"  MARKET SELL executed: {label} | shares={sell_amount} | {resp}")
         return price
     except Exception as e:
         log.error(f"  MARKET SELL failed ({label}): {e}")
