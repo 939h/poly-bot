@@ -47,7 +47,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds
+    from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds, BalanceAllowanceParams, AssetType
     from py_clob_client.order_builder.constants import BUY, SELL
     from py_clob_client.constants import POLYGON
 except ImportError:
@@ -131,7 +131,7 @@ ASSETS          = ["eth"]
 BUY_SHARES      = 2
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
-SELL_PRICE      = 0.95     # Sell main shares at 97c
+SELL_PRICE      = 0.92     # Sell main shares at 97c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
@@ -501,6 +501,13 @@ def market_buy(client, token_id, shares, price, label):
             except Exception:
                 pass
         log.info(f"  MARKET BUY executed: {label} | actual={actual} shares | {resp}")
+        # Refresh CLOB conditional token balance cache so sell works immediately
+        try:
+            client.update_balance_allowance(BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL, token_id=token_id
+            ))
+        except Exception:
+            pass
         return price, actual
     except Exception as e:
         log.error(f"  MARKET BUY failed ({label}): {e}")
@@ -660,6 +667,12 @@ def run():
                         if pos.get("is_flip"):
                             if price >= SELL_PRICE:
                                 log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
+                                try:
+                                    client.update_balance_allowance(BalanceAllowanceParams(
+                                        asset_type=AssetType.CONDITIONAL, token_id=token_id
+                                    ))
+                                except Exception:
+                                    pass
                                 sp = market_sell(client, token_id, pos.get("actual_shares", BUY_SHARES), price, f"{pos_asset.upper()}-{side}-FLIP")
                                 if sp is not None:
                                     pnl.record_sell(idx, sp, "SOLD-99c")
@@ -687,7 +700,9 @@ def run():
                                 if attempt < 2:
                                     log.warning(f"  [{pos_asset.upper()} {side}] CUT LOSS sell failed, retrying ({attempt+2}/3)...")
                                     try:
-                                        client.update_balance_allowance()
+                                        client.update_balance_allowance(BalanceAllowanceParams(
+                                            asset_type=AssetType.CONDITIONAL, token_id=token_id
+                                        ))
                                     except Exception:
                                         pass
                                     time.sleep(2)
@@ -732,10 +747,16 @@ def run():
                                     log.info(f"  [{pos_asset.upper()} {side}] Already flipped once -- no more flips this window")
                             continue
 
-                        # Sell main at 98c
+                        # Sell main at 97c
                         if price >= SELL_PRICE:
                             log.info(f"  [{pos_asset.upper()} {side}] TRIGGER SELL @ {price:.2%}!")
-                            sp = market_sell(client, token_id, BUY_SHARES, price, f"{pos_asset.upper()}-{side}")
+                            try:
+                                client.update_balance_allowance(BalanceAllowanceParams(
+                                    asset_type=AssetType.CONDITIONAL, token_id=token_id
+                                ))
+                            except Exception:
+                                pass
+                            sp = market_sell(client, token_id, pos.get("actual_shares", BUY_SHARES), price, f"{pos_asset.upper()}-{side}")
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** SELL {side} @ {price:.2%} ***")
