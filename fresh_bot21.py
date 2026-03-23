@@ -55,6 +55,16 @@ except ImportError:
     exit(1)
 
 try:
+    from py_builder_relayer_client.client import RelayClient
+    from py_builder_signing_sdk.config import BuilderConfig
+    from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+    from poly_web3 import RELAYER_URL, PolyWeb3Service
+    POLY_WEB3_OK = True
+except ImportError:
+    POLY_WEB3_OK = False
+    print("Warning: poly-web3 not installed — auto-redeem disabled")
+
+try:
     import gspread
     from google.oauth2.service_account import Credentials
     GSHEETS_OK = True
@@ -131,7 +141,7 @@ ASSETS          = ["btc", "eth", "sol"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.99    # Sell main shares at 97c
+SELL_PRICE      = 0.97    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
@@ -571,6 +581,98 @@ def resolve_pending_on_startup(pnl):
             live_pending[(asset, w)] = items
     return live_pending
 
+# ── Redeem Service ────────────────────────────────────────────────────────────
+
+def build_redeem_service(clob_client):
+    """Build PolyWeb3Service for auto-redeem. Returns None if not configured."""
+    if not POLY_WEB3_OK:
+        return None
+    builder_key  = os.getenv("POLY_BUILDER_API_KEY", "")
+    builder_sec  = os.getenv("POLY_BUILDER_SECRET", "")
+    builder_pass = os.getenv("POLY_BUILDER_PASSPHRASE", "")
+    if not all([builder_key, builder_sec, builder_pass]):
+        log.warning("Builder API keys not set — auto-redeem disabled")
+        return None
+    try:
+        relayer = RelayClient(
+            RELAYER_URL, POLYGON,
+            os.getenv("POLY_PRIVATE_KEY"),
+            BuilderConfig(
+                local_builder_creds=BuilderApiKeyCreds(
+                    key=builder_key,
+                    secret=builder_sec,
+                    passphrase=builder_pass,
+                )
+            ),
+        )
+        service = PolyWeb3Service(clob_client=clob_client, relayer_client=relayer)
+        log.info("Auto-redeem service ready ✓")
+        return service
+    except Exception as e:
+        log.error(f"Redeem service init failed: {e}")
+        return None
+
+
+def get_condition_id(market):
+    return (
+        market.get("conditionId")
+        or market.get("condition_id")
+        or market.get("questionID")
+        or None
+    )
+
+
+def redeem_position(redeem_service, condition_id, asset, side):
+    if redeem_service is None:
+        return False
+    try:
+        if not redeem_service.is_condition_resolved(condition_id):
+            return False
+        result = redeem_service.redeem(condition_id=condition_id)
+        log.info(f"  Redeem | [{asset.upper()} {side}] ✓ {result}")
+        return True
+    except Exception as e:
+        log.error(f"  Redeem | [{asset.upper()} {side}] Failed: {e}")
+        return False
+
+
+# ── Resolution Sweep ──────────────────────────────────────────────────────────
+
+def resolution_sweep(pnl, redeem_service=None):
+    """Every 20 mins — resolve OPEN trades, redeem WINs, update Sheet."""
+    open_statuses = ("OPEN", "OPEN-FLIP")
+    stale = [(i, t) for i, t in enumerate(pnl.trades) if t["status"] in open_statuses]
+    if not stale:
+        return
+    server_ts      = get_server_time()
+    resolved_count = 0
+    for idx, trade in stale:
+        asset  = trade["asset"]
+        window = trade["window"]
+        side   = trade["side"]
+        if server_ts < window + WINDOW_SECS + 30:
+            continue
+        try:
+            mkt = fetch_market_by_slug(build_slug(asset, window))
+            if not mkt:
+                continue
+            result = mkt.get("result") or mkt.get("winner") or mkt.get("resolutionResult")
+            if not result:
+                continue
+            won = (result.strip().upper() == side.upper())
+            log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'}")
+            if won:
+                cid = get_condition_id(mkt)
+                if cid:
+                    redeem_position(redeem_service, cid, asset, side)
+            pnl.record_resolved(idx, won)
+            resolved_count += 1
+        except Exception as e:
+            log.error(f"  Sweep | [{asset.upper()} {side}] Error: {e}")
+    if resolved_count:
+        log.info(f"  Sweep | Done — {resolved_count} resolved.")
+
+
 # ── Volatility Monitor ────────────────────────────────────────────────────────
 
 def check_btc_volatility():
@@ -619,17 +721,19 @@ def run():
     client = build_client()
     sheet  = connect_sheet()
     pnl    = PnLTracker(sheet=sheet)
+    redeem_service = build_redeem_service(client)
 
     log.info("=" * 55)
     log.info(f"  {'DRY RUN MODE' if DRY_RUN else 'LIVE MODE'}")
     log.info("=" * 55)
 
     pending          = resolve_pending_on_startup(pnl)
-    traded           = set(pending.keys())
-    token_cache      = {}
+    traded               = set(pending.keys())
+    token_cache          = {}
     volatility_paused    = False
     volatility_resume_ts = 0
     last_volatility_check = 0
+    last_sweep           = 0   # resolution sweep every 20 mins
     active_positions = {}
     for key, items in pending.items():
         active_positions[key] = [
@@ -651,6 +755,11 @@ def run():
             window_start = get_current_window_start(server_ts)
             secs_into    = server_ts - window_start
             secs_left    = (window_start + WINDOW_SECS) - server_ts
+
+            # ── Resolution sweep every 20 mins ───────────────────────────
+            if server_ts - last_sweep >= 1200:
+                last_sweep = server_ts
+                resolution_sweep(pnl, redeem_service)
 
             # ── Skip bad hours (MYT) ──────────────────────────────────────
             now_myt  = datetime.now(MYT)
