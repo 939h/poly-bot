@@ -125,13 +125,13 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = False
+DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol"]
 BUY_SHARES      = 5
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 85c
 SELL_PRICE      = 0.97     # Sell main shares at 97c
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+ENTRY_AFTER     = 1     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 1
@@ -296,6 +296,7 @@ class PnLTracker:
                         "asset":     trade["asset"],
                         "window":    trade["window"],
                         "side":      trade["side"],
+                        "status":    trade["status"],  # needed to restore is_flip on restart
                     })
         return pending
 
@@ -497,14 +498,19 @@ def market_buy(client, token_id, shares, price, label):
         return None
 
 def market_sell(client, token_id, shares, price, label):
-    amount = round(shares * price, 4)
+    # SELL side: send shares directly (NOT shares * price)
+    # Floor to 2dp to avoid CLOB cache "not enough balance" error
+    import math
+    sell_shares = math.floor(shares * 100) / 100
+    if sell_shares <= 0:
+        sell_shares = shares
     if DRY_RUN:
-        log.info(f"  [DRY RUN] MARKET SELL {shares} {label} @ {price:.2%} = ${amount:.4f} USDC")
+        log.info(f"  [DRY RUN] MARKET SELL {sell_shares} {label} @ {price:.2%}")
         return price
     try:
-        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=amount, side=SELL))
+        order = client.create_market_order(MarketOrderArgs(token_id=token_id, amount=sell_shares, side=SELL))
         resp  = client.post_order(order, OrderType.FOK)
-        log.info(f"  MARKET SELL executed: {label} | {resp}")
+        log.info(f"  MARKET SELL executed: {label} | shares={sell_shares} | {resp}")
         return price
     except Exception as e:
         log.error(f"  MARKET SELL failed ({label}): {e}")
@@ -559,8 +565,11 @@ def run():
     active_positions = {}
     for key, items in pending.items():
         active_positions[key] = [
-            {"trade_idx": i["trade_idx"], "side": i["side"],
-             }
+            {
+                "trade_idx": i["trade_idx"],
+                "side":      i["side"],
+                "is_flip":   i.get("status", "OPEN") == "OPEN-FLIP",
+            }
             for i in items
         ]
 
