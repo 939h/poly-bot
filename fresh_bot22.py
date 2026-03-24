@@ -138,8 +138,8 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
-BUY_AMOUNT      = 2       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.81    # Buy if price >= 82c
+BUY_AMOUNT      = 5       # USDC to spend per trade
+BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
@@ -151,7 +151,7 @@ POLL_SECS       = 1
 # ── Volatility Guard ──────────────────────────────────────────────────────────
 VOLATILITY_CHECK_INTERVAL = 600   # check every 10 minutes
 VOLATILITY_THRESHOLD      = 0.02  # pause if 10-min candle range > 2%
-VOLATILITY_PAUSE_SECS     = 14400 # pause for 4 hours
+VOLATILITY_PAUSE_SECS     = 3600 # pause for 1 hour
 BINANCE_API               = "https://api.binance.com/api/v3/klines"
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -791,6 +791,7 @@ def run():
 
     pending          = resolve_pending_on_startup(pnl)
     traded               = set(pending.keys())
+    buy_attempts         = {}   # key -> int, reset each window; max 3 attempts
     token_cache          = {}
     volatility_paused    = False
     volatility_resume_ts = 0
@@ -826,10 +827,10 @@ def run():
             # ── Skip bad hours (MYT) ──────────────────────────────────────
             now_myt  = datetime.now(MYT)
             h, m     = now_myt.hour, now_myt.minute
-            in_skip1 = (h == 8) or (h == 9) or (h == 10)  # 08:00-10:59
-            in_skip2 = (h == 20) or (h == 21) or (h == 22)            # 20:00-22:59
+            in_skip1 = (h == 8) or (h == 9) or (h == 10)  # 08:30-10:59
+            in_skip2 = (h == 21) or (h == 22) or (h == 23)             # 21:00-23:59
             if in_skip1 or in_skip2:
-                skip_end = "11:00" if in_skip1 else "23:00"
+                skip_end = "11:00" if in_skip1 else "00:00"
                 log.info(f"  Skipping bad hour {h:02d}:{m:02d} MYT — resuming at {skip_end}")
                 time.sleep(3600)
                 continue
@@ -915,7 +916,7 @@ def run():
                             continue
 
                         buy_price      = pnl.trades[idx]["buy_price"]
-                        cut_loss_price = round(buy_price * 0.40, 4)
+                        cut_loss_price = round(buy_price * 0.60, 4)
 
                         # Cut loss instantly at 50% of buy price
                         if price <= cut_loss_price:
@@ -958,15 +959,6 @@ def run():
                                                 "side":      opp_side,
                                             })
                                             log.info(f"  [{pos_asset.upper()}] FLIP complete -- now holding {opp_side} @ {flip_fill:.2%}")
-                                            # Warm CLOB cache for flip token before sell loop hits it
-                                            time.sleep(3)
-                                            try:
-                                                client.update_balance_allowance(BalanceAllowanceParams(
-                                                    asset_type=AssetType.CONDITIONAL, token_id=opp_id
-                                                ))
-                                                log.info(f"  [{pos_asset.upper()}] FLIP balance cache warmed ✓")
-                                            except Exception:
-                                                pass
                                 else:
                                     log.info(f"  [{pos_asset.upper()} {side}] Already flipped once -- no more flips this window")
                             continue
@@ -1020,7 +1012,11 @@ def run():
                 no_price  = get_midpoint(client, no_token)
 
                 if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
-                    log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%}")
+                    if buy_attempts.get(key, 0) >= 3:
+                        log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
+                        continue
+                    log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%} (attempt {buy_attempts.get(key,0)+1}/3)")
+                    buy_attempts[key] = buy_attempts.get(key, 0) + 1
                     fill, actual_shares = market_buy(client, yes_token, BUY_AMOUNT, yes_price, f"{asset.upper()}-YES")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY YES @ {yes_price:.2%} ***")
@@ -1030,7 +1026,11 @@ def run():
                         traded.add(key)
 
                 elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
-                    log.info(f"  [{asset.upper()}] TRIGGER: NO @ {no_price:.2%}")
+                    if buy_attempts.get(key, 0) >= 3:
+                        log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
+                        continue
+                    log.info(f"  [{asset.upper()}] TRIGGER: NO @ {no_price:.2%} (attempt {buy_attempts.get(key,0)+1}/3)")
+                    buy_attempts[key] = buy_attempts.get(key, 0) + 1
                     fill, actual_shares = market_buy(client, no_token, BUY_AMOUNT, no_price, f"{asset.upper()}-NO")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY NO @ {no_price:.2%} ***")
