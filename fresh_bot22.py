@@ -141,8 +141,8 @@ ASSETS          = ["btc", "eth", "sol"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.96    # Sell main shares at 97c
-FEE_BUFFER      = 0.97    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
+SELL_PRICE      = 0.97    # Sell main shares at 97c
+FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
@@ -339,15 +339,16 @@ class PnLTracker:
         self._rewrite()
         return len(self.trades) - 1
 
-    def record_sell(self, trade_idx, price, reason="SOLD-99c"):
+    def record_sell(self, trade_idx, price, reason="SOLD-99c", actual_shares=None):
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
         if t["status"] not in ("OPEN", "OPEN-FLIP"):
             return
-        revenue = round(t["buy_shares"] * price, 4)
+        shares  = actual_shares if actual_shares else t["buy_shares"]
+        revenue = round(shares * price, 4)
         pnl     = round(revenue - t["buy_cost"], 4)
-        t["sell_shares"]  = t["buy_shares"]
+        t["sell_shares"]  = shares
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
@@ -358,16 +359,17 @@ class PnLTracker:
         log.info(f"  PnL | [{t['asset'].upper()}] {t['status']} {t['buy_shares']} {t['side']} @ {price:.2%} | pnl={'+' if pnl>=0 else ''}{pnl:.4f} USDC")
         self._rewrite()
 
-    def record_resolved(self, trade_idx, won):
+    def record_resolved(self, trade_idx, won, actual_shares=None):
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
         if t["status"] not in ("OPEN", "OPEN-FLIP"):
             return
+        shares  = actual_shares if actual_shares else t["buy_shares"]
         price   = 1.0 if won else 0.0
-        revenue = round(t["buy_shares"] * price, 4)
+        revenue = round(shares * price, 4)
         pnl     = round(revenue - t["buy_cost"], 4)
-        t["sell_shares"]  = t["buy_shares"]
+        t["sell_shares"]  = shares
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
@@ -845,7 +847,7 @@ def run():
                                 log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
                                 sp = market_sell(client, token_id, pos.get("actual_shares", BUY_AMOUNT), price, f"{pos_asset.upper()}-{side}-FLIP")
                                 if sp is not None:
-                                    pnl.record_sell(idx, sp, "SOLD-99c")
+                                    pnl.record_sell(idx, sp, "SOLD-99c", actual_shares=pos.get("actual_shares"))
                                     positions.remove(pos)
                             continue
 
@@ -859,7 +861,7 @@ def run():
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** CUT-LOSS {side} @ {price:.2%} ***")
-                                pnl.record_sell(idx, sp, "CUT-LOSS")
+                                pnl.record_sell(idx, sp, "CUT-LOSS", actual_shares=pos.get("actual_shares"))
                                 positions.remove(pos)
 
                                 # Flip to opposite side — only if not already a flip
@@ -904,7 +906,7 @@ def run():
                             if sp is not None:
                                 ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                          f"*** SELL {side} @ {price:.2%} ***")
-                                pnl.record_sell(idx, sp, "SOLD-99c")
+                                pnl.record_sell(idx, sp, "SOLD-99c", actual_shares=pos.get("actual_shares"))
                                 positions.remove(pos)
 
                     # Resolve closed windows — only if market has officially resolved
