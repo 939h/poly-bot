@@ -827,7 +827,7 @@ def run():
             now_myt  = datetime.now(MYT)
             h, m     = now_myt.hour, now_myt.minute
             in_skip1 = (h == 8 and m >= 30) or (h == 9) or (h == 10)  # 08:30-10:59
-            in_skip2 = (h == 21) or (h == 22)                          # 21:00-22:59
+            in_skip2 = (h == 20) or (h == 22)                          # 21:00-22:59
             if in_skip1 or in_skip2:
                 skip_end = "11:00" if in_skip1 else "23:00"
                 log.info(f"  Skipping bad hour {h:02d}:{m:02d} MYT — resuming at {skip_end}")
