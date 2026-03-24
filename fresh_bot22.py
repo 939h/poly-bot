@@ -317,7 +317,7 @@ class PnLTracker:
                     })
         return pending
 
-    def record_buy(self, asset, window, side, shares, price, trade_type="OPEN"):
+    def record_buy(self, asset, window, side, shares, price, trade_type="OPEN", actual_shares=None):
         cost  = round(shares, 4)   # shares = BUY_AMOUNT (USDC spent)
         trade = {
             "datetime":     datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S MYT"),
@@ -330,8 +330,9 @@ class PnLTracker:
             "sell_shares":  0.0,
             "sell_price":   0.0,
             "sell_revenue": 0.0,
-            "status":       trade_type,  # OPEN or OPEN-FLIP
+            "status":       trade_type,
             "pnl_usdc":     0.0,
+            "actual_shares": actual_shares,
         }
         self.trades.append(trade)
         label = "FLIP BUY" if trade_type == "OPEN-FLIP" else "BUY"
@@ -640,8 +641,43 @@ def redeem_position(redeem_service, condition_id, asset, side):
 
 # ── Resolution Sweep ──────────────────────────────────────────────────────────
 
+def get_resolution_result(mkt):
+    """
+    Extract resolution result from Polymarket market object.
+    Returns 'YES', 'NO', or None if not yet resolved.
+    Handles all known Gamma API field formats.
+    """
+    # Direct result fields
+    for field in ["result", "winner", "resolutionResult", "resolvedBy"]:
+        v = mkt.get(field)
+        if v and str(v).strip().upper() in ("YES", "NO"):
+            return str(v).strip().upper()
+
+    # Check if market is resolved via tokens
+    tokens = mkt.get("tokens") or mkt.get("outcomes") or []
+    for token in tokens:
+        if isinstance(token, dict):
+            if token.get("winner") is True:
+                outcome = token.get("outcome") or token.get("name") or ""
+                if outcome.strip().upper() in ("YES", "NO"):
+                    return outcome.strip().upper()
+
+    # Check resolved flag + active flag
+    if mkt.get("resolved") is True or mkt.get("active") is False:
+        # Try to infer from price — resolved YES token = 1.0
+        tokens = mkt.get("tokens") or []
+        for token in tokens:
+            if isinstance(token, dict):
+                price = float(token.get("price", 0) or 0)
+                outcome = (token.get("outcome") or token.get("name") or "").strip().upper()
+                if price >= 0.99 and outcome in ("YES", "NO"):
+                    return outcome
+
+    return None
+
+
 def resolution_sweep(pnl, redeem_service=None):
-    """Every 20 mins — resolve OPEN trades, redeem WINs, update Sheet."""
+    """Every 20 mins — resolve OPEN trades, update Sheet."""
     open_statuses = ("OPEN", "OPEN-FLIP")
     stale = [(i, t) for i, t in enumerate(pnl.trades) if t["status"] in open_statuses]
     if not stale:
@@ -652,22 +688,23 @@ def resolution_sweep(pnl, redeem_service=None):
         asset  = trade["asset"]
         window = trade["window"]
         side   = trade["side"]
+        actual = trade.get("actual_shares")
         if server_ts < window + WINDOW_SECS + 30:
             continue
         try:
             mkt = fetch_market_by_slug(build_slug(asset, window))
             if not mkt:
                 continue
-            result = mkt.get("result") or mkt.get("winner") or mkt.get("resolutionResult")
+            result = get_resolution_result(mkt)
             if not result:
                 continue
-            won = (result.strip().upper() == side.upper())
-            log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'}")
-            if won:
+            won = (result == side.upper())
+            log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'} (resolved={result})")
+            if won and redeem_service:
                 cid = get_condition_id(mkt)
                 if cid:
                     redeem_position(redeem_service, cid, asset, side)
-            pnl.record_resolved(idx, won)
+            pnl.record_resolved(idx, won, actual_shares=actual)
             resolved_count += 1
         except Exception as e:
             log.error(f"  Sweep | [{asset.upper()} {side}] Error: {e}")
@@ -882,7 +919,7 @@ def run():
                                         if flip_fill is not None:
                                             ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
                                                      f"*** FLIP BUY {opp_side} @ {opp_price:.2%} ***")
-                                            flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_AMOUNT, flip_fill, "OPEN-FLIP")
+                                            flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_AMOUNT, flip_fill, "OPEN-FLIP", actual_shares=flip_actual)
                                             positions.append({
                                                 "trade_idx":    flip_idx,
                                                 "side":         opp_side,
@@ -952,7 +989,7 @@ def run():
                     fill, actual_shares = market_buy(client, yes_token, BUY_AMOUNT, yes_price, f"{asset.upper()}-YES")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY YES @ {yes_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill)
+                        idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill, actual_shares=actual_shares)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
                         active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "is_flip": False, "actual_shares": actual_shares})
                         traded.add(key)
@@ -962,7 +999,7 @@ def run():
                     fill, actual_shares = market_buy(client, no_token, BUY_AMOUNT, no_price, f"{asset.upper()}-NO")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY NO @ {no_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill)
+                        idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill, actual_shares=actual_shares)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
                         active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "is_flip": False, "actual_shares": actual_shares})
                         traded.add(key)
