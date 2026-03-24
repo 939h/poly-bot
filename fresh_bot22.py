@@ -138,7 +138,7 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
-BUY_AMOUNT      = 5       # USDC to spend per trade
+BUY_AMOUNT      = 2       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
@@ -151,7 +151,7 @@ POLL_SECS       = 1
 # ── Volatility Guard ──────────────────────────────────────────────────────────
 VOLATILITY_CHECK_INTERVAL = 600   # check every 10 minutes
 VOLATILITY_THRESHOLD      = 0.02  # pause if 10-min candle range > 2%
-VOLATILITY_PAUSE_SECS     = 3600 # pause for 1 hour
+VOLATILITY_PAUSE_SECS     = 14400 # pause for 1 hour
 BINANCE_API               = "https://api.binance.com/api/v3/klines"
 
 GAMMA_API = "https://gamma-api.polymarket.com"
