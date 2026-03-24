@@ -317,7 +317,7 @@ class PnLTracker:
                     })
         return pending
 
-    def record_buy(self, asset, window, side, shares, price, trade_type="OPEN", actual_shares=None):
+    def record_buy(self, asset, window, side, shares, price, trade_type="OPEN", actual_shares=None, condition_id=None):
         cost  = round(shares, 4)   # shares = BUY_AMOUNT (USDC spent)
         trade = {
             "datetime":     datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S MYT"),
@@ -333,6 +333,7 @@ class PnLTracker:
             "status":       trade_type,
             "pnl_usdc":     0.0,
             "actual_shares": actual_shares,
+            "condition_id":  condition_id,
         }
         self.trades.append(trade)
         label = "FLIP BUY" if trade_type == "OPEN-FLIP" else "BUY"
@@ -676,7 +677,7 @@ def get_resolution_result(mkt):
     return None
 
 
-def resolution_sweep(pnl, redeem_service=None):
+def resolution_sweep(pnl, client, redeem_service=None):
     """Every 20 mins — resolve OPEN trades, update Sheet."""
     open_statuses = ("OPEN", "OPEN-FLIP")
     stale = [(i, t) for i, t in enumerate(pnl.trades) if t["status"] in open_statuses]
@@ -689,21 +690,43 @@ def resolution_sweep(pnl, redeem_service=None):
         window = trade["window"]
         side   = trade["side"]
         actual = trade.get("actual_shares")
+        cid    = trade.get("condition_id")
         if server_ts < window + WINDOW_SECS + 30:
             continue
         try:
-            mkt = fetch_market_by_slug(build_slug(asset, window))
-            if not mkt:
-                continue
-            result = get_resolution_result(mkt)
+            mkt = None
+            result = None
+
+            # Primary: use client.get_market(condition_id) — most reliable
+            if cid:
+                try:
+                    mkt = client.get_market(cid)
+                    if mkt and (getattr(mkt, "closed", False) or getattr(mkt, "resolved", False)):
+                        tokens = getattr(mkt, "tokens", []) or []
+                        for token in tokens:
+                            winner = getattr(token, "winner", None)
+                            outcome = getattr(token, "outcome", "") or ""
+                            if winner is True and outcome.strip().upper() in ("YES", "NO"):
+                                result = outcome.strip().upper()
+                                break
+                except Exception:
+                    pass
+
+            # Fallback: Gamma API slug lookup
+            if not result:
+                mkt2 = fetch_market_by_slug(build_slug(asset, window))
+                if mkt2:
+                    result = get_resolution_result(mkt2)
+                    if not cid:
+                        cid = get_condition_id(mkt2)
+
             if not result:
                 continue
+
             won = (result == side.upper())
             log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'} (resolved={result})")
-            if won and redeem_service:
-                cid = get_condition_id(mkt)
-                if cid:
-                    redeem_position(redeem_service, cid, asset, side)
+            if won and redeem_service and cid:
+                redeem_position(redeem_service, cid, asset, side)
             pnl.record_resolved(idx, won, actual_shares=actual)
             resolved_count += 1
         except Exception as e:
@@ -798,7 +821,7 @@ def run():
             # ── Resolution sweep every 20 mins ───────────────────────────
             if server_ts - last_sweep >= 1200:
                 last_sweep = server_ts
-                resolution_sweep(pnl, redeem_service)
+                resolution_sweep(pnl, client, redeem_service)
 
             # ── Skip bad hours (MYT) ──────────────────────────────────────
             now_myt  = datetime.now(MYT)
@@ -834,13 +857,15 @@ def run():
                     if mkt:
                         yt, nt = get_tokens(mkt)
                         if yt and nt:
-                            token_cache[key] = (yt, nt)
+                            cid = get_condition_id(mkt)
+                            token_cache[key] = (yt, nt, cid)
 
                 tokens = token_cache.get(key)
                 if not tokens:
                     continue
 
-                yes_token, no_token = tokens
+                yes_token, no_token = tokens[0], tokens[1]
+                cached_cid = tokens[2] if len(tokens) > 2 else None
 
                 # ── Record orderbook to Google Sheets (only when holding a position) ──
                 if ENTRY_AFTER <= secs_into <= WINDOW_SECS:
@@ -863,11 +888,12 @@ def run():
                         if mkt2:
                             yt2, nt2 = get_tokens(mkt2)
                             if yt2 and nt2:
-                                token_cache[pos_key] = (yt2, nt2)
-                                pos_tokens = (yt2, nt2)
+                                cid2 = get_condition_id(mkt2)
+                                token_cache[pos_key] = (yt2, nt2, cid2)
+                                pos_tokens = (yt2, nt2, cid2)
                     if not pos_tokens:
                         continue
-                    pyt, pnt = pos_tokens
+                    pyt, pnt = pos_tokens[0], pos_tokens[1]
 
                     for pos in list(positions):
                         idx      = pos["trade_idx"]
@@ -989,7 +1015,7 @@ def run():
                     fill, actual_shares = market_buy(client, yes_token, BUY_AMOUNT, yes_price, f"{asset.upper()}-YES")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY YES @ {yes_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill, actual_shares=actual_shares)
+                        idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
                         active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "is_flip": False, "actual_shares": actual_shares})
                         traded.add(key)
@@ -999,7 +1025,7 @@ def run():
                     fill, actual_shares = market_buy(client, no_token, BUY_AMOUNT, no_price, f"{asset.upper()}-NO")
                     if fill is not None:
                         ob_record(asset, yes_price, no_price, f"*** BUY NO @ {no_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill, actual_shares=actual_shares)
+                        idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
                         active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "is_flip": False, "actual_shares": actual_shares})
                         traded.add(key)
