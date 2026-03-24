@@ -139,7 +139,7 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
+BUY_PRICE_MIN   = 0.81    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
@@ -677,8 +677,8 @@ def get_resolution_result(mkt):
     return None
 
 
-def resolution_sweep(pnl, client):
-    """Every 20 mins — check OPEN trades, update WIN/LOSS in Sheet."""
+def resolution_sweep(pnl, client, redeem_service=None):
+    """Every 20 mins — resolve OPEN trades, update Sheet."""
     open_statuses = ("OPEN", "OPEN-FLIP")
     stale = [(i, t) for i, t in enumerate(pnl.trades) if t["status"] in open_statuses]
     if not stale:
@@ -693,34 +693,40 @@ def resolution_sweep(pnl, client):
         cid    = trade.get("condition_id")
         if server_ts < window + WINDOW_SECS + 30:
             continue
-        if not cid:
-            # Try to get condition_id from Gamma API as fallback
-            try:
-                mkt = fetch_market_by_slug(build_slug(asset, window))
-                if mkt:
-                    cid = get_condition_id(mkt)
-            except Exception:
-                pass
-        if not cid:
-            continue
         try:
-            market = client.get_market(cid)
-            if not market:
+            mkt = None
+            result = None
+
+            # Primary: use client.get_market(condition_id) — most reliable
+            if cid:
+                try:
+                    mkt = client.get_market(cid)
+                    if mkt and (getattr(mkt, "closed", False) or getattr(mkt, "resolved", False)):
+                        tokens = getattr(mkt, "tokens", []) or []
+                        for token in tokens:
+                            winner = getattr(token, "winner", None)
+                            outcome = getattr(token, "outcome", "") or ""
+                            if winner is True and outcome.strip().upper() in ("YES", "NO"):
+                                result = outcome.strip().upper()
+                                break
+                except Exception:
+                    pass
+
+            # Fallback: Gamma API slug lookup
+            if not result:
+                mkt2 = fetch_market_by_slug(build_slug(asset, window))
+                if mkt2:
+                    result = get_resolution_result(mkt2)
+                    if not cid:
+                        cid = get_condition_id(mkt2)
+
+            if not result:
                 continue
-            # Support both dict and object response
-            closed = market["closed"] if isinstance(market, dict) else getattr(market, "closed", False)
-            if not closed:
-                continue
-            tokens = market["tokens"] if isinstance(market, dict) else getattr(market, "tokens", [])
-            winning_token = next((t for t in tokens if (t["winner"] if isinstance(t, dict) else getattr(t, "winner", False))), None)
-            if not winning_token:
-                continue
-            outcome = winning_token["outcome"] if isinstance(winning_token, dict) else getattr(winning_token, "outcome", "")
-            result  = outcome.strip().upper()
-            if result not in ("YES", "NO"):
-                continue
+
             won = (result == side.upper())
-            log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'} (outcome={result})")
+            log.info(f"  Sweep | [{asset.upper()} {side}] → {'WIN ✓' if won else 'LOSS ✗'} (resolved={result})")
+            if won and redeem_service and cid:
+                redeem_position(redeem_service, cid, asset, side)
             pnl.record_resolved(idx, won, actual_shares=actual)
             resolved_count += 1
         except Exception as e:
@@ -815,7 +821,7 @@ def run():
             # ── Resolution sweep every 20 mins ───────────────────────────
             if server_ts - last_sweep >= 1200:
                 last_sweep = server_ts
-                resolution_sweep(pnl, client)
+                resolution_sweep(pnl, client, redeem_service)
 
             # ── Skip bad hours (MYT) ──────────────────────────────────────
             now_myt  = datetime.now(MYT)
@@ -952,6 +958,15 @@ def run():
                                                 "side":      opp_side,
                                             })
                                             log.info(f"  [{pos_asset.upper()}] FLIP complete -- now holding {opp_side} @ {flip_fill:.2%}")
+                                            # Warm CLOB cache for flip token before sell loop hits it
+                                            time.sleep(3)
+                                            try:
+                                                client.update_balance_allowance(BalanceAllowanceParams(
+                                                    asset_type=AssetType.CONDITIONAL, token_id=opp_id
+                                                ))
+                                                log.info(f"  [{pos_asset.upper()}] FLIP balance cache warmed ✓")
+                                            except Exception:
+                                                pass
                                 else:
                                     log.info(f"  [{pos_asset.upper()} {side}] Already flipped once -- no more flips this window")
                             continue
