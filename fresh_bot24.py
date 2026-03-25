@@ -360,7 +360,6 @@ def monitor_1h_tick(client, server_ts):
         now    = datetime.now(MYT).strftime("%m/%d %H:%M:%S")
         row    = [now, round(yes_p, 4), round(no_p, 4), spread]
         _1h_buffers[asset].append(row)
-        log.info(f"  [1H {asset.upper()}] YES={yes_p:.2%} NO={no_p:.2%} spread={spread:.2%}")
 
         ws = _1h_sheets.get(asset)
         if ws and len(_1h_buffers[asset]) >= 10:
