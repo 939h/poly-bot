@@ -138,7 +138,7 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
-BUY_AMOUNT      = 2       # USDC to spend per trade
+BUY_AMOUNT      = 5       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
