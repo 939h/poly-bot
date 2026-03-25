@@ -139,7 +139,7 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
+BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
@@ -937,6 +937,14 @@ def run():
                                         })
                                         pos["cheap_buy_done"] = True
                                         log.info(f"  [{pos_asset.upper()}] CHEAP BUY complete -- {cb_actual} shares @ {cb_fill:.2%}")
+                                        # Warm up CLOB balance cache for cheap token before sell loop
+                                        time.sleep(3)
+                                        try:
+                                            client.update_balance_allowance(BalanceAllowanceParams(
+                                                asset_type=AssetType.CONDITIONAL, token_id=opp_id
+                                            ))
+                                        except Exception:
+                                            pass
                             continue
 
                         # Cheap buy position — sell at >50c
