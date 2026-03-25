@@ -824,15 +824,18 @@ def run():
                 last_sweep = server_ts
                 resolution_sweep(pnl, client, redeem_service)
 
-            # ── Skip bad hours (MYT) ──────────────────────────────────────
-            now_myt  = datetime.now(MYT)
-            h, m     = now_myt.hour, now_myt.minute
-            in_skip1 = (h == 8) or (h == 9) or (h == 10)  # 08:30-10:59
-            in_skip2 = (h == 21) or (h == 22) or (h == 23)             # 21:00-23:59
-            if in_skip1 or in_skip2:
-                skip_end = "11:00" if in_skip1 else "00:00"
-                log.info(f"  Skipping bad hour {h:02d}:{m:02d} MYT — resuming at {skip_end}")
-                time.sleep(3600)
+            # ── Skip outside trading window 12:30–20:00 MYT ──────────────
+            now_myt = datetime.now(MYT)
+            h, m    = now_myt.hour, now_myt.minute
+            in_skip = (h < 12) or (h == 12 and m < 30) or (h >= 20)
+            if in_skip:
+                if h < 20:  # before window — sleep until 12:30 today
+                    target = now_myt.replace(hour=12, minute=30, second=0, microsecond=0)
+                else:       # after window — sleep until 12:30 tomorrow
+                    target = (now_myt + timedelta(days=1)).replace(hour=12, minute=30, second=0, microsecond=0)
+                wait = max(int((target - now_myt).total_seconds()), 60)
+                log.info(f"  Skipping {h:02d}:{m:02d} MYT — resuming at 12:30 (wait {wait//3600}h {(wait%3600)//60}m)")
+                time.sleep(wait)
                 continue
 
             # ── Volatility Guard ──────────────────────────────────────────
