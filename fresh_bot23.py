@@ -958,7 +958,7 @@ def run():
                             continue
 
                         buy_price      = pnl.trades[idx]["buy_price"]
-                        cut_loss_price = round(buy_price * 0.60, 4)
+                        cut_loss_price = round(buy_price * 0.40, 4)
 
                         # Cut loss instantly at 50% of buy price
                         if price <= cut_loss_price:
