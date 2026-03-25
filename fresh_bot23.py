@@ -146,7 +146,7 @@ FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + roun
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
-POLL_SECS       = 1
+POLL_SECS       = 2
 
 # ── Volatility Guard ──────────────────────────────────────────────────────────
 VOLATILITY_CHECK_INTERVAL = 600   # check every 10 minutes
