@@ -1016,11 +1016,13 @@ def run():
 
                     if direction[asset] is not None:
                         set_dirs = {a: direction[a] for a in ASSETS if direction[a] is not None}
-                        if len(set_dirs) >= 2:
+                        if len(set_dirs) == 4:
                             yes_assets = [a.upper() for a, d in set_dirs.items() if d == "YES"]
                             no_assets  = [a.upper() for a, d in set_dirs.items() if d == "NO"]
-                            if yes_assets and no_assets:
-                                log.info(f"  PEER DIVERGENCE: YES={yes_assets} NO={no_assets}")
+                            if len(yes_assets) == 3 and len(no_assets) == 1:
+                                log.info(f"  PEER DIVERGENCE 3v1: 3 UP {yes_assets} — {no_assets[0]} going DOWN")
+                            elif len(no_assets) == 3 and len(yes_assets) == 1:
+                                log.info(f"  PEER DIVERGENCE 3v1: 3 DOWN {no_assets} — {yes_assets[0]} going UP")
 
         except KeyboardInterrupt:
             log.info("Bot stopped by user.")
