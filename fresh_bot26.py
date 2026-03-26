@@ -151,7 +151,7 @@ POLL_SECS       = 2
 #   Pump leg:  price rises ≥40c from baseline  → state "pumped", track peak
 #   Dump leg:  from peak, price drops ≥40c     → state "volatile"
 #   (vice versa: dump ≥40c from baseline, then pump ≥40c from trough)
-VOL_SWING = 0.40  # minimum move (in cents) for each leg
+VOL_SWING = 0.35  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
 S2_ENTRY_AFTER = 360   # S2 entry opens at min 6 (360s)
