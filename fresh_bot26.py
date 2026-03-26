@@ -1019,10 +1019,45 @@ def run():
                         if len(set_dirs) == 4:
                             yes_assets = [a.upper() for a, d in set_dirs.items() if d == "YES"]
                             no_assets  = [a.upper() for a, d in set_dirs.items() if d == "NO"]
+                            diverging  = None
+                            cheap_side = None
                             if len(yes_assets) == 3 and len(no_assets) == 1:
                                 log.info(f"  PEER DIVERGENCE 3v1: 3 UP {yes_assets} — {no_assets[0]} going DOWN")
+                                diverging  = [a for a, d in set_dirs.items() if d == "NO"][0]
+                                cheap_side = "YES"
                             elif len(no_assets) == 3 and len(yes_assets) == 1:
                                 log.info(f"  PEER DIVERGENCE 3v1: 3 DOWN {no_assets} — {yes_assets[0]} going UP")
+                                diverging  = [a for a, d in set_dirs.items() if d == "YES"][0]
+                                cheap_side = "NO"
+
+                            if diverging and cheap_side:
+                                div_key = (diverging, window_start)
+                                if div_key not in traded and S2_ENTRY_AFTER <= secs_into <= S2_STOP_BUY_AT:
+                                    div_tokens = token_cache.get(div_key)
+                                    if div_tokens:
+                                        div_cheap_token = div_tokens[0] if cheap_side == "YES" else div_tokens[1]
+                                        div_price = get_midpoint(client, div_cheap_token)
+                                        if S2_BUY_MIN <= div_price <= S2_BUY_MAX:
+                                            log.info(f"  PEER S2: {diverging.upper()} {cheap_side} @ {div_price:.2%} — buying")
+                                            fill, actual_shares = market_buy(client, div_cheap_token, S2_AMOUNT, div_price, f"{diverging.upper()}-{cheap_side}-PEER-S2")
+                                            if fill is not None:
+                                                div_yes_p = get_midpoint(client, div_tokens[0])
+                                                div_no_p  = get_midpoint(client, div_tokens[1])
+                                                ob_record(diverging, div_yes_p, div_no_p, f"*** PEER S2 BUY {cheap_side} @ {div_price:.2%} ***")
+                                                idx = pnl.record_buy(diverging, window_start, cheap_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
+                                                pending.setdefault(div_key, []).append({"trade_idx": idx, "asset": diverging, "side": cheap_side})
+                                                active_positions.setdefault(div_key, []).append({
+                                                    "trade_idx":    idx,
+                                                    "side":         cheap_side,
+                                                    "is_s2":        True,
+                                                    "s2_tp1_done":  False,
+                                                    "actual_shares": actual_shares,
+                                                })
+                                                traded.add(div_key)
+                                        else:
+                                            log.info(f"  PEER S2: {diverging.upper()} {cheap_side} @ {div_price:.2%} — not in range ({S2_BUY_MIN:.0%}-{S2_BUY_MAX:.0%})")
+                                    else:
+                                        log.info(f"  PEER S2: {diverging.upper()} tokens not cached — skip")
 
         except KeyboardInterrupt:
             log.info("Bot stopped by user.")
