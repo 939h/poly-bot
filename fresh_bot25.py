@@ -137,7 +137,7 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = False
+DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_AMOUNT      = 5       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
