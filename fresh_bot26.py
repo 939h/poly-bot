@@ -139,14 +139,10 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol", "xrp"]
-BUY_AMOUNT      = 2       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
-BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.97    # Sell main shares at 97c
+BUY_PRICE_MIN   = 0.80    # S1 monitor: direction detected when price >= 80c
+BUY_PRICE_MAX   = 0.84    # S1 monitor: direction detected when price <= 84c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 TRADING_HOURS   = False   # Set True to restrict trading to 12:30–20:00 MYT
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
-STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 2
 
@@ -351,7 +347,7 @@ class PnLTracker:
         return pending
 
     def record_buy(self, asset, window, side, shares, price, trade_type="OPEN", actual_shares=None, condition_id=None):
-        cost  = round(shares, 4)   # shares = BUY_AMOUNT (USDC spent)
+        cost  = round(shares, 4)   # shares = amount (USDC spent)
         trade = {
             "datetime":     datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S MYT"),
             "asset":        asset,
@@ -778,13 +774,13 @@ def run():
 
     pending          = resolve_pending_on_startup(pnl)
     traded               = set(pending.keys())
-    buy_attempts         = {}   # key -> int, reset each window; max 3 attempts
     token_cache          = {}
     last_sweep           = 0   # resolution sweep every 20 mins
     active_positions = {}
     # phase: "neutral" → "pumped"/"dumped" → "volatile"
     # start = baseline price at min 5; peak/trough updated during leg tracking
     vol_state        = {asset: {"phase": "neutral", "start": None, "peak": None, "trough": None} for asset in ASSETS}
+    direction        = {asset: None for asset in ASSETS}  # "YES"/"NO" per window, set by S1 monitor
     last_vol_reset   = 0   # tracks last window_start seen, for resetting vol_state
     for key, items in pending.items():
         active_positions[key] = [
@@ -797,7 +793,8 @@ def run():
         ]
 
     log.info(f"Bot started — {', '.join(a.upper() for a in ASSETS)}")
-    log.info(f"Buy {BUY_PRICE_MIN:.0%}-{BUY_PRICE_MAX:.0%} between {ENTRY_AFTER//60}-{STOP_BUY_AT//60}min | Sell @ {SELL_PRICE:.0%} | Cut loss @ 50%")
+    log.info(f"S2-only | vol swing {VOL_SWING:.0%} | S2 entry min {S2_ENTRY_AFTER//60}-{S2_STOP_BUY_AT//60} | cheap {S2_BUY_MIN:.0%}-{S2_BUY_MAX:.0%} | TP1@{S2_TP1:.0%} TP2@{S2_TP2:.0%}")
+    log.info(f"S1 monitor: direction signal at {BUY_PRICE_MIN:.0%}-{BUY_PRICE_MAX:.0%} (no trading)")
 
     while True:
         try:
@@ -809,6 +806,7 @@ def run():
             # ── Reset vol_state at the start of each new window ──────────
             if window_start != last_vol_reset:
                 vol_state      = {asset: {"phase": "neutral", "start": None, "peak": None, "trough": None} for asset in ASSETS}
+                direction      = {asset: None for asset in ASSETS}
                 last_vol_reset = window_start
 
             # ── Resolution sweep every 20 mins ───────────────────────────
@@ -850,7 +848,7 @@ def run():
                 cached_cid = tokens[2] if len(tokens) > 2 else None
 
                 # ── Record orderbook to Google Sheets (only when holding a position) ──
-                if ENTRY_AFTER <= secs_into <= WINDOW_SECS:
+                if S2_ENTRY_AFTER <= secs_into <= WINDOW_SECS:
                     has_position = any(
                         pa == asset for (pa, pw) in active_positions
                         if pw == window_start
@@ -910,33 +908,6 @@ def run():
                             continue  # no cut-loss — hold to resolution if neither TP hit
 
 
-                        buy_price      = pnl.trades[idx]["buy_price"]
-                        cut_loss_price = round(buy_price * 0.40, 4)
-
-                        # Cut loss — sell and done, no flip
-                        if price <= cut_loss_price:
-                            log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%})")
-                            sp = market_sell(client, token_id, pos.get("actual_shares", BUY_AMOUNT), price, f"{pos_asset.upper()}-{side}")
-                            if sp is not None:
-                                ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                         f"*** CUT-LOSS {side} @ {price:.2%} ***")
-                                pnl.record_sell(idx, sp, "CUT-LOSS", actual_shares=pos.get("actual_shares"))
-                                positions.remove(pos)
-                                # Force volatile — cut-loss proves market moved hard, open S2 window
-                                vol_state[pos_asset]["phase"] = "volatile"
-                                traded.discard(pos_key)
-                                log.info(f"  [{pos_asset.upper()}] Cut-loss → volatile forced, S2 window re-opened")
-                            continue
-
-                        # Sell main at 98c
-                        if price >= SELL_PRICE:
-                            log.info(f"  [{pos_asset.upper()} {side}] TRIGGER SELL @ {price:.2%}!")
-                            sp = market_sell(client, token_id, pos.get("actual_shares", BUY_AMOUNT), price, f"{pos_asset.upper()}-{side}")
-                            if sp is not None:
-                                ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                         f"*** SELL {side} @ {price:.2%} ***")
-                                pnl.record_sell(idx, sp, "SOLD-99c", actual_shares=pos.get("actual_shares"))
-                                positions.remove(pos)
 
                     # Resolve closed windows — only if market has officially resolved
                     # (price monitoring above continues to sell at 99.9c even after window)
@@ -994,11 +965,16 @@ def run():
                                 vs["phase"] = "volatile"
                                 log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
-                # ── Volatile: S2 only — S1 blocked entirely ───────────────────
+                # ── Fetch prices once (used by S2 check + S1 monitor) ────────
+                if secs_into >= 300:
+                    yes_price = get_midpoint(client, yes_token)
+                    no_price  = get_midpoint(client, no_token)
+                    if yes_price <= 0 or no_price <= 0:
+                        continue
+
+                # ── Volatile: S2 only ─────────────────────────────────────────
                 if vol_state[asset]["phase"] == "volatile":
                     if S2_ENTRY_AFTER <= secs_into <= S2_STOP_BUY_AT:
-                        yes_price = get_midpoint(client, yes_token)
-                        no_price  = get_midpoint(client, no_token)
                         log.info(f"  [{asset.upper()}] VOLATILE — checking S2 cheap buy (YES={yes_price:.2%}, NO={no_price:.2%})")
                         s2_side, s2_price, s2_token = None, None, None
                         if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
@@ -1029,43 +1005,22 @@ def run():
                     traded.add(key)
                     continue
 
-                # ── S1: only buy between 10–14 minutes (non-volatile) ─────────
-                if secs_into < ENTRY_AFTER:
-                    continue
-                if secs_into > STOP_BUY_AT:
-                    continue
+                # ── S1 direction monitor (no buying) ──────────────────────────
+                if secs_into >= 300 and direction[asset] is None:
+                    if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
+                        direction[asset] = "YES"
+                        log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=YES @ {yes_price:.2%}")
+                    elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
+                        direction[asset] = "NO"
+                        log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=NO @ {no_price:.2%}")
 
-                # ── Check buy trigger ─────────────────────────────────────────
-                yes_price = get_midpoint(client, yes_token)
-                no_price  = get_midpoint(client, no_token)
-
-                if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
-                    if buy_attempts.get(key, 0) >= 3:
-                        # log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
-                        continue
-                    log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%} (attempt {buy_attempts.get(key,0)+1}/3)")
-                    buy_attempts[key] = buy_attempts.get(key, 0) + 1
-                    fill, actual_shares = market_buy(client, yes_token, BUY_AMOUNT, yes_price, f"{asset.upper()}-YES")
-                    if fill is not None:
-                        ob_record(asset, yes_price, no_price, f"*** BUY YES @ {yes_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
-                        pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "actual_shares": actual_shares})
-                        traded.add(key)
-
-                elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
-                    if buy_attempts.get(key, 0) >= 3:
-                        log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
-                        continue
-                    log.info(f"  [{asset.upper()}] TRIGGER: NO @ {no_price:.2%} (attempt {buy_attempts.get(key,0)+1}/3)")
-                    buy_attempts[key] = buy_attempts.get(key, 0) + 1
-                    fill, actual_shares = market_buy(client, no_token, BUY_AMOUNT, no_price, f"{asset.upper()}-NO")
-                    if fill is not None:
-                        ob_record(asset, yes_price, no_price, f"*** BUY NO @ {no_price:.2%} ***")
-                        idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
-                        pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "actual_shares": actual_shares})
-                        traded.add(key)
+                    if direction[asset] is not None:
+                        set_dirs = {a: direction[a] for a in ASSETS if direction[a] is not None}
+                        if len(set_dirs) >= 2:
+                            yes_assets = [a.upper() for a, d in set_dirs.items() if d == "YES"]
+                            no_assets  = [a.upper() for a, d in set_dirs.items() if d == "NO"]
+                            if yes_assets and no_assets:
+                                log.info(f"  PEER DIVERGENCE: YES={yes_assets} NO={no_assets}")
 
         except KeyboardInterrupt:
             log.info("Bot stopped by user.")
