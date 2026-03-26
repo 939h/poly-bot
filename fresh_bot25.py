@@ -1,6 +1,6 @@
 """
 Polymarket 15-Min Up/Down Bot — Fresh v25
-Markets: BTC, ETH, SOL, XRP
+Markets: BTC, ETH, SOL
 
 Strategy:
   1. BUY — enter YES or NO when price hits 80-85c between min 10-14 of window
@@ -194,6 +194,15 @@ def connect_sheet():
                 ws = spreadsheet.add_worksheet(title=tab_name, rows=5000, cols=15)
                 log.info(f"  Sheets | Created tab: {tab_name}")
             asset_sheets[asset] = ws
+        # Clean up orphaned tabs (e.g. old Sheet1) — delete anything not an asset tab or Orderbook
+        asset_tab_names = {a.upper() for a in ASSETS} | {"Orderbook"}
+        for ws in spreadsheet.worksheets():
+            if ws.title not in asset_tab_names:
+                try:
+                    spreadsheet.del_worksheet(ws)
+                    log.info(f"  Sheets | Deleted orphaned tab: '{ws.title}'")
+                except Exception as e:
+                    log.warning(f"  Sheets | Could not delete '{ws.title}': {e}")
         log.info(f"Google Sheets connected! Tabs: {', '.join(a.upper() for a in ASSETS)}")
         return asset_sheets
     except Exception as e:
