@@ -911,7 +911,7 @@ def run():
 
                     # Resolve closed windows — only if market has officially resolved
                     # (price monitoring above continues to sell at 99.9c even after window)
-                    if server_ts > pos_window + WINDOW_SECS + 30:
+                    if server_ts > pos_window + WINDOW_SECS + 900:  # 15 min after window close
                         try:
                             mkt = fetch_market_by_slug(build_slug(pos_asset, pos_window))
                             if mkt:
