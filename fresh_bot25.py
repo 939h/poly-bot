@@ -150,9 +150,12 @@ STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 2
 
-# ── Micro Volatility Guard (per-asset, uses live orderbook) ───────────────────
-MICRO_VOL_WINDOW    = 150   # polls to keep (150 × 2s = 5 minutes)
-MICRO_VOL_THRESHOLD = 0.30  # trigger S2 if YES swings > 30c in 5 min
+# ── Volatility Cycle Guard (per-asset state machine) ─────────────────────────
+# Baseline captured at min 5.  A cycle completes when:
+#   Pump leg:  price rises ≥40c from baseline  → state "pumped", track peak
+#   Dump leg:  from peak, price drops ≥40c     → state "volatile"
+#   (vice versa: dump ≥40c from baseline, then pump ≥40c from trough)
+VOL_SWING = 0.40  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
 S2_BUY_MIN  = 0.05   # Buy cheap side if price >= 5c
@@ -784,7 +787,10 @@ def run():
     token_cache          = {}
     last_sweep           = 0   # resolution sweep every 20 mins
     active_positions = {}
-    price_history    = {asset: deque(maxlen=MICRO_VOL_WINDOW) for asset in ASSETS}
+    # phase: "neutral" → "pumped"/"dumped" → "volatile"
+    # start = baseline price at min 5; peak/trough updated during leg tracking
+    vol_state        = {asset: {"phase": "neutral", "start": None, "peak": None, "trough": None} for asset in ASSETS}
+    last_vol_reset   = 0   # tracks last window_start seen, for resetting vol_state
     for key, items in pending.items():
         active_positions[key] = [
             {
@@ -805,6 +811,11 @@ def run():
             window_start = get_current_window_start(server_ts)
             secs_into    = server_ts - window_start
             secs_left    = (window_start + WINDOW_SECS) - server_ts
+
+            # ── Reset vol_state at the start of each new window ──────────
+            if window_start != last_vol_reset:
+                vol_state      = {asset: {"phase": "neutral", "start": None, "peak": None, "trough": None} for asset in ASSETS}
+                last_vol_reset = window_start
 
             # ── Resolution sweep every 20 mins ───────────────────────────
             if server_ts - last_sweep >= 1200:
@@ -1037,11 +1048,37 @@ def run():
                 if key in traded:
                     continue
 
-                # ── Collect price history from min 5 (so 5-min check is ready by min 10) ──
+                # ── Update volatility cycle state (track from min 5 onwards) ──
                 if secs_into >= 300:
-                    _ph_price = get_midpoint(client, yes_token)
-                    if _ph_price > 0:
-                        price_history[asset].append(_ph_price)
+                    _vs_price = get_midpoint(client, yes_token)
+                    if _vs_price > 0:
+                        vs = vol_state[asset]
+                        if vs["phase"] == "neutral":
+                            if vs["start"] is None:
+                                vs["start"] = _vs_price   # capture baseline at min 5
+                            else:
+                                move_up   = _vs_price - vs["start"]
+                                move_down = vs["start"] - _vs_price
+                                if move_up >= VOL_SWING:
+                                    vs["phase"] = "pumped"
+                                    vs["peak"]  = _vs_price
+                                    log.info(f"  [{asset.upper()}] VOL: pump leg done (base {vs['start']:.2%} → {_vs_price:.2%})")
+                                elif move_down >= VOL_SWING:
+                                    vs["phase"]  = "dumped"
+                                    vs["trough"] = _vs_price
+                                    log.info(f"  [{asset.upper()}] VOL: dump leg done (base {vs['start']:.2%} → {_vs_price:.2%})")
+                        elif vs["phase"] == "pumped":
+                            if _vs_price > vs["peak"]:
+                                vs["peak"] = _vs_price    # extend peak
+                            elif vs["peak"] - _vs_price >= VOL_SWING:
+                                vs["phase"] = "volatile"
+                                log.info(f"  [{asset.upper()}] VOL: cycle complete — pump then dump (peak {vs['peak']:.2%} → {_vs_price:.2%})")
+                        elif vs["phase"] == "dumped":
+                            if _vs_price < vs["trough"]:
+                                vs["trough"] = _vs_price  # extend trough
+                            elif _vs_price - vs["trough"] >= VOL_SWING:
+                                vs["phase"] = "volatile"
+                                log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
                 # ── Only buy between 10-14 minutes ────────────────────────────
                 if secs_into < ENTRY_AFTER:
@@ -1053,37 +1090,35 @@ def run():
                 yes_price = get_midpoint(client, yes_token)
                 no_price  = get_midpoint(client, no_token)
 
-                # ── Micro volatility guard ────────────────────────────────────
-                if len(price_history[asset]) >= MICRO_VOL_WINDOW:
-                    vol = max(price_history[asset]) - min(price_history[asset])
-                    if vol > MICRO_VOL_THRESHOLD:
-                        log.info(f"  [{asset.upper()}] VOLATILE: YES swung {vol:.2f} in 5min — checking for S2 cheap buy")
-                        s2_side, s2_price, s2_token = None, None, None
-                        if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
-                            s2_side, s2_price, s2_token = "YES", yes_price, yes_token
-                        elif S2_BUY_MIN <= no_price <= S2_BUY_MAX:
-                            s2_side, s2_price, s2_token = "NO", no_price, no_token
+                # ── Volatility cycle guard ────────────────────────────────────
+                if vol_state[asset]["phase"] == "volatile":
+                    log.info(f"  [{asset.upper()}] VOLATILE cycle detected — checking for S2 cheap buy")
+                    s2_side, s2_price, s2_token = None, None, None
+                    if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
+                        s2_side, s2_price, s2_token = "YES", yes_price, yes_token
+                    elif S2_BUY_MIN <= no_price <= S2_BUY_MAX:
+                        s2_side, s2_price, s2_token = "NO", no_price, no_token
 
-                        if s2_side:
-                            log.info(f"  [{asset.upper()}] S2: {s2_side} @ {s2_price:.2%} — buying cheap")
-                            fill, actual_shares = market_buy(client, s2_token, S2_AMOUNT, s2_price, f"{asset.upper()}-{s2_side}-S2")
-                            if fill is not None:
-                                ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***")
-                                idx = pnl.record_buy(asset, window_start, s2_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
-                                pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": s2_side})
-                                active_positions.setdefault(key, []).append({
-                                    "trade_idx":    idx,
-                                    "side":         s2_side,
-                                    "is_flip":      False,
-                                    "is_cheap":     False,
-                                    "is_s2":        True,
-                                    "s2_tp1_done":  False,
-                                    "actual_shares": actual_shares,
-                                })
-                        else:
-                            log.info(f"  [{asset.upper()}] S2: no cheap side found (YES={yes_price:.2%}, NO={no_price:.2%}) — skipping")
+                    if s2_side:
+                        log.info(f"  [{asset.upper()}] S2: {s2_side} @ {s2_price:.2%} — buying cheap")
+                        fill, actual_shares = market_buy(client, s2_token, S2_AMOUNT, s2_price, f"{asset.upper()}-{s2_side}-S2")
+                        if fill is not None:
+                            ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***")
+                            idx = pnl.record_buy(asset, window_start, s2_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
+                            pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": s2_side})
+                            active_positions.setdefault(key, []).append({
+                                "trade_idx":    idx,
+                                "side":         s2_side,
+                                "is_flip":      False,
+                                "is_cheap":     False,
+                                "is_s2":        True,
+                                "s2_tp1_done":  False,
+                                "actual_shares": actual_shares,
+                            })
+                    else:
+                        log.info(f"  [{asset.upper()}] S2: no cheap side found (YES={yes_price:.2%}, NO={no_price:.2%}) — skipping")
 
-                        traded.add(key)
+                    traded.add(key)
                         continue
 
                 if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
