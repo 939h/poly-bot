@@ -139,7 +139,7 @@ def record_orderbook(asset, yes_price, no_price):
 
 DRY_RUN         = False
 ASSETS          = ["btc", "eth", "sol", "xrp"]
-BUY_PRICE_MIN   = 0.80    # S1 monitor: direction detected when price >= 80c
+BUY_PRICE_MIN   = 0.78    # S1 monitor: direction detected when price >= 78c
 BUY_PRICE_MAX   = 0.84    # S1 monitor: direction detected when price <= 84c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 TRADING_HOURS   = False   # Set True to restrict trading to 12:30–20:00 MYT
@@ -794,7 +794,7 @@ def run():
 
     log.info(f"Bot started — {', '.join(a.upper() for a in ASSETS)}")
     log.info(f"S2-only | vol swing {VOL_SWING:.0%} | S2 entry min {S2_ENTRY_AFTER//60}-{S2_STOP_BUY_AT//60} | cheap {S2_BUY_MIN:.0%}-{S2_BUY_MAX:.0%} | TP1@{S2_TP1:.0%} TP2@{S2_TP2:.0%}")
-    log.info(f"S1 monitor: direction signal at {BUY_PRICE_MIN:.0%}-{BUY_PRICE_MAX:.0%} (no trading)")
+    log.info(f"S1 monitor: direction signal at >={BUY_PRICE_MIN:.0%} (no trading)")
 
     while True:
         try:
