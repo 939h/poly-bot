@@ -151,8 +151,8 @@ WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 2
 
 # ── Micro Volatility Guard (per-asset, uses live orderbook) ───────────────────
-MICRO_VOL_WINDOW    = 30    # polls to keep (30 × 2s = 60 seconds)
-MICRO_VOL_THRESHOLD = 0.25  # skip asset if YES swings > 25c in 60s
+MICRO_VOL_WINDOW    = 150   # polls to keep (150 × 2s = 5 minutes)
+MICRO_VOL_THRESHOLD = 0.30  # trigger S2 if YES swings > 30c in 5 min
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
 S2_BUY_MIN  = 0.05   # Buy cheap side if price >= 5c
@@ -1037,8 +1037,8 @@ def run():
                 if key in traded:
                     continue
 
-                # ── Collect price history from min 9 (so check is ready by min 10) ──
-                if secs_into >= 540:
+                # ── Collect price history from min 5 (so 5-min check is ready by min 10) ──
+                if secs_into >= 300:
                     _ph_price = get_midpoint(client, yes_token)
                     if _ph_price > 0:
                         price_history[asset].append(_ph_price)
@@ -1057,7 +1057,7 @@ def run():
                 if len(price_history[asset]) >= MICRO_VOL_WINDOW:
                     vol = max(price_history[asset]) - min(price_history[asset])
                     if vol > MICRO_VOL_THRESHOLD:
-                        log.info(f"  [{asset.upper()}] VOLATILE: YES swung {vol:.2f} in 60s — checking for S2 cheap buy")
+                        log.info(f"  [{asset.upper()}] VOLATILE: YES swung {vol:.2f} in 5min — checking for S2 cheap buy")
                         s2_side, s2_price, s2_token = None, None, None
                         if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
                             s2_side, s2_price, s2_token = "YES", yes_price, yes_token
