@@ -225,7 +225,7 @@ def sheet_full_sync(asset_sheets, all_trades):
         "sell_shares", "sell_price", "sell_revenue",
         "status", "pnl_usdc", "running_total"
     ]
-    open_statuses = ("OPEN", "OPEN-FLIP", "OPEN-S2", "OPEN-CHEAP")
+    open_statuses = ("OPEN", "OPEN-S2")
     for asset, ws in asset_sheets.items():
         try:
             trades  = [t for t in all_trades if t["asset"] == asset]
@@ -341,7 +341,7 @@ class PnLTracker:
                     "condition_id":  row.get("condition_id") or None,
                 }
                 self.trades.append(trade)
-                if trade["status"] in ("OPEN", "OPEN-FLIP"):
+                if trade["status"] in ("OPEN",):
                     pending.append({
                         "trade_idx": len(self.trades) - 1,
                         "asset":     trade["asset"],
@@ -369,7 +369,7 @@ class PnLTracker:
             "condition_id":  condition_id,
         }
         self.trades.append(trade)
-        label = "FLIP BUY" if trade_type == "OPEN-FLIP" else "BUY"
+        label = "BUY"
         log.info(f"  PnL | [{asset.upper()}] {label} {shares} {side} @ {price:.2%} = ${cost:.4f} USDC")
         self._rewrite()
         return len(self.trades) - 1
@@ -378,7 +378,7 @@ class PnLTracker:
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
-        if t["status"] not in ("OPEN", "OPEN-FLIP"):
+        if t["status"] not in ("OPEN",):
             return
         shares  = actual_shares if actual_shares else t["buy_shares"]
         revenue = round(shares * price, 4)
@@ -387,10 +387,7 @@ class PnLTracker:
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
-        # Append -FLIP suffix only if this was a flip trade and reason doesn't already have it
-        is_flip = t["status"] == "OPEN-FLIP"
-        base    = reason.replace("-FLIP", "")  # strip any accidental -FLIP from reason
-        t["status"] = (base + "-FLIP") if is_flip else base
+        t["status"] = reason
         log.info(f"  PnL | [{t['asset'].upper()}] {t['status']} {t['buy_shares']} {t['side']} @ {price:.2%} | pnl={'+' if pnl>=0 else ''}{pnl:.4f} USDC")
         self._rewrite()
 
@@ -398,7 +395,7 @@ class PnLTracker:
         if trade_idx >= len(self.trades):
             return
         t = self.trades[trade_idx]
-        if t["status"] not in ("OPEN", "OPEN-FLIP"):
+        if t["status"] not in ("OPEN",):
             return
         shares  = actual_shares if actual_shares else t["buy_shares"]
         price   = 1.0 if won else 0.0
@@ -408,12 +405,8 @@ class PnLTracker:
         t["sell_price"]   = price
         t["sell_revenue"] = revenue
         t["pnl_usdc"]     = pnl
-        is_flip = t["status"] == "OPEN-FLIP"
-        if won:
-            t["status"] = "WIN-FLIP" if is_flip else "WIN"
-        else:
-            t["status"] = "LOSS-FLIP" if is_flip else "LOSS"
-        settled = [x for x in self.trades if x["status"] not in ("OPEN", "OPEN-FLIP")]
+        t["status"] = "WIN" if won else "LOSS"
+        settled = [x for x in self.trades if x["status"] not in ("OPEN",)]
         total   = round(sum(x["pnl_usdc"] for x in settled), 4)
         log.info(
             f"  PnL | [{t['asset'].upper()}] {t['status']} | "
@@ -425,7 +418,7 @@ class PnLTracker:
         if not self.trades:
             log.info("PnL | No trades yet.")
             return
-        open_statuses = ("OPEN", "OPEN-FLIP")
+        open_statuses = ("OPEN",)
         settled = [t for t in self.trades if t["status"] not in open_statuses]
         open_   = [t for t in self.trades if t["status"] in open_statuses]
         total   = round(sum(t["pnl_usdc"] for t in settled), 4)
@@ -454,14 +447,14 @@ class PnLTracker:
                 "actual_shares", "condition_id"
             ])
             for t in self.trades:
-                if t["status"] not in ("OPEN", "OPEN-FLIP"):
+                if t["status"] not in ("OPEN",):
                     running = round(running + t["pnl_usdc"], 4)
                 writer.writerow([
                     t["datetime"], t["asset"], t["window"], t["side"],
                     t["buy_shares"], t["buy_price"], t["buy_cost"],
                     t["sell_shares"], t["sell_price"], t["sell_revenue"],
                     t["status"], t["pnl_usdc"],
-                    running if t["status"] not in ("OPEN", "OPEN-FLIP") else "OPEN",
+                    running if t["status"] not in ("OPEN",) else "OPEN",
                     t.get("actual_shares", ""), t.get("condition_id", "")
                 ])
         # Sync all trades to Google Sheets (per-asset tabs)
@@ -714,7 +707,7 @@ def get_resolution_result(mkt):
 
 def resolution_sweep(pnl, client, redeem_service=None):
     """Every 20 mins — resolve OPEN trades, update Sheet."""
-    open_statuses = ("OPEN", "OPEN-FLIP")
+    open_statuses = ("OPEN",)
     stale = [(i, t) for i, t in enumerate(pnl.trades) if t["status"] in open_statuses]
     if not stale:
         return
@@ -798,7 +791,6 @@ def run():
             {
                 "trade_idx":    i["trade_idx"],
                 "side":         i["side"],
-                "is_flip":      i.get("status", "OPEN") == "OPEN-FLIP",
                 "actual_shares": pnl.trades[i["trade_idx"]]["buy_shares"],
             }
             for i in items
@@ -894,47 +886,6 @@ def run():
                         if price <= 0:
                             continue
 
-                        # Flip trade — sell at 99c only, NO cut loss, hold to resolution
-                        if pos.get("is_flip"):
-                            if price >= SELL_PRICE:
-                                log.info(f"  [{pos_asset.upper()} {side}] FLIP SELL @ {price:.2%}!")
-                                sp = market_sell(client, token_id, pos.get("actual_shares", BUY_AMOUNT), price, f"{pos_asset.upper()}-{side}-FLIP")
-                                if sp is not None:
-                                    pnl.record_sell(idx, sp, "SOLD-99c", actual_shares=pos.get("actual_shares"))
-                                    positions.remove(pos)
-                            # ── Cheap buy: watch original side drop to 2–5c after flip ──
-                            # Only once per flip position, only within 10–14 min window
-                            if not pos.get("cheap_buy_done"):
-                                opp_price_now = get_midpoint(client, opp_id)
-                                pos_secs_into = server_ts - pos_window
-                                if (0.02 <= opp_price_now <= 0.05) and (600 <= pos_secs_into <= 840):
-                                    log.info(f"  [{pos_asset.upper()}] CHEAP BUY: {('NO' if side=='YES' else 'YES')} @ {opp_price_now:.2%} (${1} — within window)")
-                                    cb_fill, cb_actual = market_buy(client, opp_id, 1.0, opp_price_now, f"{pos_asset.upper()}-{'NO' if side=='YES' else 'YES'}-CHEAP")
-                                    if cb_fill is not None:
-                                        cb_idx = pnl.record_buy(pos_asset, pos_window, "NO" if side == "YES" else "YES", 1.0, cb_fill, "OPEN-CHEAP", actual_shares=cb_actual)
-                                        positions.append({
-                                            "trade_idx":    cb_idx,
-                                            "side":         "NO" if side == "YES" else "YES",
-                                            "is_flip":      False,
-                                            "is_cheap":     True,
-                                            "actual_shares": cb_actual,
-                                        })
-                                        pending.setdefault(pos_key, []).append({
-                                            "trade_idx": cb_idx,
-                                            "asset":     pos_asset,
-                                            "side":      "NO" if side == "YES" else "YES",
-                                        })
-                                        pos["cheap_buy_done"] = True
-                                        log.info(f"  [{pos_asset.upper()}] CHEAP BUY complete -- {cb_actual} shares @ {cb_fill:.2%}")
-                                        # Warm up CLOB balance cache for cheap token before sell loop
-                                        time.sleep(3)
-                                        try:
-                                            client.update_balance_allowance(BalanceAllowanceParams(
-                                                asset_type=AssetType.CONDITIONAL, token_id=opp_id
-                                            ))
-                                        except Exception:
-                                            pass
-                            continue
 
                         # ── Strategy 2: TP1 @ 15c (sell half), TP2 @ 40c (sell rest), no cut-loss ──
                         if pos.get("is_s2"):
@@ -958,20 +909,11 @@ def run():
                                     log.info(f"  [{pos_asset.upper()} {side}] S2 TP2 @ {price:.2%} — fully closed")
                             continue  # no cut-loss — hold to resolution if neither TP hit
 
-                        # Cheap buy position — sell at >50c
-                        if pos.get("is_cheap"):
-                            if price > 0.50:
-                                log.info(f"  [{pos_asset.upper()} {side}] CHEAP SELL @ {price:.2%}!")
-                                sp = market_sell(client, token_id, pos.get("actual_shares", 1.0), price, f"{pos_asset.upper()}-{side}-CHEAP")
-                                if sp is not None:
-                                    pnl.record_sell(idx, sp, "SOLD-CHEAP", actual_shares=pos.get("actual_shares"))
-                                    positions.remove(pos)
-                            continue
 
                         buy_price      = pnl.trades[idx]["buy_price"]
                         cut_loss_price = round(buy_price * 0.40, 4)
 
-                        # Cut loss instantly at 50% of buy price
+                        # Cut loss — sell and done, no flip
                         if price <= cut_loss_price:
                             log.info(f"  [{pos_asset.upper()} {side}] CUT LOSS @ {price:.2%} (bought @ {buy_price:.2%})")
                             sp = market_sell(client, token_id, pos.get("actual_shares", BUY_AMOUNT), price, f"{pos_asset.upper()}-{side}")
@@ -980,40 +922,6 @@ def run():
                                          f"*** CUT-LOSS {side} @ {price:.2%} ***")
                                 pnl.record_sell(idx, sp, "CUT-LOSS", actual_shares=pos.get("actual_shares"))
                                 positions.remove(pos)
-
-                                # Flip to opposite side — only if not already a flip
-                                if not pos.get("is_flip"):
-                                    opp_side  = "NO" if side == "YES" else "YES"
-                                    opp_price = get_midpoint(client, opp_id)
-                                    if opp_price < 0.50:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too cheap (<50c)")
-                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                 f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too cheap")
-                                    elif opp_price >= 0.75:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP skipped -- {opp_side} @ {opp_price:.2%} too expensive (>=75c)")
-                                        ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                 f"FLIP SKIPPED {opp_side} @ {opp_price:.2%} too expensive")
-                                    else:
-                                        log.info(f"  [{pos_asset.upper()}] FLIP -> buying {opp_side} @ {opp_price:.2%}")
-                                        flip_fill, flip_actual = market_buy(client, opp_id, BUY_AMOUNT, opp_price, f"{pos_asset.upper()}-{opp_side}-FLIP")
-                                        if flip_fill is not None:
-                                            ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                                     f"*** FLIP BUY {opp_side} @ {opp_price:.2%} ***")
-                                            flip_idx = pnl.record_buy(pos_asset, pos_window, opp_side, BUY_AMOUNT, flip_fill, "OPEN-FLIP", actual_shares=flip_actual)
-                                            positions.append({
-                                                "trade_idx":    flip_idx,
-                                                "side":         opp_side,
-                                                "is_flip":      True,
-                                                "actual_shares": flip_actual,
-                                            })
-                                            pending.setdefault(pos_key, []).append({
-                                                "trade_idx": flip_idx,
-                                                "asset":     pos_asset,
-                                                "side":      opp_side,
-                                            })
-                                            log.info(f"  [{pos_asset.upper()}] FLIP complete -- now holding {opp_side} @ {flip_fill:.2%}")
-                                else:
-                                    log.info(f"  [{pos_asset.upper()} {side}] Already flipped once -- no more flips this window")
                             continue
 
                         # Sell main at 98c
@@ -1104,8 +1012,6 @@ def run():
                                 active_positions.setdefault(key, []).append({
                                     "trade_idx":    idx,
                                     "side":         s2_side,
-                                    "is_flip":      False,
-                                    "is_cheap":     False,
                                     "is_s2":        True,
                                     "s2_tp1_done":  False,
                                     "actual_shares": actual_shares,
@@ -1140,7 +1046,7 @@ def run():
                         ob_record(asset, yes_price, no_price, f"*** BUY YES @ {yes_price:.2%} ***")
                         idx = pnl.record_buy(asset, window_start, "YES", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "YES"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "is_flip": False, "actual_shares": actual_shares})
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "YES", "actual_shares": actual_shares})
                         traded.add(key)
 
                 elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
@@ -1154,7 +1060,7 @@ def run():
                         ob_record(asset, yes_price, no_price, f"*** BUY NO @ {no_price:.2%} ***")
                         idx = pnl.record_buy(asset, window_start, "NO", BUY_AMOUNT, fill, actual_shares=actual_shares, condition_id=cached_cid)
                         pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": "NO"})
-                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "is_flip": False, "actual_shares": actual_shares})
+                        active_positions.setdefault(key, []).append({"trade_idx": idx, "side": "NO", "actual_shares": actual_shares})
                         traded.add(key)
 
         except KeyboardInterrupt:
