@@ -158,6 +158,8 @@ POLL_SECS       = 2
 VOL_SWING = 0.40  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
+S2_ENTRY_AFTER = 360   # S2 entry opens at min 6 (360s)
+S2_STOP_BUY_AT = 720   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.05   # Buy cheap side if price >= 5c
 S2_BUY_MAX  = 0.10   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 2.0    # USDC stake for S2 trades
@@ -1080,7 +1082,44 @@ def run():
                                 vs["phase"] = "volatile"
                                 log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
-                # ── Only buy between 10-14 minutes ────────────────────────────
+                # ── Volatile: S2 only — S1 blocked entirely ───────────────────
+                if vol_state[asset]["phase"] == "volatile":
+                    if S2_ENTRY_AFTER <= secs_into <= S2_STOP_BUY_AT:
+                        yes_price = get_midpoint(client, yes_token)
+                        no_price  = get_midpoint(client, no_token)
+                        log.info(f"  [{asset.upper()}] VOLATILE — checking S2 cheap buy (YES={yes_price:.2%}, NO={no_price:.2%})")
+                        s2_side, s2_price, s2_token = None, None, None
+                        if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
+                            s2_side, s2_price, s2_token = "YES", yes_price, yes_token
+                        elif S2_BUY_MIN <= no_price <= S2_BUY_MAX:
+                            s2_side, s2_price, s2_token = "NO", no_price, no_token
+
+                        if s2_side:
+                            log.info(f"  [{asset.upper()}] S2: {s2_side} @ {s2_price:.2%} — buying cheap")
+                            fill, actual_shares = market_buy(client, s2_token, S2_AMOUNT, s2_price, f"{asset.upper()}-{s2_side}-S2")
+                            if fill is not None:
+                                ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***")
+                                idx = pnl.record_buy(asset, window_start, s2_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
+                                pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": s2_side})
+                                active_positions.setdefault(key, []).append({
+                                    "trade_idx":    idx,
+                                    "side":         s2_side,
+                                    "is_flip":      False,
+                                    "is_cheap":     False,
+                                    "is_s2":        True,
+                                    "s2_tp1_done":  False,
+                                    "actual_shares": actual_shares,
+                                })
+                        else:
+                            log.info(f"  [{asset.upper()}] S2: no cheap side found — skipping window")
+                    elif secs_into < S2_ENTRY_AFTER:
+                        log.info(f"  [{asset.upper()}] VOLATILE before S2 window — skipping entire window")
+                    else:
+                        log.info(f"  [{asset.upper()}] VOLATILE but S2 window closed — skipping entire window")
+                    traded.add(key)
+                    continue
+
+                # ── S1: only buy between 10–14 minutes (non-volatile) ─────────
                 if secs_into < ENTRY_AFTER:
                     continue
                 if secs_into > STOP_BUY_AT:
@@ -1089,37 +1128,6 @@ def run():
                 # ── Check buy trigger ─────────────────────────────────────────
                 yes_price = get_midpoint(client, yes_token)
                 no_price  = get_midpoint(client, no_token)
-
-                # ── Volatility cycle guard ────────────────────────────────────
-                if vol_state[asset]["phase"] == "volatile":
-                    log.info(f"  [{asset.upper()}] VOLATILE cycle detected — checking for S2 cheap buy")
-                    s2_side, s2_price, s2_token = None, None, None
-                    if S2_BUY_MIN <= yes_price <= S2_BUY_MAX:
-                        s2_side, s2_price, s2_token = "YES", yes_price, yes_token
-                    elif S2_BUY_MIN <= no_price <= S2_BUY_MAX:
-                        s2_side, s2_price, s2_token = "NO", no_price, no_token
-
-                    if s2_side:
-                        log.info(f"  [{asset.upper()}] S2: {s2_side} @ {s2_price:.2%} — buying cheap")
-                        fill, actual_shares = market_buy(client, s2_token, S2_AMOUNT, s2_price, f"{asset.upper()}-{s2_side}-S2")
-                        if fill is not None:
-                            ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***")
-                            idx = pnl.record_buy(asset, window_start, s2_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
-                            pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": s2_side})
-                            active_positions.setdefault(key, []).append({
-                                "trade_idx":    idx,
-                                "side":         s2_side,
-                                "is_flip":      False,
-                                "is_cheap":     False,
-                                "is_s2":        True,
-                                "s2_tp1_done":  False,
-                                "actual_shares": actual_shares,
-                            })
-                    else:
-                        log.info(f"  [{asset.upper()}] S2: no cheap side found (YES={yes_price:.2%}, NO={no_price:.2%}) — skipping")
-
-                    traded.add(key)
-                        continue
 
                 if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                     if buy_attempts.get(key, 0) >= 3:
