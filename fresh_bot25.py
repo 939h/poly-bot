@@ -243,7 +243,7 @@ def sheet_full_sync(asset_sheets, all_trades):
                 ])
             ws.clear()
             ws.update(rows, "A1")
-            log.info(f"  Sheets | {asset.upper()} tab synced ({len(trades)} trades) ✓")
+            # log.info(f"  Sheets | {asset.upper()} tab synced ({len(trades)} trades) ✓")
         except Exception as e:
             log.error(f"Sheet sync error [{asset.upper()}]: {e}")
 
