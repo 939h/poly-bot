@@ -137,7 +137,7 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = False
+DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_PRICE_MIN   = 0.78    # S1 monitor: direction detected when price >= 78c
 BUY_PRICE_MAX   = 0.84    # S1 monitor: direction detected when price <= 84c
