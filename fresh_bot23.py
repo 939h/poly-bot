@@ -223,10 +223,7 @@ def get_or_create_orderbook_sheet(gc_client):
             ob_sheet = spreadsheet.worksheet("Orderbook")
         except Exception:
             ob_sheet = spreadsheet.add_worksheet(title="Orderbook", rows=10000, cols=6)
-        # Always clear and reset headers on startup
-        ob_sheet.clear()
-        ob_sheet.update([["time", "asset", "yes", "no", "event", "pnl"]], "A1")
-        log.info("  Sheets | Orderbook tab cleared and ready ✓")
+        log.info("  Sheets | Orderbook tab ready ✓")
         return ob_sheet
     except Exception as e:
         log.error(f"Orderbook sheet error: {e}")
