@@ -1131,7 +1131,7 @@ def run():
 
                 if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                     if buy_attempts.get(key, 0) >= 3:
-                        log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
+                        # log.warning(f"  [{asset.upper()}] Max buy attempts (3) reached this window — skipping.")
                         continue
                     log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%} (attempt {buy_attempts.get(key,0)+1}/3)")
                     buy_attempts[key] = buy_attempts.get(key, 0) + 1
