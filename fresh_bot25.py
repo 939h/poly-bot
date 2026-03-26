@@ -1,6 +1,6 @@
 """
 Polymarket 15-Min Up/Down Bot — Fresh v25
-Markets: BTC, ETH, SOL
+Markets: BTC, ETH, SOL, XRP
 
 Strategy:
   1. BUY — enter YES or NO when price hits 80-85c between min 10-14 of window
