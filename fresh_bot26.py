@@ -922,6 +922,10 @@ def run():
                                          f"*** CUT-LOSS {side} @ {price:.2%} ***")
                                 pnl.record_sell(idx, sp, "CUT-LOSS", actual_shares=pos.get("actual_shares"))
                                 positions.remove(pos)
+                                # Force volatile — cut-loss proves market moved hard, open S2 window
+                                vol_state[pos_asset]["phase"] = "volatile"
+                                traded.discard(pos_key)
+                                log.info(f"  [{pos_asset.upper()}] Cut-loss → volatile forced, S2 window re-opened")
                             continue
 
                         # Sell main at 98c
