@@ -966,7 +966,7 @@ def run():
                         continue
 
                 # ── Continuous orderbook (min 5–15, every 5s) ────────────────
-                if 300 <= secs_into <= WINDOW_SECS and server_ts - last_ob_ts[asset] >= 5:
+                if 300 <= secs_into <= WINDOW_SECS and server_ts - last_ob_ts[asset] >= 10:
                     ob_record(asset, yes_price, no_price, "", vol_phase=vol_state[asset]["phase"], direction_flag=direction[asset] or "")
                     last_ob_ts[asset] = server_ts
 
