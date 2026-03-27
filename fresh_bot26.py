@@ -157,9 +157,9 @@ VOL_SWING = 0.25  # minimum move (in cents) for each leg
 S2_ENTRY_AFTER = 120   # S2 entry opens at min 6 (360s)
 S2_STOP_BUY_AT = 900   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.02   # Buy cheap side if price >= 2c
-S2_BUY_MAX  = 0.25   # Buy cheap side if price <= 10c
+S2_BUY_MAX  = 0.30   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 5.0    # USDC stake for S2 trades
-S2_TP1      = 0.30   # First take-profit: sell half at 15c
+S2_TP1      = 0.33   # First take-profit: sell half at 15c
 S2_TP2      = 0.40   # Second take-profit: sell rest at 40c
 
 GAMMA_API = "https://gamma-api.polymarket.com"
