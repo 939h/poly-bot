@@ -154,12 +154,12 @@ POLL_SECS       = 2
 VOL_SWING = 0.35  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
-S2_ENTRY_AFTER = 360   # S2 entry opens at min 6 (360s)
+S2_ENTRY_AFTER = 120   # S2 entry opens at min 6 (360s)
 S2_STOP_BUY_AT = 720   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.02   # Buy cheap side if price >= 2c
 S2_BUY_MAX  = 0.15   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 5.0    # USDC stake for S2 trades
-S2_TP1      = 0.15   # First take-profit: sell half at 15c
+S2_TP1      = 0.30   # First take-profit: sell half at 15c
 S2_TP2      = 0.40   # Second take-profit: sell rest at 40c
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -927,7 +927,7 @@ def run():
                     continue
 
                 # ── Update volatility cycle state (track from min 5 onwards) ──
-                if secs_into >= 300:
+                if secs_into >= 1: 
                     _vs_price = get_midpoint(client, yes_token)
                     if _vs_price > 0:
                         vs = vol_state[asset]
@@ -959,7 +959,7 @@ def run():
                                 log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
                 # ── Fetch prices once (used by S2 check + S1 monitor) ────────
-                if secs_into >= 300:
+                if secs_into >= 1:
                     yes_price = get_midpoint(client, yes_token)
                     no_price  = get_midpoint(client, no_token)
                     if yes_price <= 0 or no_price <= 0:
