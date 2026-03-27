@@ -1004,7 +1004,7 @@ def run():
                     continue
 
                 # ── S1 direction monitor (no buying) ──────────────────────────
-                if secs_into >= 300 and direction[asset] is None:
+                if secs_into >= 60 and direction[asset] is None:
                     if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                         direction[asset] = "YES"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=YES @ {yes_price:.2%}")
