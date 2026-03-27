@@ -1010,9 +1010,11 @@ def run():
                     if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                         direction[asset] = "YES"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=YES @ {yes_price:.2%}")
+                        ob_record(asset, yes_price, no_price, f"S1 signal YES @ {yes_price:.2%}")
                     elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
                         direction[asset] = "NO"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=NO @ {no_price:.2%}")
+                        ob_record(asset, yes_price, no_price, f"S1 signal NO @ {no_price:.2%}")
 
                     if direction[asset] is not None:
                         set_dirs = {a: direction[a] for a in ASSETS if direction[a] is not None}
