@@ -927,7 +927,7 @@ def run():
                     continue
 
                 # ── Update volatility cycle state (track from min 5 onwards) ──
-                if secs_into >= 60: 
+                if secs_into >= 180: 
                     _vs_price = get_midpoint(client, yes_token)
                     if _vs_price > 0:
                         vs = vol_state[asset]
@@ -959,7 +959,7 @@ def run():
                                 log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
                 # ── Fetch prices once (used by S2 check + S1 monitor) ────────
-                if secs_into >= 60:
+                if secs_into >= 180:
                     yes_price = get_midpoint(client, yes_token)
                     no_price  = get_midpoint(client, no_token)
                     if yes_price <= 0 or no_price <= 0:
@@ -1004,7 +1004,7 @@ def run():
                     continue
 
                 # ── S1 direction monitor (no buying) ──────────────────────────
-                if secs_into >= 60 and direction[asset] is None:
+                if secs_into >= 180 and direction[asset] is None:
                     if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                         direction[asset] = "YES"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=YES @ {yes_price:.2%}")
