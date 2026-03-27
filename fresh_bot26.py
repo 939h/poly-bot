@@ -776,6 +776,7 @@ def run():
     traded               = set(pending.keys())
     token_cache          = {}
     last_sweep           = 0   # resolution sweep every 20 mins
+    last_ob_ts           = {asset: 0 for asset in ASSETS}  # orderbook 5s interval
     active_positions = {}
     # phase: "neutral" → "pumped"/"dumped" → "volatile"
     # start = baseline price at min 5; peak/trough updated during leg tracking
@@ -847,17 +848,6 @@ def run():
                 yes_token, no_token = tokens[0], tokens[1]
                 cached_cid = tokens[2] if len(tokens) > 2 else None
 
-                # ── Record orderbook to Google Sheets (only when holding a position) ──
-                if S2_ENTRY_AFTER <= secs_into <= WINDOW_SECS:
-                    has_position = any(
-                        pa == asset for (pa, pw) in active_positions
-                        if pw == window_start
-                    )
-                    if has_position:
-                        yes_price_ob = get_midpoint(client, yes_token)
-                        no_price_ob  = get_midpoint(client, no_token)
-                        if yes_price_ob > 0 and no_price_ob > 0:
-                            ob_record(asset, yes_price_ob, no_price_ob, "holding")
 
                 # ── Monitor active positions for sell trigger ─────────────────
                 for pos_key, positions in list(active_positions.items()):
@@ -971,6 +961,11 @@ def run():
                     no_price  = get_midpoint(client, no_token)
                     if yes_price <= 0 or no_price <= 0:
                         continue
+
+                # ── Continuous orderbook (min 5–15, every 5s) ────────────────
+                if 300 <= secs_into <= WINDOW_SECS and server_ts - last_ob_ts[asset] >= 5:
+                    ob_record(asset, yes_price, no_price, "")
+                    last_ob_ts[asset] = server_ts
 
                 # ── Volatile: S2 only ─────────────────────────────────────────
                 if vol_state[asset]["phase"] == "volatile":
