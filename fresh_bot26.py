@@ -252,7 +252,7 @@ def get_or_create_orderbook_sheet(gc_client):
             ob_sheet = spreadsheet.worksheet("Orderbook")
         except Exception:
             ob_sheet = spreadsheet.add_worksheet(title="Orderbook", rows=10000, cols=6)
-        ob_sheet.update([["time", "asset", "YES", "NO", "event", "pnl"]], "A1")
+        ob_sheet.update([["time", "asset", "YES", "NO", "vol_state", "direction", "event", "pnl"]], "A1")
         log.info("  Sheets | Orderbook and ready ✓")
         return ob_sheet
     except Exception as e:
@@ -264,7 +264,7 @@ def get_or_create_orderbook_sheet(gc_client):
 _ob_buffer = []
 _ob_sheet  = None
 
-def ob_record(asset, yes_price, no_price, event="", pnl=0.0):
+def ob_record(asset, yes_price, no_price, event="", pnl=0.0, vol_phase="", direction_flag=""):
     """Add a row to the orderbook buffer."""
     global _ob_buffer
     now = datetime.now(MYT).strftime("%m/%d %H:%M:%S")  # shorter: 03/21 19:25:01
@@ -273,6 +273,8 @@ def ob_record(asset, yes_price, no_price, event="", pnl=0.0):
         asset.upper(),
         round(yes_price, 4),
         round(no_price, 4),
+        vol_phase,
+        direction_flag or "",
         event,
         round(pnl, 4) if pnl else ""
     ])
@@ -883,7 +885,7 @@ def run():
                                 sp = market_sell(client, token_id, half, price, f"{pos_asset.upper()}-{side}-S2-TP1")
                                 if sp is not None:
                                     ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                              f"*** S2 TP1 {side} @ {price:.2%} ***")
+                                              f"*** S2 TP1 {side} @ {price:.2%} ***", vol_phase=vol_state[pos_asset]["phase"], direction_flag=direction[pos_asset] or "")
                                     pnl.record_sell(idx, sp, "S2-TP1", actual_shares=half)
                                     pos["actual_shares"] = round(pos.get("actual_shares", S2_AMOUNT) - half, 4)
                                     pos["s2_tp1_done"]   = True
@@ -892,7 +894,7 @@ def run():
                                 sp = market_sell(client, token_id, pos.get("actual_shares"), price, f"{pos_asset.upper()}-{side}-S2-TP2")
                                 if sp is not None:
                                     ob_record(pos_asset, get_midpoint(client, pyt), get_midpoint(client, pnt),
-                                              f"*** S2 TP2 {side} @ {price:.2%} ***")
+                                              f"*** S2 TP2 {side} @ {price:.2%} ***", vol_phase=vol_state[pos_asset]["phase"], direction_flag=direction[pos_asset] or "")
                                     pnl.record_sell(idx, sp, "S2-TP2", actual_shares=pos.get("actual_shares"))
                                     positions.remove(pos)
                                     log.info(f"  [{pos_asset.upper()} {side}] S2 TP2 @ {price:.2%} — fully closed")
@@ -965,7 +967,7 @@ def run():
 
                 # ── Continuous orderbook (min 5–15, every 5s) ────────────────
                 if 300 <= secs_into <= WINDOW_SECS and server_ts - last_ob_ts[asset] >= 5:
-                    ob_record(asset, yes_price, no_price, "")
+                    ob_record(asset, yes_price, no_price, "", vol_phase=vol_state[asset]["phase"], direction_flag=direction[asset] or "")
                     last_ob_ts[asset] = server_ts
 
                 # ── Volatile: S2 only ─────────────────────────────────────────
@@ -982,7 +984,7 @@ def run():
                             log.info(f"  [{asset.upper()}] S2: {s2_side} @ {s2_price:.2%} — buying cheap")
                             fill, actual_shares = market_buy(client, s2_token, S2_AMOUNT, s2_price, f"{asset.upper()}-{s2_side}-S2")
                             if fill is not None:
-                                ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***")
+                                ob_record(asset, yes_price, no_price, f"*** S2 BUY {s2_side} @ {s2_price:.2%} ***", vol_phase=vol_state[asset]["phase"], direction_flag=direction[asset] or "")
                                 idx = pnl.record_buy(asset, window_start, s2_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
                                 pending.setdefault(key, []).append({"trade_idx": idx, "asset": asset, "side": s2_side})
                                 active_positions.setdefault(key, []).append({
@@ -1006,11 +1008,11 @@ def run():
                     if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                         direction[asset] = "YES"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=YES @ {yes_price:.2%}")
-                        ob_record(asset, yes_price, no_price, f"S1 signal YES @ {yes_price:.2%}")
+                        ob_record(asset, yes_price, no_price, f"S1 signal YES @ {yes_price:.2%}", vol_phase=vol_state[asset]["phase"], direction_flag="YES")
                     elif BUY_PRICE_MIN <= no_price <= BUY_PRICE_MAX:
                         direction[asset] = "NO"
                         log.info(f"  [{asset.upper()}] S1 SIGNAL: direction=NO @ {no_price:.2%}")
-                        ob_record(asset, yes_price, no_price, f"S1 signal NO @ {no_price:.2%}")
+                        ob_record(asset, yes_price, no_price, f"S1 signal NO @ {no_price:.2%}", vol_phase=vol_state[asset]["phase"], direction_flag="NO")
 
                     if direction[asset] is not None:
                         set_dirs = {a: direction[a] for a in ASSETS if direction[a] is not None}
@@ -1041,7 +1043,7 @@ def run():
                                             if fill is not None:
                                                 div_yes_p = get_midpoint(client, div_tokens[0])
                                                 div_no_p  = get_midpoint(client, div_tokens[1])
-                                                ob_record(diverging, div_yes_p, div_no_p, f"*** PEER S2 BUY {cheap_side} @ {div_price:.2%} ***")
+                                                ob_record(diverging, div_yes_p, div_no_p, f"*** PEER S2 BUY {cheap_side} @ {div_price:.2%} ***", vol_phase=vol_state[diverging]["phase"], direction_flag=direction[diverging] or "")
                                                 idx = pnl.record_buy(diverging, window_start, cheap_side, S2_AMOUNT, fill, "OPEN-S2", actual_shares=actual_shares)
                                                 pending.setdefault(div_key, []).append({"trade_idx": idx, "asset": diverging, "side": cheap_side})
                                                 active_positions.setdefault(div_key, []).append({
