@@ -155,7 +155,7 @@ VOL_SWING = 0.35  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
 S2_ENTRY_AFTER = 120   # S2 entry opens at min 6 (360s)
-S2_STOP_BUY_AT = 720   # S2 entry closes at min 12 (720s)
+S2_STOP_BUY_AT = 900   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.02   # Buy cheap side if price >= 2c
 S2_BUY_MAX  = 0.15   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 5.0    # USDC stake for S2 trades
