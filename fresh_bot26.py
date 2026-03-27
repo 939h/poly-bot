@@ -157,7 +157,7 @@ VOL_SWING = 0.35  # minimum move (in cents) for each leg
 S2_ENTRY_AFTER = 360   # S2 entry opens at min 6 (360s)
 S2_STOP_BUY_AT = 720   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.02   # Buy cheap side if price >= 2c
-S2_BUY_MAX  = 0.10   # Buy cheap side if price <= 10c
+S2_BUY_MAX  = 0.15   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 5.0    # USDC stake for S2 trades
 S2_TP1      = 0.15   # First take-profit: sell half at 15c
 S2_TP2      = 0.40   # Second take-profit: sell rest at 40c
