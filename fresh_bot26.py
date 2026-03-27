@@ -245,13 +245,14 @@ def sheet_full_sync(asset_sheets, all_trades):
 
 
 def get_or_create_orderbook_sheet(gc_client):
-    """Get or create the Orderbook tab — clears old data on startup."""
+    """Get or create the Orderbook tab — writes header row on startup."""
     try:
         spreadsheet = gc_client.open_by_key(SHEET_ID)
         try:
             ob_sheet = spreadsheet.worksheet("Orderbook")
         except Exception:
             ob_sheet = spreadsheet.add_worksheet(title="Orderbook", rows=10000, cols=6)
+        ob_sheet.update([["time", "asset", "YES", "NO", "event", "pnl"]], "A1")
         log.info("  Sheets | Orderbook and ready ✓")
         return ob_sheet
     except Exception as e:
