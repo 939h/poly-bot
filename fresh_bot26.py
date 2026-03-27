@@ -927,7 +927,7 @@ def run():
                     continue
 
                 # ── Update volatility cycle state (track from min 5 onwards) ──
-                if secs_into >= 1: 
+                if secs_into >= 60: 
                     _vs_price = get_midpoint(client, yes_token)
                     if _vs_price > 0:
                         vs = vol_state[asset]
@@ -959,7 +959,7 @@ def run():
                                 log.info(f"  [{asset.upper()}] VOL: cycle complete — dump then pump (trough {vs['trough']:.2%} → {_vs_price:.2%})")
 
                 # ── Fetch prices once (used by S2 check + S1 monitor) ────────
-                if secs_into >= 1:
+                if secs_into >= 60:
                     yes_price = get_midpoint(client, yes_token)
                     no_price  = get_midpoint(client, no_token)
                     if yes_price <= 0 or no_price <= 0:
