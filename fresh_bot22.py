@@ -136,17 +136,17 @@ def record_orderbook(asset, yes_price, no_price):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DRY_RUN         = False
-ASSETS          = ["btc", "eth", "sol"]
+DRY_RUN         = True
+ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.82    # Buy if price >= 82c
-BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.97    # Sell main shares at 97c
+BUY_PRICE_MIN   = 0.99    # Buy if price >= 82c
+BUY_PRICE_MAX   = 0.99    # Buy if price <= 84c
+SELL_PRICE      = 1.00    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+ENTRY_AFTER     = 1     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 780     # Stop buying after 13 minutes (780s)
 WINDOW_SECS     = 900     # 15-minute window
-POLL_SECS       = 1
+POLL_SECS       = 2
 
 # ── Volatility Guard ──────────────────────────────────────────────────────────
 VOLATILITY_CHECK_INTERVAL = 600   # check every 10 minutes
