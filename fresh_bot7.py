@@ -843,9 +843,7 @@ def run():
                 if secs_into > STOP_BUY_AT:
                     continue
 
-                # ── Check buy trigger (reuse cached prices) ───────────────────
-                yes_price = yes_price_ob
-                no_price  = no_price_ob
+      
 
                 if BUY_PRICE_MIN <= yes_price <= BUY_PRICE_MAX:
                     log.info(f"  [{asset.upper()}] TRIGGER: YES @ {yes_price:.2%} — asking Gemini...")
