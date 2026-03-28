@@ -110,15 +110,15 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_SHARES      = 10
-BUY_PRICE_MIN   = 0.80    # Buy if price >= 80c
+BUY_PRICE_MIN   = 0.50    # Buy if price >= 80c
 BUY_PRICE_MAX   = 0.85    # Buy if price <= 85c
 SELL_PRICE      = 0.99    # Sell main shares at 95c
 INS_SHARES      = 20      # Insurance shares (opposite side)
-INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+INS_MAX_PRICE   = 0.01   # Buy insurance only if price <= 1.5c
+ENTRY_AFTER     = 1     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
-POLL_SECS       = 1
+POLL_SECS       = 3
 
 GAMMA_API   = "https://gamma-api.polymarket.com"
 CLOB_API    = "https://clob.polymarket.com"
@@ -761,12 +761,7 @@ def run():
 
                 yes_token, no_token = tokens
 
-                # ── Record orderbook silently to log file ─────────────────────
-                yes_price_ob = get_midpoint(client, yes_token)
-                no_price_ob  = get_midpoint(client, no_token)
-                if yes_price_ob > 0 and no_price_ob > 0:
-                    record_orderbook(asset, yes_price_ob, no_price_ob)
-                    record_price_history(asset, window_start, yes_price_ob, no_price_ob)
+              
 
                 # ── Monitor active positions for sell trigger ─────────────────
                 for pos_key, positions in list(active_positions.items()):
