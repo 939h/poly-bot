@@ -140,13 +140,13 @@ def record_orderbook(asset, yes_price, no_price):
 DRY_RUN         = True
 ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_AMOUNT      = 5       # USDC to spend per trade
-BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
-BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.97    # Sell main shares at 97c
+BUY_PRICE_MIN   = 0.99    # Buy if price >= 82c
+BUY_PRICE_MAX   = 0.99    # Buy if price <= 84c
+SELL_PRICE      = 0.99    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 TRADING_HOURS   = False   # Set True to restrict trading to 12:30–20:00 MYT
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
-STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
+ENTRY_AFTER     = 10     # Start buying after 10 minutes (600s)
+STOP_BUY_AT     = 780     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 2
 
@@ -158,8 +158,8 @@ POLL_SECS       = 2
 VOL_SWING = 0.40  # minimum move (in cents) for each leg
 
 # ── Strategy 2 — Volatility Rebound Buy ──────────────────────────────────────
-S2_ENTRY_AFTER = 360   # S2 entry opens at min 6 (360s)
-S2_STOP_BUY_AT = 720   # S2 entry closes at min 12 (720s)
+S2_ENTRY_AFTER = 900   # S2 entry opens at min 6 (360s)
+S2_STOP_BUY_AT = 900   # S2 entry closes at min 12 (720s)
 S2_BUY_MIN  = 0.05   # Buy cheap side if price >= 5c
 S2_BUY_MAX  = 0.10   # Buy cheap side if price <= 10c
 S2_AMOUNT   = 2.0    # USDC stake for S2 trades
