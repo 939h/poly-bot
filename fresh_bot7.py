@@ -101,9 +101,40 @@ _ob_handler = logging.FileHandler("fresh_bot7.log")
 _ob_handler.setFormatter(logging.Formatter("%(asctime)s [ORDERBOOK] %(message)s"))
 ob_logger.addHandler(_ob_handler)
 
-def record_orderbook(asset, yes_price, no_price):
-    """Record YES/NO prices silently to log file only."""
+# ── Settings Update ───────────────────────────────────────────────────────────
+POLL_SECS       = 3
+BUFFER_SIZE     = 15      # Seconds to buffer before sheet sync
+
+# ── Buffered Orderbook Logger ────────────────────────────────────────────────
+ob_buffer = []
+
+def record_orderbook(asset, yes_price, no_price, spreadsheet=None):
+    """Record prices to local log and buffer for Google Sheets batch upload."""
+    global ob_buffer
+    
+    # 1. Silent Local Log
     ob_logger.info(f"{asset.upper()} | YES={yes_price:.4f} NO={no_price:.4f}")
+    
+    # 2. Add to Buffer
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    ob_buffer.append([timestamp, asset.upper(), yes_price, no_price])
+    
+    # 3. If buffer is full, push to "Orderbook" tab in Google Sheets
+    if len(ob_buffer) >= BUFFER_SIZE and spreadsheet is not None:
+        try:
+            # Try to find 'Orderbook' tab, create if missing
+            try:
+                ob_sheet = spreadsheet.worksheet("Orderbook")
+            except:
+                ob_sheet = spreadsheet.add_worksheet(title="Orderbook", rows="5000", cols="4")
+                ob_sheet.append_row(["Time", "Asset", "YES", "NO"]) # Header
+            
+            # Send all 15 rows in ONE api call
+            ob_sheet.append_rows(ob_buffer)
+            ob_buffer = [] # Clear the buffer
+            log.info(f"  Sheets | Orderbook batch sync ({BUFFER_SIZE} rows) ✓")
+        except Exception as e:
+            log.error(f"Orderbook Sheet sync error: {e}")
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -117,8 +148,7 @@ INS_SHARES      = 20      # Insurance shares (opposite side)
 INS_MAX_PRICE   = 0.015   # Buy insurance only if price <= 1.5c
 ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
-WINDOW_SECS     = 900     # 15-minute window
-POLL_SECS       = 1
+WINDOW_SECS     = 900     # 15-minute windo
 
 GAMMA_API   = "https://gamma-api.polymarket.com"
 CLOB_API    = "https://clob.polymarket.com"
@@ -761,12 +791,8 @@ def run():
 
                 yes_token, no_token = tokens
 
-                # ── Record orderbook silently to log file ─────────────────────
-                yes_price_ob = get_midpoint(client, yes_token)
-                no_price_ob  = get_midpoint(client, no_token)
-                if yes_price_ob > 0 and no_price_ob > 0:
-                    record_orderbook(asset, yes_price_ob, no_price_ob)
-                    record_price_history(asset, window_start, yes_price_ob, no_price_ob)
+                # Inside your main loop:
+                record_orderbook(asset, yes_price, no_price, spreadsheet=pnl.sheet.spreadsheet if GSHEETS_OK else None)
 
                 # ── Monitor active positions for sell trigger ─────────────────
                 for pos_key, positions in list(active_positions.items()):
