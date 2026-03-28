@@ -857,18 +857,7 @@ def run():
                 yes_token, no_token = tokens[0], tokens[1]
                 cached_cid = tokens[2] if len(tokens) > 2 else None
 
-                # ── Record orderbook to Google Sheets (only when holding a position) ──
-                if ENTRY_AFTER <= secs_into <= WINDOW_SECS:
-                    has_position = any(
-                        pa == asset for (pa, pw) in active_positions
-                        if pw == window_start
-                    )
-                    if has_position:
-                        yes_price_ob = get_midpoint(client, yes_token)
-                        no_price_ob  = get_midpoint(client, no_token)
-                        if yes_price_ob > 0 and no_price_ob > 0:
-                            ob_record(asset, yes_price_ob, no_price_ob, "holding")
-
+          
                 # ── Monitor active positions for sell trigger ─────────────────
                 for pos_key, positions in list(active_positions.items()):
                     pos_asset, pos_window = pos_key
