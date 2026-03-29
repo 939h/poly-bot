@@ -142,7 +142,7 @@ ASSETS          = ["btc", "eth", "sol", "xrp"]
 BUY_AMOUNT      = 2       # USDC to spend per trade
 BUY_PRICE_MIN   = 0.80    # Buy if price >= 82c
 BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
-SELL_PRICE      = 0.97    # Sell main shares at 97c
+SELL_PRICE      = 0.92    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 TRADING_HOURS   = False   # Set True to restrict trading to 12:30–20:00 MYT
 ENTRY_AFTER     = 660     # Start buying after 10 minutes (600s)
