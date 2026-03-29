@@ -213,7 +213,17 @@ async def check_global_correlation(asset_name):
         print(f"🚨 GLOBAL PAUSE ({unique_assets} assets dumping). Locked for 60s.")
         crash_mode_until = now + GLOBAL_PAUSE_DUR
 
-# ── Asset Monitor ─────────────────────────────────────────────────────────────
+def _get_midpoint_sync(client, token_id):
+    """Fetch live CLOB midpoint price (sync, runs in thread)."""
+    try:
+        return float(client.get_midpoint(token_id)["mid"])
+    except Exception:
+        return None
+
+async def get_live_price(client, token_id):
+    return await asyncio.to_thread(_get_midpoint_sync, client, token_id)
+
+
 async def monitor_asset(session, asset, client):
     state_info = active_trades[asset]
     try:
@@ -260,13 +270,14 @@ async def monitor_asset(session, asset, client):
                                 label = f"{asset.upper()}-{side.upper()}"
                                 fill, actual_shares = await market_buy(client, token_id, current_prices[side], label)
                                 if fill is not None:
+                                    entry_time = time.time()  # capture AFTER buy completes
                                     print(f"🎯 BUY {asset.upper()} {side.upper()} at {fill:.3f}")
                                     state_info.update({
                                         "state":         "HOLDING",
                                         "side":          side,
                                         "entry_p":       fill,
                                         "peak_p":        fill,
-                                        "time":          now,
+                                        "time":          entry_time,
                                         "token_id":      token_id,
                                         "actual_shares": actual_shares,
                                     })
@@ -274,7 +285,9 @@ async def monitor_asset(session, asset, client):
 
             elif state_info["state"] == "HOLDING":
                 side = state_info["side"]
-                price = current_prices[side]
+                # Use live CLOB midpoint for accurate exit pricing
+                live = await get_live_price(client, state_info["token_id"])
+                price = live if live is not None else current_prices[side]
                 if price > state_info["peak_p"]:
                     state_info["peak_p"] = price
 
