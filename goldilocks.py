@@ -28,6 +28,7 @@ import os
 import requests
 import numpy as np
 from collections import deque
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -74,6 +75,7 @@ active_trades    = {
 trigger_log      = deque()
 crash_mode_until = 0
 token_cache      = {}   # (asset, window_ts) -> (yes_token, no_token)
+trade_history    = []   # [(pnl_usdc, reason), ...]
 
 # ── Client Init ───────────────────────────────────────────────────────────────
 def build_client():
@@ -177,6 +179,28 @@ async def market_buy(client, token_id, price, label):
 async def market_sell(client, token_id, shares, price, label):
     return await asyncio.to_thread(_market_sell_sync, client, token_id, shares, price, label)
 
+# ── 15-Min Summary ───────────────────────────────────────────────────────────
+async def print_15min_summary():
+    while True:
+        now  = datetime.now()
+        wait = (15 - (now.minute % 15)) * 60 - now.second
+        await asyncio.sleep(wait)
+
+        count = len(trade_history)
+        wins  = sum(1 for p, _ in trade_history if p > 0)
+        total = sum(p for p, _ in trade_history)
+        wr    = (wins / count * 100) if count else 0
+
+        print("\n" + "=" * 45)
+        print(f"  SUMMARY | {datetime.now().strftime('%H:%M')}")
+        print("=" * 45)
+        print(f"  Total Realized PnL : ${total:.4f} USDC")
+        print(f"  Total Trades       : {count}")
+        print(f"  Win Rate           : {wr:.1f}%")
+        if count:
+            print(f"  Avg PnL / Trade    : ${total/count:.4f} USDC")
+        print("=" * 45 + "\n")
+
 # ── Crash Guard ───────────────────────────────────────────────────────────────
 async def check_global_correlation(asset_name):
     global crash_mode_until
@@ -259,10 +283,14 @@ async def monitor_asset(session, asset, client):
 
                 if profit >= PROFIT_TRIGGER and dip_from_peak >= TRAILING_DROP:
                     await market_sell(client, state_info["token_id"], state_info["actual_shares"], price, label)
+                    pnl_usdc = round(state_info["actual_shares"] * price - BUY_AMOUNT, 4)
+                    trade_history.append((pnl_usdc, "TAKE-PROFIT"))
                     print(f"💰 EXIT {asset.upper()} {side.upper()} at {price} | PnL: +{profit:.3f}")
                     state_info.update({"state": "WATCHING", "side": None, "entry_p": 0, "peak_p": 0, "time": 0, "token_id": None, "actual_shares": 0.0})
                 elif time_held > 15 or profit < -0.12:  # Tightened Stop Loss slightly
                     await market_sell(client, state_info["token_id"], state_info["actual_shares"], price, label)
+                    pnl_usdc = round(state_info["actual_shares"] * price - BUY_AMOUNT, 4)
+                    trade_history.append((pnl_usdc, "STOP"))
                     print(f"⚠️ EXIT {asset.upper()} {side.upper()} (SAFE) at {price} | PnL: {profit:.3f}")
                     state_info.update({"state": "WATCHING", "side": None, "entry_p": 0, "peak_p": 0, "time": 0, "token_id": None, "actual_shares": 0.0})
 
@@ -287,7 +315,8 @@ async def main():
     print(f"   Buy=${BUY_AMOUNT} | Threshold={BASE_THRESHOLD} | Profit={PROFIT_TRIGGER} | Trail={TRAILING_DROP}")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
-            prefetch_tokens_loop(),   # background token pre-caching
+            print_15min_summary(),       # 15-min PnL summary
+            prefetch_tokens_loop(),      # background token pre-caching
             _run_loop(session, client),  # main polling loop
         )
 
