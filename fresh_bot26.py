@@ -145,7 +145,7 @@ BUY_PRICE_MAX   = 0.84    # Buy if price <= 84c
 SELL_PRICE      = 0.97    # Sell main shares at 97c
 FEE_BUFFER      = 0.98    # 2% buffer covers taker fee (~0.88% at 82-84c) + rounding
 TRADING_HOURS   = False   # Set True to restrict trading to 12:30–20:00 MYT
-ENTRY_AFTER     = 600     # Start buying after 10 minutes (600s)
+ENTRY_AFTER     = 660     # Start buying after 10 minutes (600s)
 STOP_BUY_AT     = 840     # Stop buying after 14 minutes (840s)
 WINDOW_SECS     = 900     # 15-minute window
 POLL_SECS       = 2
