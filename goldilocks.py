@@ -223,9 +223,12 @@ async def monitor_asset(session, asset, client):
 
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
             data = await resp.json()
+            raw_prices = data[0]['outcomePrices']
+            if isinstance(raw_prices, str):
+                raw_prices = json.loads(raw_prices)
             current_prices = {
-                'yes': float(data[0]['outcomePrices'][0]),
-                'no':  float(data[0]['outcomePrices'][1])
+                'yes': float(raw_prices[0]),
+                'no':  float(raw_prices[1])
             }
             now = time.time()
 
