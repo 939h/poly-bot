@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "polymarket": {
+      "command": "npx",
+      "args": ["-y", "@iqai/mcp-polymarket"]
+    }
+  }
+}
