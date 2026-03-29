@@ -296,15 +296,19 @@ async def monitor_asset(session, asset, client):
 
     except asyncio.CancelledError:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️ [{asset.upper()}] monitor error: {e}")
 
 # ── Poll Loop ─────────────────────────────────────────────────────────────────
 async def _run_loop(session, client):
     """Polls all assets every CHECK_INTERVAL seconds."""
+    iterations = 0
     while True:
         start_time = time.time()
         await asyncio.gather(*[monitor_asset(session, a, client) for a in ASSETS])
+        iterations += 1
+        if iterations % 120 == 0:  # every 60s (120 x 0.5s)
+            print(f"  👁 WATCHING | {datetime.now().strftime('%H:%M:%S')} | {', '.join(a.upper() for a in ASSETS)}")
         await asyncio.sleep(max(0, CHECK_INTERVAL - (time.time() - start_time)))
 
 # ── Main ──────────────────────────────────────────────────────────────────────
