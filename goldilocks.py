@@ -311,7 +311,16 @@ async def _run_loop(session, client):
         await asyncio.gather(*[monitor_asset(session, a, client) for a in ASSETS])
         iterations += 1
         if iterations % 120 == 0:  # every 60s (120 x 0.5s)
-            print(f"  👁 WATCHING | {datetime.now().strftime('%H:%M:%S')} | {', '.join(a.upper() for a in ASSETS)}")
+            status = []
+            for a in ASSETS:
+                s = active_trades[a]
+                yes_len = len(price_histories[a]['yes'])
+                no_len  = len(price_histories[a]['no'])
+                if s["state"] == "HOLDING":
+                    status.append(f"{a.upper()}:HOLDING-{s['side'].upper()}")
+                else:
+                    status.append(f"{a.upper()}:WATCH(y={yes_len},n={no_len})")
+            print(f"  👁 {datetime.now().strftime('%H:%M:%S')} | {' | '.join(status)}")
         await asyncio.sleep(max(0, CHECK_INTERVAL - (time.time() - start_time)))
 
 # ── Main ──────────────────────────────────────────────────────────────────────
