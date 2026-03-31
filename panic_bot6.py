@@ -778,7 +778,7 @@ def main():
             last_window = window_start
 
             if secs_into >= SETTLE_SECS and not armed_logged:
-                log.info("[ARMED] Window armed — scanning for panic triggers")
+                log.debug("[ARMED] Window armed — scanning for panic triggers")
                 armed_logged = True
             scan_markets(client, window_start, secs_into, executor)
             manage_positions(client)
