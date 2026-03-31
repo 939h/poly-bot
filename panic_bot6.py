@@ -102,9 +102,9 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
 ENTRY_PRICE_CAP  = 0.15   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 25% from reference price
-SD_LOOKBACK      = 10     # condition 3: sigma — number of samples for baseline
-SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more signals)
+DROP_FROM_REF    = 0.35   # condition 2: price must drop >= 25% from reference price
+SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
+SD_THRESH        = 2.5    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
@@ -123,7 +123,7 @@ HOLD_LATE_SECS   = 20     # 10-15 min (late market)   — wait 20s before sellin
 
 # --- Timing ------------------------------------------------------------------
 POLL_SECS        = 1      # seconds between each price scan
-STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
+STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
 
