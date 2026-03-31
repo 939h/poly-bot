@@ -108,8 +108,8 @@ SD_THRESH        = 2.5    #              sigma floor multiplier (looser = more s
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 4.0    # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.20   # sell remaining shares if price drops 20% from peak after TP1
+TP2_MULT         = 40    # take profit 2 — sell remaining 50% of shares at entry x this
+TRAILING_STOP    = 0.99   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
