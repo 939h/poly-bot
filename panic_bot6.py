@@ -295,7 +295,7 @@ def get_midpoint(client, token_id):
 def market_buy(client, token_id, label):
     amount = round(ORDER_AMOUNT, 4)
     if DRY_RUN:
-        log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC", label, amount)
+        log.info("[BUY] MARKET BUY %s $%.2f USDC", label, amount)
         return True
     try:
         order = client.create_market_order(
@@ -319,7 +319,7 @@ def market_buy(client, token_id, label):
 def market_sell(client, token_id, shares, price, label):
     amount = round(shares * price, 4)
     if DRY_RUN:
-        log.info("[DRY-RUN] MARKET SELL %s $%.4f USDC", label, amount)
+        log.info("[BUY] MARKET SELL %s $%.4f USDC", label, amount)
         return True
     try:
         order = client.create_market_order(
@@ -387,7 +387,7 @@ def check_trigger(key, current_price, secs_into):
     # Need SD_LOOKBACK pts for any signal — keep warming until ready
     if pts < SD_LOOKBACK:
         if key.endswith("_yes"):
-            log.info("[SCAN] %s  price=%.4f  warming up (%d/%d pts)",
+            log.debug("[SCAN] %s  price=%.4f  warming up (%d/%d pts)",
                      key, current_price, pts, SD_LOOKBACK)
         return False
 
@@ -408,7 +408,7 @@ def check_trigger(key, current_price, secs_into):
     # ── Condition 2: velocity — price dropped enough from rolling mean ─────────
     drop_pct = (ref - current_price) / ref if ref > 0 else 0
     if drop_pct < DROP_FROM_REF:
-        log.info("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
+        log.info("[debug] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
                  key, current_price, ref, drop_pct * 100, DROP_FROM_REF * 100)
         return False
 
@@ -426,7 +426,7 @@ def check_trigger(key, current_price, secs_into):
     floor = max(mean_p - (SD_THRESH * std_p), mean_p * 0.01)
 
     if current_price >= floor:
-        log.info("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  sigma=NO(floor=%.4f)",
+        log.debug("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  sigma=NO(floor=%.4f)",
                  key, current_price, ref, drop_pct * 100, floor)
         return False
 
@@ -556,7 +556,7 @@ def manage_positions(client):
         # ── Exit 1: TP1 — sell 50% of shares ─────────────────────────────────
         if not pos["tp1_done"] and current_price >= pos["tp1_price"]:
             tp1_sh  = pos["tp1_shares"]
-            tp1_pnl = (current_price - entry) * tp1_sh
+            tp1_pnl = (current_price) * tp1_sh
             log.info("[TP1] %s  price=%.4f  sold=%.4fsh  PnL=$%.4f  holding %.4fsh for TP2",
                      key, current_price, tp1_sh, tp1_pnl, pos["tp2_shares"])
             if market_sell(client, pos["token_id"], tp1_sh, current_price, f"{key.upper()}-TP1"):
@@ -569,7 +569,7 @@ def manage_positions(client):
         # ── Exit 2: TP2 — sell remaining shares ───────────────────────────────
         if pos["tp1_done"] and current_price >= pos["tp2_price"]:
             tp2_sh  = pos["tp2_shares"]
-            tp2_pnl = (current_price - entry) * tp2_sh
+            tp2_pnl = (current_price) * tp2_sh
             log.info("[TP2] %s  price=%.4f  sold=%.4fsh  PnL=$%.4f  position closed",
                      key, current_price, tp2_sh, tp2_pnl)
             if market_sell(client, pos["token_id"], tp2_sh, current_price, f"{key.upper()}-TP2"):
