@@ -408,7 +408,7 @@ def check_trigger(key, current_price, secs_into):
     # ── Condition 2: velocity — price dropped enough from rolling mean ─────────
     drop_pct = (ref - current_price) / ref if ref > 0 else 0
     if drop_pct < DROP_FROM_REF:
-        log.info("[debug] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
+        log.debug("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
                  key, current_price, ref, drop_pct * 100, DROP_FROM_REF * 100)
         return False
 
