@@ -1,1 +1,1 @@
-worker: python -u fresh_bot22.py
+web : python -u panic_bot6.py
