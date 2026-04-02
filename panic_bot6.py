@@ -116,7 +116,7 @@ DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
                                                    # override via .env: DRY_RUN=false
 ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
                                                    # USDC per trade (override via .env)
-TAKER_FEE        = 0.0156 # max taker fee on 15m crypto markets (1.56% at 50% prob)
+TAKER_FEE        = 0.018 # max taker fee on 15m crypto markets (1.56% at 50% prob)
                           # actual fee is lower near 0% or 100% — using max is conservative
                           # shares received = (ORDER_AMOUNT / entry_price) * (1 - TAKER_FEE)
 
@@ -125,10 +125,10 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.30   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 10     # condition 3: sigma — number of samples for baseline
-SD_THRESH        = 2.2    #              sigma floor multiplier (looser = more signals)
+ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 30% from reference price
+SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
+SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
@@ -141,12 +141,12 @@ FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% b
 # Window divided into 3 x 5-min periods — cooldown shrinks as window ages
 # When force stop fires, bot waits this long before actually selling.
 # If price recovers above stop during cooldown → cancel (it was a wick).
-HOLD_EARLY_SECS  = 60     # 0-5 min   (early market)  — wait 60s before selling
-HOLD_MID_SECS    = 40     # 5-10 min  (middle market) — wait 40s before selling
-HOLD_LATE_SECS   = 20     # 10-15 min (late market)   — wait 20s before selling
+HOLD_EARLY_SECS  = 40     # 0-5 min   (early market)  — wait 60s before selling
+HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before selling
+HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 2      # seconds between each price scan
+POLL_SECS        = 1      # seconds between each price scan
 STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
@@ -158,7 +158,7 @@ TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
 TRADING_WINDOWS         = []     # list of (start_hour, end_hour), end is exclusive
 
-EXIT_RETRY_COOLDOWN_SECS = 8  # avoid hammering the API if exits fail
+EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
 CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position closed
 TP_SELL_MAX_ATTEMPTS = 10     # once TP triggers, retry sell immediately up to N times
