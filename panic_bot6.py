@@ -116,7 +116,7 @@ DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
                                                    # override via .env: DRY_RUN=false
 ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
                                                    # USDC per trade (override via .env)
-TAKER_FEE        = 0.018 # max taker fee on 15m crypto markets (1.56% at 50% prob)
+TAKER_FEE        = 0.0156 # max taker fee on 15m crypto markets (1.56% at 50% prob)
                           # actual fee is lower near 0% or 100% — using max is conservative
                           # shares received = (ORDER_AMOUNT / entry_price) * (1 - TAKER_FEE)
 
@@ -125,10 +125,10 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
-SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
+ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.30   # condition 2: price must drop >= 30% from reference price
+SD_LOOKBACK      = 10     # condition 3: sigma — number of samples for baseline
+SD_THRESH        = 2.2    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
@@ -141,12 +141,12 @@ FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% b
 # Window divided into 3 x 5-min periods — cooldown shrinks as window ages
 # When force stop fires, bot waits this long before actually selling.
 # If price recovers above stop during cooldown → cancel (it was a wick).
-HOLD_EARLY_SECS  = 40     # 0-5 min   (early market)  — wait 60s before selling
-HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before selling
-HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
+HOLD_EARLY_SECS  = 60     # 0-5 min   (early market)  — wait 60s before selling
+HOLD_MID_SECS    = 40     # 5-10 min  (middle market) — wait 40s before selling
+HOLD_LATE_SECS   = 20     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 1      # seconds between each price scan
+POLL_SECS        = 2      # seconds between each price scan
 STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
@@ -158,9 +158,10 @@ TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
 TRADING_WINDOWS         = []     # list of (start_hour, end_hour), end is exclusive
 
-EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
+EXIT_RETRY_COOLDOWN_SECS = 8  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
 CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position closed
+UNSOLD_TOLERANCE_RATIO = 0.01 # treat <=1% leftover as dust and close the trade
 TP_SELL_MAX_ATTEMPTS = 10     # once TP triggers, retry sell immediately up to N times
 TP_SELL_RETRY_DELAY_SECS = 0.25
 
@@ -579,6 +580,7 @@ def open_position(key, token_id, entry_price, filled_shares=None):
     open_positions[key] = {
         "token_id":    token_id,
         "entry_price": entry_price,
+        "initial_shares": net_shares,
         "peak_price":  entry_price,
         "tp1_price":   round(entry_price * TP1_MULT, 4),
         "tp2_price":   round(entry_price * TP2_MULT, 4),
@@ -622,6 +624,13 @@ def _record_closed_trade(key, pnl):
 def _calc_pnl(pos, final_revenue):
     """pnl = (realized_revenue + final_revenue) - cost"""
     return round((pos.get("realized_revenue", 0.0) + final_revenue) - pos["cost"], 4)
+
+
+def _within_unsold_tolerance(pos, remaining_shares):
+    base = max(float(pos.get("initial_shares", 0.0)), 0.0)
+    if base <= 0:
+        return remaining_shares <= 0
+    return remaining_shares <= (base * UNSOLD_TOLERANCE_RATIO)
 
 
 def manage_positions(client):
@@ -705,8 +714,17 @@ def manage_positions(client):
                     else:
                         pos["tp1_shares"] = round(max(pos["tp1_shares"] - sold_sh, 0), 6)
                         pos["tp2_shares"] = round(max(pos["net_shares"] - pos["tp1_shares"], 0), 6)
-                    log.warning("[FORCE-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                key, sold_sh, pos["net_shares"])
+                    if _within_unsold_tolerance(pos, pos["net_shares"]):
+                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                        log.warning("[FORCE-STOP] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
+                                    key, pos["net_shares"], pnl)
+                        stats["wins" if pnl > 0 else "losses"] += 1
+                        stats["pnl"] += pnl
+                        _record_closed_trade(key, pnl)
+                        to_close.append(key)
+                    else:
+                        log.warning("[FORCE-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
+                                    key, sold_sh, pos["net_shares"])
             continue
 
         # Price recovered — reset cooldown
@@ -776,8 +794,17 @@ def manage_positions(client):
                     pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                     pos["net_shares"] = round(max(pos["net_shares"] - sold_sh, 0), 6)
                     pos["tp2_shares"] = pos["net_shares"]
-                    log.warning("[TP2] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                key, sold_sh, pos["tp2_shares"])
+                    if _within_unsold_tolerance(pos, pos["tp2_shares"]):
+                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                        log.warning("[TP2] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
+                                    key, pos["tp2_shares"], pnl)
+                        stats["wins"] += 1
+                        stats["pnl"] += pnl
+                        _record_closed_trade(key, pnl)
+                        to_close.append(key)
+                    else:
+                        log.warning("[TP2] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
+                                    key, sold_sh, pos["tp2_shares"])
             continue
 
         # ── Exit 3: Trailing stop — after TP1, remaining shares ──────────────
@@ -809,8 +836,17 @@ def manage_positions(client):
                         pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                         pos["net_shares"] = round(max(pos["net_shares"] - sold_sh, 0), 6)
                         pos["tp2_shares"] = pos["net_shares"]
-                        log.warning("[TRAIL-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                    key, sold_sh, pos["tp2_shares"])
+                        if _within_unsold_tolerance(pos, pos["tp2_shares"]):
+                            pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                            log.warning("[TRAIL-STOP] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
+                                        key, pos["tp2_shares"], pnl)
+                            stats["wins" if pnl > 0 else "losses"] += 1
+                            stats["pnl"] += pnl
+                            _record_closed_trade(key, pnl)
+                            to_close.append(key)
+                        else:
+                            log.warning("[TRAIL-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
+                                        key, sold_sh, pos["tp2_shares"])
 
     for key in to_close:
         del open_positions[key]
