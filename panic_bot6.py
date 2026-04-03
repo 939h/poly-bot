@@ -1377,6 +1377,7 @@ def main():
     last_status  = time.time()
     last_window  = None
     executor     = ThreadPoolExecutor(max_workers=len(ASSETS))
+    was_idle     = None
 
     secs_left = 0  # init so KeyboardInterrupt handler always has a value
     while True:
@@ -1403,8 +1404,19 @@ def main():
             if secs_into >= SETTLE_SECS and not armed_logged:
                 log.debug("[ARMED] Window armed — scanning for panic triggers")
                 armed_logged = True
-            scan_markets(client, window_start, secs_into, server_ts, executor)
-            manage_positions(client)
+              
+            idle_now = not can_open_new_trades(server_ts)
+            if idle_now:
+                if was_idle is not True:
+                    log.info("[IDLE] Outside trading window: bot is fully idle (no scans, no entries, no exits)")
+                was_idle = True
+            else:
+                if was_idle is not False:
+                    log.info("[IDLE] Trading window is open: bot resumed")
+                was_idle = False
+                scan_markets(client, window_start, secs_into, server_ts, executor)
+                manage_positions(client)
+              
             save_state()
 
         except KeyboardInterrupt:
