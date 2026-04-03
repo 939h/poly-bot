@@ -109,16 +109,15 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["btc", "eth", "sol", "xrp"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["sol"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
                                                    # override via .env: DRY_RUN=false
 ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
                                                    # USDC per trade (override via .env)
-TAKER_FEE        = 0.0156 # max taker fee on 15m crypto markets (1.56% at 50% prob)
-                          # actual fee is lower near 0% or 100% — using max is conservative
-                          # shares received = (ORDER_AMOUNT / entry_price) * (1 - TAKER_FEE)
+# Do not hardcode exchange fee into share accounting.
+# Use actual fill amounts from CLOB responses whenever available.
 
 # --- Settle phase (no trading during this period) ----------------------------
 SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
@@ -132,7 +131,7 @@ SD_THRESH        = 1.3    #              sigma floor multiplier (looser = more s
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 10    # take profit 2 — sell remaining 50% of shares at entry x this
+TP2_MULT         = 3    # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.40   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
@@ -161,9 +160,10 @@ TRADING_WINDOWS         = []     # list of (start_hour, end_hour), end is exclus
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
 CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position closed
-UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=1% leftover as dust and close the trade
+UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=2% leftover as dust and close the trade
 TP_SELL_MAX_ATTEMPTS = 10     # once TP triggers, retry sell immediately up to N times
 TP_SELL_RETRY_DELAY_SECS = 0.25
+MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # =============================================================================
 #  INTERNAL CONSTANTS — do not change these
@@ -361,12 +361,18 @@ def get_midpoint(client, token_id):
         return 0.0
 
 
-def market_buy(client, token_id, label):
+def market_buy(client, token_id, label, price_hint=None):
     amount = round(ORDER_AMOUNT, 4)  # amount = USDC to spend when side=BUY
     if DRY_RUN:
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC", label, amount)
-        est_shares = round((amount / entry, 0.0001) * (1 - TAKER_FEE), 6)
-        return {"ok": True, "resp": {"dry_run": True}, "filled_shares": est_shares}
+        entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
+        est_shares = int(max(math.floor(amount / entry_est), 0)) if entry_est > 0 else 0
+        return {
+            "ok": True,
+            "resp": {"dry_run": True},
+            "filled_shares": est_shares,
+            "filled_price": float(entry_est) if entry_est > 0 else float(price_hint or 0),
+        }
     try:
         order = client.create_market_order(
             MarketOrderArgs(token_id=token_id, amount=amount, side=BUY, order_type=OrderType.FOK) 
@@ -374,10 +380,15 @@ def market_buy(client, token_id, label):
         resp = client.post_order(order, OrderType.FOK)
         log.info("[BUY] Executed %s | %s", label, resp)
         # BUY responses expose received shares in takingAmount.
-        filled_shares = float(resp.get("takingAmount") or 0)
+        raw_taking = float(resp.get("takingAmount") or 0)  # shares received
+        raw_making = float(resp.get("makingAmount") or 0)  # quote spent
+        filled_shares = int(max(math.floor(raw_taking), 0))
+        filled_price = (raw_making / raw_taking) if raw_taking > 0 and raw_making > 0 else 0.0
         if filled_shares <= 0:
             log.warning("[BUY] %s filled shares unavailable in response; falling back to estimate", label)
-            filled_shares = round((amount / entry) * (1 - TAKER_FEE), 6)
+            entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
+            filled_shares = int(max(math.floor(amount / entry_est), 0)) if entry_est > 0 else 0
+            filled_price = float(entry_est) if entry_est > 0 else 0.0
         # Refresh conditional token balance so sell works immediately
         try:
             client.update_balance_allowance(
@@ -385,22 +396,22 @@ def market_buy(client, token_id, label):
             )
         except Exception:
             pass
-        return {"ok": True, "resp": resp, "filled_shares": filled_shares}
+        return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_price": filled_price}
     except Exception as e:
         log.error("[BUY] Failed %s: %s", label, e)
-        return {"ok": False, "resp": None, "filled_shares": 0.0}
+        return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_price": 0.0}
 
 
 def market_sell(client, token_id, shares, price, label):
     # amount = number of shares when side=SELL (not USDC)
-    sell_shares = round(max(shares, 0), 6)
-    if sell_shares <= 0:
-        return {"ok": False, "resp": None, "filled_shares": 0.0}
+    sell_shares = int(max(math.floor(shares), 0))
+    if sell_shares < MIN_SELL_SHARES:
+        return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_quote": 0.0}
 
     if DRY_RUN:
         est_revenue = round(sell_shares * price, 4)
-        log.info("[DRY-RUN] MARKET SELL %s %.6f sh (est $%.4f)", label, sell_shares, est_revenue)
-        return {"ok": True, "resp": {"dry_run": True}, "filled_shares": sell_shares}
+        log.info("[DRY-RUN] MARKET SELL %s %d sh (est $%.4f)", label, sell_shares, est_revenue)
+        return {"ok": True, "resp": {"dry_run": True}, "filled_shares": sell_shares, "filled_quote": est_revenue}
 
     # best-effort allowance refresh
     try:
@@ -414,9 +425,9 @@ def market_sell(client, token_id, shares, price, label):
     for attempt in range(2):
         try:
             order = client.create_market_order(
-                MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL, order_type=OrderType.FOK)
+                MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL, order_type=OrderType.FAK)
             )
-            resp = client.post_order(order, OrderType.FOK)
+            resp = client.post_order(order, OrderType.FAK)
             log.info("[SELL] Executed %s | %s", label, resp)
             try:
                 client.update_balance_allowance(
@@ -424,8 +435,9 @@ def market_sell(client, token_id, shares, price, label):
                 )
             except Exception:
                 pass
-            filled_shares = float(resp.get("makingAmount") or attempt_shares or 0)
-            return {"ok": True, "resp": resp, "filled_shares": filled_shares}
+            filled_shares = int(max(math.floor(float(resp.get("makingAmount") or attempt_shares or 0)), 0))
+            filled_quote = float(resp.get("takingAmount") or 0)  # quote received
+            return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_quote": filled_quote}
         except Exception as e:
             err = str(e)
             if attempt == 0 and "not enough balance / allowance" in err:
@@ -435,17 +447,20 @@ def market_sell(client, token_id, shares, price, label):
                     bal_raw = int(bal_m.group(1))
                     amt_raw = int(amt_m.group(1))
                     if 0 < bal_raw < amt_raw:
-                        retry_shares = round(max((bal_raw / 1_000_000) - 0.000001, 0), 6)
-                        if retry_shares > 0:
+                        # balance/order amount are in the same unit in the error payload.
+                        # Scale by ratio to avoid hardcoding token decimals.
+                        ratio = bal_raw / amt_raw
+                        retry_shares = int(max(math.floor((attempt_shares * ratio) * 0.999), 0))
+                        if retry_shares >= MIN_SELL_SHARES:
                             log.warning(
-                                "[SELL] %s size reduced %.6f -> %.6f to match available balance",
+                                "[SELL] %s size reduced %d -> %d to match available balance",
                                 label, attempt_shares, retry_shares
                             )
                             attempt_shares = retry_shares
                             continue
             log.error("[SELL] Failed %s: %s", label, e)
-            return {"ok": False, "resp": None, "filled_shares": 0.0}
-    return {"ok": False, "resp": None, "filled_shares": 0.0}
+            return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_quote": 0.0}
+    return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_quote": 0.0}
 
 
 def market_sell_with_retries(client, token_id, shares, price, label, max_attempts=TP_SELL_MAX_ATTEMPTS):
@@ -571,12 +586,12 @@ def check_trigger(key, current_price, secs_into):
 def open_position(key, token_id, entry_price, filled_shares=None):
     # Use executed fill size (from buy response) to keep inventory in sync.
     if filled_shares is not None and filled_shares > 0:
-        net_shares = round(float(filled_shares), 6)
+        net_shares = int(max(math.floor(float(filled_shares)), 0))
     else:
         gross_shares = ORDER_AMOUNT / entry_price
-        net_shares   = round(gross_shares * (1 - TAKER_FEE), 6)
-    tp1_shares = round(net_shares * 0.50, 6)   # 50% sold at TP1
-    tp2_shares = round(max(net_shares - tp1_shares, 0), 6)  # remaining 50% sold at TP2
+        net_shares   = int(max(math.floor(gross_shares), 0))
+    tp1_shares = int(max(math.floor(net_shares * 0.50), 0))   # 50% sold at TP1
+    tp2_shares = int(max(net_shares - tp1_shares, 0))  # remaining 50% sold at TP2
     open_positions[key] = {
         "token_id":    token_id,
         "entry_price": entry_price,
@@ -696,35 +711,17 @@ def manage_positions(client):
             sell = market_sell(client, pos["token_id"], remaining, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(remaining, round(sell.get("filled_shares") or remaining, 6))
-                sold_revenue = round(sold_sh * current_price, 4)
-                if sold_sh >= remaining * CLOSE_FILL_RATIO:
-                    pnl = _calc_pnl(pos, sold_revenue)
-                    log.info("[FORCE-STOP] %s closed  sold=%.4fsh  revenue=$%.4f  pnl=$%.4f",
-                             key, sold_sh, sold_revenue, pnl)
-                    stats["wins" if pnl > 0 else "losses"] += 1
-                    stats["pnl"] += pnl
-                    _record_closed_trade(key, pnl)
-                    to_close.append(key)
-                else:
-                    pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + sold_revenue, 4)
-                    pos["net_shares"] = round(max(pos["net_shares"] - sold_sh, 0), 6)
-                    if pos["tp1_done"]:
-                        pos["tp2_shares"] = pos["net_shares"]
-                    else:
-                        pos["tp1_shares"] = round(max(pos["tp1_shares"] - sold_sh, 0), 6)
-                        pos["tp2_shares"] = round(max(pos["net_shares"] - pos["tp1_shares"], 0), 6)
-                    if _within_unsold_tolerance(pos, pos["net_shares"]):
-                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                        log.warning("[FORCE-STOP] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
-                                    key, pos["net_shares"], pnl)
-                        stats["wins" if pnl > 0 else "losses"] += 1
-                        stats["pnl"] += pnl
-                        _record_closed_trade(key, pnl)
-                        to_close.append(key)
-                    else:
-                        log.warning("[FORCE-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                    key, sold_sh, pos["net_shares"])
+                sold_sh = min(int(remaining), int(max(math.floor(float(sell.get("filled_shares") or remaining)), 0)))
+                sold_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + sold_revenue, 4)
+                leftover = int(max(pos["net_shares"] - sold_sh, 0))
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[FORCE-STOP] %s finalized  sold=%dsh  leftover=%dsh ignored  pnl=$%.4f",
+                         key, sold_sh, leftover, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                to_close.append(key)
             continue
 
         # Price recovered — reset cooldown
@@ -746,23 +743,23 @@ def manage_positions(client):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(tp1_sh, round(sell.get("filled_shares") or tp1_sh, 6))
-                tp1_revenue = round(sold_sh * current_price, 4)
+                sold_sh = min(int(tp1_sh), int(max(math.floor(float(sell.get("filled_shares") or tp1_sh)), 0)))
+                tp1_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp1_revenue, 4)
-                remaining_after_sell = round(max(pos["net_shares"] - sold_sh, 0), 6)
+                remaining_after_sell = int(max(pos["net_shares"] - sold_sh, 0))
                 if sold_sh >= tp1_sh * TP1_MIN_FILL_RATIO:
                     pos["tp1_done"]    = True
                     pos["tp1_revenue"] = round(pos.get("tp1_revenue", 0.0) + tp1_revenue, 4)
                     pos["net_shares"]  = remaining_after_sell
-                    pos["tp1_shares"]  = 0.0
+                    pos["tp1_shares"]  = 0
                     pos["tp2_shares"]  = remaining_after_sell
                     pos["peak_price"]  = current_price
                     log.info("[TP1] %s executed  sold=%.4fsh  revenue=$%.4f  holding %.4fsh",
                              key, sold_sh, tp1_revenue, remaining_after_sell)
                 else:
                     pos["net_shares"] = remaining_after_sell
-                    pos["tp1_shares"] = round(max(tp1_sh - sold_sh, 0), 6)
-                    pos["tp2_shares"] = round(max(pos["net_shares"] - pos["tp1_shares"], 0), 6)
+                    pos["tp1_shares"] = int(max(tp1_sh - sold_sh, 0))
+                    pos["tp2_shares"] = int(max(pos["net_shares"] - pos["tp1_shares"], 0))
                     log.warning("[TP1] %s partial fill  sold=%.4fsh  tp1_remaining=%.4fsh",
                                 key, sold_sh, pos["tp1_shares"])
             continue
@@ -780,31 +777,17 @@ def manage_positions(client):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(tp2_sh, round(sell.get("filled_shares") or tp2_sh, 6))
-                tp2_revenue = round(sold_sh * current_price, 4)
-                if sold_sh >= tp2_sh * CLOSE_FILL_RATIO:
-                    pnl = _calc_pnl(pos, tp2_revenue)
-                    log.info("[TP2] %s closed  sold=%.4fsh  revenue=$%.4f  pnl=$%.4f",
-                             key, sold_sh, tp2_revenue, pnl)
-                    stats["wins"] += 1
-                    stats["pnl"]  += pnl
-                    _record_closed_trade(key, pnl)
-                    to_close.append(key)
-                else:
-                    pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
-                    pos["net_shares"] = round(max(pos["net_shares"] - sold_sh, 0), 6)
-                    pos["tp2_shares"] = pos["net_shares"]
-                    if _within_unsold_tolerance(pos, pos["tp2_shares"]):
-                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                        log.warning("[TP2] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
-                                    key, pos["tp2_shares"], pnl)
-                        stats["wins"] += 1
-                        stats["pnl"] += pnl
-                        _record_closed_trade(key, pnl)
-                        to_close.append(key)
-                    else:
-                        log.warning("[TP2] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                    key, sold_sh, pos["tp2_shares"])
+                sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
+                leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[TP2] %s finalized  sold=%dsh  leftover=%dsh ignored  pnl=$%.4f",
+                         key, sold_sh, leftover, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                to_close.append(key)
             continue
 
         # ── Exit 3: Trailing stop — after TP1, remaining shares ──────────────
@@ -822,31 +805,17 @@ def manage_positions(client):
                 )
                 pos["last_exit_attempt_ts"] = time.time()
                 if sell["ok"]:
-                    sold_sh = min(tp2_sh, round(sell.get("filled_shares") or tp2_sh, 6))
-                    tp2_revenue = round(sold_sh * current_price, 4)
-                    if sold_sh >= tp2_sh * CLOSE_FILL_RATIO:
-                        pnl = _calc_pnl(pos, tp2_revenue)
-                        log.info("[TRAIL-STOP] %s closed  sold=%.4fsh  pnl=$%.4f",
-                                 key, sold_sh, pnl)
-                        stats["wins" if pnl > 0 else "losses"] += 1
-                        stats["pnl"] += pnl
-                        _record_closed_trade(key, pnl)
-                        to_close.append(key)
-                    else:
-                        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
-                        pos["net_shares"] = round(max(pos["net_shares"] - sold_sh, 0), 6)
-                        pos["tp2_shares"] = pos["net_shares"]
-                        if _within_unsold_tolerance(pos, pos["tp2_shares"]):
-                            pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                            log.warning("[TRAIL-STOP] %s dust-close  remaining=%.4fsh (<=1%%)  pnl=$%.4f",
-                                        key, pos["tp2_shares"], pnl)
-                            stats["wins" if pnl > 0 else "losses"] += 1
-                            stats["pnl"] += pnl
-                            _record_closed_trade(key, pnl)
-                            to_close.append(key)
-                        else:
-                            log.warning("[TRAIL-STOP] %s partial fill  sold=%.4fsh  remaining=%.4fsh",
-                                        key, sold_sh, pos["tp2_shares"])
+                    sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                    tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
+                    pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
+                    leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
+                    pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                    log.info("[TRAIL-STOP] %s finalized  sold=%dsh  leftover=%dsh ignored  pnl=$%.4f",
+                             key, sold_sh, leftover, pnl)
+                    stats["wins" if pnl > 0 else "losses"] += 1
+                    stats["pnl"] += pnl
+                    _record_closed_trade(key, pnl)
+                    to_close.append(key)
 
     for key in to_close:
         del open_positions[key]
@@ -980,9 +949,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             key, check_token, check_price = buy_signal
             stats["triggers"] += 1
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
-            buy = market_buy(client, check_token, label)
+            buy = market_buy(client, check_token, label, price_hint=check_price)
             if buy["ok"]:
-                open_position(key, check_token, check_price, filled_shares=buy.get("filled_shares"))
+                entry_px = float(buy.get("filled_price") or check_price)
+                open_position(key, check_token, entry_px, filled_shares=buy.get("filled_shares"))
                 traded_this_window.add(asset)
 
 # ── Status print --------------------------------------------------------------
