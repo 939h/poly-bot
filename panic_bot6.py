@@ -145,7 +145,7 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 1      # seconds between each price scan
+POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
