@@ -533,7 +533,7 @@ def check_trigger(key, current_price, secs_into):
     # Need SD_LOOKBACK pts for any signal — keep warming until ready
     if pts < SD_LOOKBACK:
         if key.endswith("_yes"):
-            log.info("[SCAN] %s  price=%.4f  warming up (%d/%d pts)",
+            log.debug("[SCAN] %s  price=%.4f  warming up (%d/%d pts)",
                      key, current_price, pts, SD_LOOKBACK)
         return False
 
