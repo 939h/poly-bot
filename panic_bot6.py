@@ -365,7 +365,7 @@ def market_buy(client, token_id, label):
     amount = round(ORDER_AMOUNT, 4)  # amount = USDC to spend when side=BUY
     if DRY_RUN:
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC", label, amount)
-        est_shares = round((amount / entry, 0.0001)) * (1 - TAKER_FEE), 6)
+        est_shares = round((amount / entry, 0.0001) * (1 - TAKER_FEE), 6)
         return {"ok": True, "resp": {"dry_run": True}, "filled_shares": est_shares}
     try:
         order = client.create_market_order(
