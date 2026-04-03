@@ -1366,7 +1366,7 @@ def main():
     log.info("  Panic Bot  [%s]", mode)
     log.info("  Assets : %s", ", ".join(a.upper() for a in ASSETS))
     log.info("  settle=%ds  cap=$%.2f  drop=%.0f%%  sigma=%.1f(n=%d)",
-             SETTLE_SECS, ENTRY_PRICE_CAP, DROP_FROM_REF * 100, SD_THRESH, SD_LOOKBACK)
+             SETTLE_SECS, ENTRY_PRICE_CAP, DROP_FROM_REF * 100, SD_THRESH, SD_LOOKBACK, TRADING_WINDOWS)
     log.info("  TP1=%.1fx  TP2=%.1fx  trail=%.0f%%  order=$%.0f  poll=%ds",
              TP1_MULT, TP2_MULT, TRAILING_STOP * 100, ORDER_AMOUNT, POLL_SECS)
     log.info("=" * 55)
