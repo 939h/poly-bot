@@ -131,8 +131,8 @@ SD_LOOKBACK      = 14     # condition 3: sigma — number of samples for baselin
 SD_THRESH        = 1.3    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 10.0    # take profit 2 — sell remaining 50% of shares at entry x this
+TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
+TP2_MULT         = 10    # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.40   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
@@ -147,7 +147,7 @@ HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before sellin
 
 # --- Timing ------------------------------------------------------------------
 POLL_SECS        = 1      # seconds between each price scan
-STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
+STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
 
