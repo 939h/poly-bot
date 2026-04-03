@@ -365,7 +365,7 @@ def market_buy(client, token_id, label):
     amount = round(ORDER_AMOUNT, 4)  # amount = USDC to spend when side=BUY
     if DRY_RUN:
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC", label, amount)
-        est_shares = round((amount / max(ENTRY_PRICE_CAP, 0.0001)) * (1 - TAKER_FEE), 6)
+        est_shares = round((amount / entry_price, 0.0001)) * (1 - TAKER_FEE), 6)
         return {"ok": True, "resp": {"dry_run": True}, "filled_shares": est_shares}
     try:
         order = client.create_market_order(
@@ -377,7 +377,7 @@ def market_buy(client, token_id, label):
         filled_shares = float(resp.get("takingAmount") or 0)
         if filled_shares <= 0:
             log.warning("[BUY] %s filled shares unavailable in response; falling back to estimate", label)
-            filled_shares = round((amount / ENTRY_PRICE_CAP) * (1 - TAKER_FEE), 6)
+            filled_shares = round((amount / entry_price) * (1 - TAKER_FEE), 6)
         # Refresh conditional token balance so sell works immediately
         try:
             client.update_balance_allowance(
