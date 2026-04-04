@@ -1,1 +1,1 @@
-worker: python -u rebound_detector.py
+web: python -u rebound_detector.py

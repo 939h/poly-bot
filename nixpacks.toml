@@ -1,2 +1,5 @@
 [phases.install]
 cmds = ["pip install -r requirements-rebound.txt"]
+
+[start]
+cmd = "python -u rebound_detector.py"
