@@ -10,24 +10,28 @@ State machine per token (asset × side = 8 machines):
   in_trough     → tracking_peak : price > REBOUND_MULT × trough_min
                                    (2x signal fires — log immediately)
   tracking_peak → tracking_peak : track max price until window ends
-  window end    → write CSV row with full peak data, then reset
+  window end    → write to Google Sheet + CSV, then reset
 
-CSV output (rebound_signals.csv):
+Google Sheet (tab: "Rebound Signals"):
   datetime_utc8, asset, side, window_start,
   trough_price, trough_time,
   signal_price, signal_time, signal_ratio,
   peak_price, peak_time, peak_ratio
 
-Requirements:
-    pip install py-clob-client requests python-dotenv colorama
+CSV fallback (rebound_signals.csv) — same columns.
 
-.env keys (only needed when DRY_RUN=false):
-    POLY_PRIVATE_KEY=0x...
+Requirements:
+    pip install py-clob-client requests python-dotenv colorama gspread google-auth
+
+.env keys:
+    GOOGLE_SHEET_ID=1X9...          # required for Sheets
+    GOOGLE_CREDS_JSON={"type":...}  # service account JSON (required for Sheets)
+    DRY_RUN=true                    # set false for live prices
+    POLY_PRIVATE_KEY=0x...          # only needed when DRY_RUN=false
     POLY_API_KEY=...
     POLY_API_SECRET=...
     POLY_API_PASSPHRASE=...
     POLY_FUNDER_ADDRESS=0x...
-    DRY_RUN=true
 """
 import csv
 import json
@@ -59,6 +63,14 @@ try:
 except ImportError:
     COLORS = False
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials as GCredentials
+    GSHEETS_OK = True
+except ImportError:
+    GSHEETS_OK = False
+    print("Warning: gspread not installed — Google Sheets disabled. Run: pip install gspread google-auth")
+
 load_dotenv()
 
 # =============================================================================
@@ -69,6 +81,8 @@ TROUGH_THRESHOLD = 0.05   # price must drop below this to begin tracking
 REBOUND_MULT     = 2.0    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
+SHEET_ID         = os.getenv("GOOGLE_SHEET_ID", "")
+SHEET_TAB        = "Rebound Signals"
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -198,6 +212,54 @@ def build_client():
     return client
 
 # =============================================================================
+#  GOOGLE SHEETS
+# =============================================================================
+_sheet_ws = None   # gspread Worksheet object, set by connect_sheet()
+
+
+def connect_sheet():
+    """
+    Connect to the Google Sheet and return the 'Rebound Signals' worksheet.
+    Creates the tab and writes headers if it doesn't exist yet.
+    Returns None if config is missing or gspread not installed.
+    """
+    global _sheet_ws
+    if not GSHEETS_OK:
+        return None
+    if not SHEET_ID:
+        log.warning("GOOGLE_SHEET_ID not set — Sheets disabled")
+        return None
+    creds_json = os.getenv("GOOGLE_CREDS_JSON", "")
+    if not creds_json:
+        log.warning("GOOGLE_CREDS_JSON not set — Sheets disabled")
+        return None
+    try:
+        creds_dict = json.loads(creds_json)
+        creds      = GCredentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        gc          = gspread.authorize(creds)
+        spreadsheet = gc.open_by_key(SHEET_ID)
+        try:
+            ws = spreadsheet.worksheet(SHEET_TAB)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=SHEET_TAB, rows=10000, cols=12)
+            ws.append_row(_CSV_HEADERS)
+            log.info("[Sheets] Created tab '%s' with headers", SHEET_TAB)
+        # Write headers if sheet is empty
+        if ws.row_count == 0 or ws.acell("A1").value != _CSV_HEADERS[0]:
+            if not ws.get_all_values():
+                ws.append_row(_CSV_HEADERS)
+        _sheet_ws = ws
+        log.info("[Sheets] Connected to '%s' → tab '%s'", SHEET_ID[:12] + "...", SHEET_TAB)
+        return ws
+    except Exception as e:
+        log.error("[Sheets] Connect failed: %s", e)
+        return None
+
+
+# =============================================================================
 #  TOKEN CACHE  — stores (yes_tok, no_tok) per (asset, window_start)
 # =============================================================================
 token_cache = {}   # (asset, window_start) -> (yes_tok, no_tok)
@@ -305,10 +367,9 @@ def _ts_str(ts):
 
 def flush_completed_signals(window_start):
     """
-    Called at window end. Write one CSV row for every token that reached
-    tracking_peak this window, with its final recorded peak price.
+    Called at window end. Write one row per token that reached tracking_peak,
+    with its final peak price. Writes to Google Sheet + CSV backup.
     """
-    file_exists = os.path.isfile(CSV_FILE)
     rows = []
     now_str    = datetime.now(UTC8).strftime("%Y-%m-%d %H:%M:%S")
     window_str = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -336,6 +397,16 @@ def flush_completed_signals(window_start):
     if not rows:
         return
 
+    # ── Google Sheets ─────────────────────────────────────────────────────
+    if _sheet_ws is not None:
+        try:
+            _sheet_ws.append_rows(rows, value_input_option="USER_ENTERED")
+            log.info("[Sheets] Appended %d signal(s) to '%s'", len(rows), SHEET_TAB)
+        except Exception as e:
+            log.error("[Sheets] append_rows failed: %s", e)
+
+    # ── CSV backup ────────────────────────────────────────────────────────
+    file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -374,6 +445,7 @@ def main():
     global last_window, token_states, token_cache, _sim_prices
 
     client = build_client()
+    connect_sheet()   # sets _sheet_ws; no-op if env vars missing
 
     log.info("=" * 60)
     log.info("rebound_detector  |  DRY_RUN=%s", DRY_RUN)
@@ -381,7 +453,8 @@ def main():
     log.info("Sides       : YES + NO")
     log.info("Trough cap  : %.2f", TROUGH_THRESHOLD)
     log.info("Rebound mult: %.1fx", REBOUND_MULT)
-    log.info("CSV output  : %s", CSV_FILE)
+    log.info("Sheet output: %s (tab: %s)", SHEET_ID[:20] + "..." if SHEET_ID else "disabled", SHEET_TAB)
+    log.info("CSV backup  : %s", CSV_FILE)
     log.info("=" * 60)
 
     while True:
