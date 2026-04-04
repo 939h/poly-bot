@@ -1,1 +1,1 @@
-web : python -u panic_bot6.py
+worker : python -u rebound_detector.py
