@@ -1429,7 +1429,7 @@ def main():
             executor.shutdown(wait=False)
             executor = ThreadPoolExecutor(max_workers=len(ASSETS))
 
-        if time.time() - last_status >= 300:
+        if time.time() - last_status >= 3600:
             print_status()
             last_status = time.time()
 
