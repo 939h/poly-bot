@@ -149,8 +149,10 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_TICKS    = 3      # consecutive polls price must NOT drop a pip before buying
-                          # at POLL_SECS=0.5 this is ~1.5s confirmation delay
+CONFIRM_REBOUND_MULT = 1.25  # rebound confirmation: buy only when price recovers
+                              # >= this multiple from the trough_min after trigger fires.
+                              # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
+                              # Mirrors rebound_detector.py state machine logic.
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
@@ -182,7 +184,7 @@ open_positions  = {}   # "btc_yes" -> position dict
 token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
-pending_buys       = {}    # key -> {"token_id": str, "price": float, "ticks": int}
+pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
 asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
@@ -969,9 +971,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if not can_open_new_trades(server_ts):
         return
 
-    # ── Step 1: Advance pending confirmations ─────────────────────────────────
-    # A signal must hold (price doesn't drop a pip) for CONFIRM_TICKS polls
-    # before we actually buy — filters falling knives that keep declining.
+    # ── Step 1: Advance pending confirmations (rebound detector logic) ────────
+    # Mirrors rebound_detector.py state machine:
+    #   in_trough  : track rolling trough_min while price keeps falling
+    #   → buy fires : price >= CONFIRM_REBOUND_MULT × trough_min  (genuine bounce)
+    # This ensures we buy AFTER the bottom, not INTO a falling knife.
     for key in list(pending_buys.keys()):
         pb    = pending_buys[key]
         asset = key.split("_")[0]
@@ -981,7 +985,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             continue
 
         if secs_into >= STOP_TRADE_SECS:
-            log.info("[CONFIRM] %s  discarded — past trade cutoff", key)
+            log.info("[TROUGH] %s  discarded — past trade cutoff  trough=%.4f",
+                     key, pb["trough_min"])
             del pending_buys[key]
             continue
 
@@ -989,19 +994,22 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if current is None:
             continue
 
-        if current < pb["price"]:
-            # Price dropped another pip → still a falling knife → reset
-            log.info("[CONFIRM] %s  reset — price fell %.4f→%.4f (pip down)",
-                     key, pb["price"], current)
-            del pending_buys[key]
+        # Update rolling trough minimum — price still falling, keep tracking
+        if current < pb["trough_min"]:
+            pb["trough_min"]  = current
+            pb["trough_time"] = server_ts
+            log.info("[TROUGH] %s  new low=%.4f", key, current)
             continue
 
-        pb["ticks"] += 1
-        log.info("[CONFIRM] %s  tick=%d/%d  price=%.4f",
-                 key, pb["ticks"], CONFIRM_TICKS, current)
+        # Check rebound ratio
+        rebound_ratio = current / pb["trough_min"] if pb["trough_min"] > 0 else 0.0
+        log.info("[TROUGH] %s  price=%.4f  trough=%.4f  ratio=%.3fx  need=%.2fx",
+                 key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
 
-        if pb["ticks"] >= CONFIRM_TICKS:
-            # Confirmed — price held, fire the buy
+        if rebound_ratio >= CONFIRM_REBOUND_MULT:
+            # Genuine rebound confirmed — fire the buy
+            log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx",
+                     key, pb["trough_min"], current, rebound_ratio)
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
             buy = market_buy(client, pb["token_id"], label, price_hint=current)
             del pending_buys[key]
@@ -1026,9 +1034,13 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if buy_signal:
             key, check_token, check_price = buy_signal
             stats["triggers"] += 1
-            pending_buys[key] = {"token_id": check_token, "price": check_price, "ticks": 1}
-            log.info("[CONFIRM] %s  signal — waiting %d ticks  price=%.4f",
-                     key, CONFIRM_TICKS, check_price)
+            pending_buys[key] = {
+                "token_id":   check_token,
+                "trough_min": check_price,
+                "trough_time": server_ts,
+            }
+            log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
+                     key, check_price, CONFIRM_REBOUND_MULT)
 
 # ── Status print --------------------------------------------------------------
 
@@ -1093,7 +1105,7 @@ def _build_state_snapshot():
             "drop_ref": DROP_FROM_REF, "settle": SETTLE_SECS,
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
-            "confirm_ticks": CONFIRM_TICKS,
+            "confirm_rebound": CONFIRM_REBOUND_MULT,
         },
     }
 
@@ -1429,7 +1441,7 @@ function render(s){
         <tr><td>Drop from ref</td><td>${((cfg.drop_ref||0.30)*100).toFixed(0)}%</td><td>Sigma</td><td>${cfg.sigma||2.2} (n=${cfg.lookback||10})</td></tr>
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
-        <tr><td>Confirm ticks</td><td>${cfg.confirm_ticks||3} polls (~${((cfg.confirm_ticks||3)*(cfg.poll||0.5)).toFixed(1)}s)</td><td></td><td></td></tr>
+        <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
       </tbody></table>
     </div>
 
