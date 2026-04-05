@@ -183,6 +183,7 @@ traded_this_window = set() # assets already bought this window e.g. {"btc", "eth
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
 asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
+trade_log          = []     # [{time, asset, side, entry, tp1, tp1_hit, tp2, tp2_hit, exit, pnl}] newest-first
 last_pnl_snapshot  = 0      # unix timestamp of last pnl_history append
 pnl_history = []
 
@@ -583,7 +584,7 @@ def check_trigger(key, current_price, secs_into):
 
 # ── Position management -------------------------------------------------------
 
-def open_position(key, token_id, entry_price, filled_shares=None):
+def open_position(key, token_id, entry_price, filled_shares=None, window_start=None):
     # Use executed fill size (from buy response) to keep inventory in sync.
     if filled_shares is not None and filled_shares > 0:
         net_shares = int(max(math.floor(float(filled_shares)), 0))
@@ -607,8 +608,11 @@ def open_position(key, token_id, entry_price, filled_shares=None):
         "force_stop_triggered":  None,   # timestamp when force stop cooldown started
         "force_stop_cooldown":   None,   # cooldown duration in seconds
         "tp1_revenue":           0.0,    # actual revenue received at TP1 sell
+        "tp1_hit_price":         None,   # actual price when TP1 was filled
         "realized_revenue":      0.0,    # cumulative realized revenue across all successful sells
         "last_exit_attempt_ts":  0.0,    # avoids retry-spam when venue rejects exits
+        "opened_at":   datetime.now().strftime("%H:%M"),
+        "window_start": window_start,
     }
     stats["buys"] += 1
     log.info(
@@ -634,6 +638,26 @@ def _record_closed_trade(key, pnl):
     else:
         r["losses"] += 1
     r["pnl"] = round(r["pnl"] + pnl, 4)
+
+
+def _record_trade_log(key, pos, exit_type, close_price, pnl):
+    """Append one closed-trade record to trade_log (newest-first, capped at 200)."""
+    parts = key.split("_", 1)
+    record = {
+        "time":     pos.get("opened_at", "—"),
+        "asset":    parts[0].upper(),
+        "side":     parts[1].upper() if len(parts) > 1 else "—",
+        "entry":    round(pos["entry_price"], 4),
+        "tp1":      round(pos["tp1_price"], 4),
+        "tp1_hit":  round(pos["tp1_hit_price"], 4) if pos.get("tp1_hit_price") is not None else None,
+        "tp2":      round(pos["tp2_price"], 4),
+        "tp2_hit":  round(close_price, 4) if exit_type == "TP2" else None,
+        "exit":     exit_type,
+        "pnl":      round(pnl, 4),
+    }
+    trade_log.insert(0, record)
+    if len(trade_log) > 200:
+        trade_log.pop()
 
 
 def _calc_pnl(pos, final_revenue):
@@ -721,6 +745,7 @@ def manage_positions(client):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "STOP", current_price, pnl)
                 to_close.append(key)
             continue
 
@@ -748,12 +773,13 @@ def manage_positions(client):
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp1_revenue, 4)
                 remaining_after_sell = int(max(pos["net_shares"] - sold_sh, 0))
                 if sold_sh >= tp1_sh * TP1_MIN_FILL_RATIO:
-                    pos["tp1_done"]    = True
-                    pos["tp1_revenue"] = round(pos.get("tp1_revenue", 0.0) + tp1_revenue, 4)
-                    pos["net_shares"]  = remaining_after_sell
-                    pos["tp1_shares"]  = 0
-                    pos["tp2_shares"]  = remaining_after_sell
-                    pos["peak_price"]  = current_price
+                    pos["tp1_done"]      = True
+                    pos["tp1_revenue"]   = round(pos.get("tp1_revenue", 0.0) + tp1_revenue, 4)
+                    pos["tp1_hit_price"] = current_price
+                    pos["net_shares"]    = remaining_after_sell
+                    pos["tp1_shares"]    = 0
+                    pos["tp2_shares"]    = remaining_after_sell
+                    pos["peak_price"]    = current_price
                     log.info("[TP1] %s executed  sold=%.4fsh  revenue=$%.4f  holding %.4fsh",
                              key, sold_sh, tp1_revenue, remaining_after_sell)
                 else:
@@ -787,6 +813,7 @@ def manage_positions(client):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "TP2", current_price, pnl)
                 to_close.append(key)
             continue
 
@@ -815,6 +842,7 @@ def manage_positions(client):
                     stats["wins" if pnl > 0 else "losses"] += 1
                     stats["pnl"] += pnl
                     _record_closed_trade(key, pnl)
+                    _record_trade_log(key, pos, "TRAIL", current_price, pnl)
                     to_close.append(key)
 
     for key in to_close:
@@ -952,7 +980,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             buy = market_buy(client, check_token, label, price_hint=check_price)
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or check_price)
-                open_position(key, check_token, entry_px, filled_shares=buy.get("filled_shares"))
+                open_position(key, check_token, entry_px, filled_shares=buy.get("filled_shares"), window_start=window_start)
                 traded_this_window.add(asset)
 
 # ── Status print --------------------------------------------------------------
@@ -1011,7 +1039,8 @@ def _build_state_snapshot():
             "period": "early" if secs_in < 300 else ("mid" if secs_in < 600 else "late"),
         },
         "pnl_history":   list(pnl_history),
-        "asset_history":  dict(asset_history),
+        "asset_history": dict(asset_history),
+        "trade_log":     list(trade_log),
         "settings": {
             "assets": ASSETS, "sigma": SD_THRESH, "cap": ENTRY_PRICE_CAP,
             "drop_ref": DROP_FROM_REF, "settle": SETTLE_SECS,
@@ -1168,6 +1197,68 @@ function drawChart(history){
   if(last%step!==0) ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
+// ── Trade log ─────────────────────────────────────────────────────────────────
+let _tradeLogExpanded = false;
+const TRADE_LOG_COLLAPSE = 5;
+
+function renderTradeLog(log){
+  if(!log||log.length===0){
+    return '<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
+  }
+  const exitBadge=e=>{
+    const m={TP2:'green',TRAIL:'amber',STOP:'red'};
+    return `<span class="badge" style="background:${e==='TP2'?'#0d2a1e':e==='TRAIL'?'#2a1e08':'#2a0d0d'};color:${e==='TP2'?'#4ade9f':e==='TRAIL'?'#fbbf24':'#f87171'};border:1px solid ${e==='TP2'?'#1a5c3a':e==='TRAIL'?'#5c3d08':'#5c1d1d'}">${e}</span>`;
+  };
+  const tp1Cell=t=>{
+    if(t.tp1_hit!==null&&t.tp1_hit!==undefined)
+      return `<span style="font-family:monospace">$${t.tp1.toFixed(4)}</span> <span class="green" style="font-size:11px">✓</span>`;
+    return `<span style="font-family:monospace">$${t.tp1.toFixed(4)}</span> <span class="red" style="font-size:11px">✗</span>`;
+  };
+  const tp2Cell=t=>{
+    if(t.tp2_hit!==null&&t.tp2_hit!==undefined)
+      return `<span style="font-family:monospace">$${t.tp2.toFixed(4)}</span> <span class="green" style="font-size:11px">✓</span>`;
+    return `<span class="dim">—</span>`;
+  };
+  const rows=log.map((t,i)=>{
+    const p=t.pnl||0;
+    const pStr=(p>=0?'+':'')+p.toFixed(4);
+    const pCol=p>0?'green':p<0?'red':'dim';
+    return `<tr class="tl-row" style="${i>=TRADE_LOG_COLLAPSE&&!_tradeLogExpanded?'display:none':''}">
+      <td>${t.time||'—'}</td>
+      <td><strong>${t.asset}-${t.side}</strong></td>
+      <td style="font-family:monospace">$${(t.entry||0).toFixed(4)}</td>
+      <td>${tp1Cell(t)}</td>
+      <td>${tp2Cell(t)}</td>
+      <td>${exitBadge(t.exit)}</td>
+      <td class="${pCol}" style="font-family:monospace;font-weight:600">$${pStr}</td>
+    </tr>`;
+  }).join('');
+
+  const extra=log.length-TRADE_LOG_COLLAPSE;
+  const toggleBtn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tradeLogExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
+
+  return `<div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>TP1</th><th>TP2</th><th>Exit</th><th>PnL</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>${toggleBtn}`;
+}
+
+function tlToggle(){
+  _tradeLogExpanded=!_tradeLogExpanded;
+  document.querySelectorAll('.tl-row').forEach((r,i)=>{
+    if(i>=TRADE_LOG_COLLAPSE) r.style.display=_tradeLogExpanded?'':'none';
+  });
+  const btn=document.getElementById('tlToggle');
+  if(btn){
+    const extra=parseInt(btn.textContent.replace(/\D/g,''))||0;
+    // recount hidden rows
+    const hidden=Array.from(document.querySelectorAll('.tl-row')).filter(r=>r.style.display==='none').length;
+    btn.textContent=_tradeLogExpanded?'▲ Show less':'▼ Show '+(hidden||extra)+' more';
+  }
+}
+
 // ── Asset history breakdown ───────────────────────────────────────────────────
 function renderAssetHistory(assetHist, assets){
   if(!assetHist||Object.keys(assetHist).length===0){
@@ -1196,6 +1287,7 @@ function render(s){
   const cfg=s.settings||{}, w=s.window||{};
   const pnlHist=s.pnl_history||[];
   const assetHist=s.asset_history||{};
+  const tLog=s.trade_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const cap=cfg.cap||0.08;
 
@@ -1273,7 +1365,12 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>Closed Trades — Per Asset</h2>
+      <h2>Trade Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(${tLog.length} closed)</span></h2>
+      ${renderTradeLog(tLog)}
+    </div>
+
+    <div class="section">
+      <h2>Per-Asset Summary</h2>
       ${renderAssetHistory(assetHist, assets)}
     </div>
 
