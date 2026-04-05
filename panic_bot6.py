@@ -968,10 +968,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     for asset in ASSETS:
         _update_prices_and_history(results.get(asset))
 
-    if not can_open_new_trades(server_ts):
-        return
-
     # ── Step 1: Advance pending confirmations (rebound detector logic) ────────
+    # Runs regardless of trading window — pending troughs must still be tracked
+    # and discarded (e.g. past STOP_TRADE_SECS, dead zone) even when idle.
     # Mirrors rebound_detector.py state machine:
     #   in_trough  : track rolling trough_min while price keeps falling
     #   → buy fires : price >= CONFIRM_REBOUND_MULT × trough_min  (genuine bounce)
@@ -1014,6 +1013,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                  key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
 
         if rebound_ratio >= CONFIRM_REBOUND_MULT:
+            # Cap check — rebound price must still be in the lottery zone
+            if current > ENTRY_PRICE_CAP:
+                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap %.4f",
+                         key, current, ENTRY_PRICE_CAP)
+                del pending_buys[key]
+                continue
             # Genuine rebound confirmed — fire the buy
             log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx",
                      key, pb["trough_min"], current, rebound_ratio)
@@ -1026,6 +1031,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                               filled_shares=buy.get("filled_shares"),
                               window_start=window_start)
                 traded_this_window.add(asset)
+
+    if not can_open_new_trades(server_ts):
+        return
 
     # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
