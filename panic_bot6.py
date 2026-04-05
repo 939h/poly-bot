@@ -1399,7 +1399,7 @@ def main():
                 traded_this_window.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  settle=%ds  armed at %ds",
                          window_start, secs_left, SETTLE_SECS, SETTLE_SECS)
-
+            last_window = window_start
 
             if secs_into >= SETTLE_SECS and not armed_logged:
                 log.debug("[ARMED] Window armed — scanning for panic triggers")
@@ -1408,14 +1408,14 @@ def main():
             idle_now = not can_open_new_trades(server_ts)
             if idle_now:
                 if was_idle is not True:
-                    log.info("[IDLE] Outside trading window: bot is fully idle (no scans, no entries, no exits)")
+                    log.info("[IDLE] Outside trading window: bot is idle (no new entries)")
                 was_idle = True
             else:
                 if was_idle is not False:
                     log.info("[IDLE] Trading window is open: bot resumed")
                 was_idle = False
                 scan_markets(client, window_start, secs_into, server_ts, executor)
-                manage_positions(client)
+            manage_positions(client)
               
             save_state()
 
@@ -1433,12 +1433,9 @@ def main():
             print_status()
             last_status = time.time()
 
-        # Record PnL snapshot every 5 minutes for chart
-        def your_loop_function():
-          global last_pnl_snapshot
-        
+        # Record PnL snapshot every 30 minutes for chart
         now_t = time.time()
-        if now_t - last_pnl_snapshot >= 1800:
+        if now_t - last_pnl_snapshot >= 1800:  # 30 minutes
             last_pnl_snapshot = now_t
             pnl_history.append({
                 "ts":    datetime.now().strftime("%H"),
