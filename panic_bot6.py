@@ -149,6 +149,8 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
+CONFIRM_TICKS    = 3      # consecutive polls price must NOT drop a pip before buying
+                          # at POLL_SECS=0.5 this is ~1.5s confirmation delay
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
@@ -180,6 +182,7 @@ open_positions  = {}   # "btc_yes" -> position dict
 token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
+pending_buys       = {}    # key -> {"token_id": str, "price": float, "ticks": int}
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
 asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
@@ -966,22 +969,66 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if not can_open_new_trades(server_ts):
         return
 
-    # ── Evaluate trigger only for assets not yet traded this window ───────────
+    # ── Step 1: Advance pending confirmations ─────────────────────────────────
+    # A signal must hold (price doesn't drop a pip) for CONFIRM_TICKS polls
+    # before we actually buy — filters falling knives that keep declining.
+    for key in list(pending_buys.keys()):
+        pb    = pending_buys[key]
+        asset = key.split("_")[0]
+
+        if asset in traded_this_window:
+            del pending_buys[key]
+            continue
+
+        if secs_into >= STOP_TRADE_SECS:
+            log.info("[CONFIRM] %s  discarded — past trade cutoff", key)
+            del pending_buys[key]
+            continue
+
+        current = live_prices.get(key)
+        if current is None:
+            continue
+
+        if current < pb["price"]:
+            # Price dropped another pip → still a falling knife → reset
+            log.info("[CONFIRM] %s  reset — price fell %.4f→%.4f (pip down)",
+                     key, pb["price"], current)
+            del pending_buys[key]
+            continue
+
+        pb["ticks"] += 1
+        log.info("[CONFIRM] %s  tick=%d/%d  price=%.4f",
+                 key, pb["ticks"], CONFIRM_TICKS, current)
+
+        if pb["ticks"] >= CONFIRM_TICKS:
+            # Confirmed — price held, fire the buy
+            label = f"{asset.upper()}-{key.split('_')[1].upper()}"
+            buy = market_buy(client, pb["token_id"], label, price_hint=current)
+            del pending_buys[key]
+            if buy["ok"]:
+                entry_px = float(buy.get("filled_price") or current)
+                open_position(key, pb["token_id"], entry_px,
+                              filled_shares=buy.get("filled_shares"),
+                              window_start=window_start)
+                traded_this_window.add(asset)
+
+    # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
         if asset in traded_this_window:
             log.debug("[SKIP] %s already traded this window", asset.upper())
+            continue
+
+        # Skip if either side is already awaiting confirmation
+        if f"{asset}_yes" in pending_buys or f"{asset}_no" in pending_buys:
             continue
 
         buy_signal = _evaluate_asset(results.get(asset), secs_into)
         if buy_signal:
             key, check_token, check_price = buy_signal
             stats["triggers"] += 1
-            label = f"{asset.upper()}-{key.split('_')[1].upper()}"
-            buy = market_buy(client, check_token, label, price_hint=check_price)
-            if buy["ok"]:
-                entry_px = float(buy.get("filled_price") or check_price)
-                open_position(key, check_token, entry_px, filled_shares=buy.get("filled_shares"), window_start=window_start)
-                traded_this_window.add(asset)
+            pending_buys[key] = {"token_id": check_token, "price": check_price, "ticks": 1}
+            log.info("[CONFIRM] %s  signal — waiting %d ticks  price=%.4f",
+                     key, CONFIRM_TICKS, check_price)
 
 # ── Status print --------------------------------------------------------------
 
@@ -1046,6 +1093,7 @@ def _build_state_snapshot():
             "drop_ref": DROP_FROM_REF, "settle": SETTLE_SECS,
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
+            "confirm_ticks": CONFIRM_TICKS,
         },
     }
 
@@ -1381,6 +1429,7 @@ function render(s){
         <tr><td>Drop from ref</td><td>${((cfg.drop_ref||0.30)*100).toFixed(0)}%</td><td>Sigma</td><td>${cfg.sigma||2.2} (n=${cfg.lookback||10})</td></tr>
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
+        <tr><td>Confirm ticks</td><td>${cfg.confirm_ticks||3} polls (~${((cfg.confirm_ticks||3)*(cfg.poll||0.5)).toFixed(1)}s)</td><td></td><td></td></tr>
       </tbody></table>
     </div>
 
@@ -1494,6 +1543,7 @@ def main():
                 price_history.clear()
                 live_prices.clear()
                 traded_this_window.clear()
+                pending_buys.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  settle=%ds  armed at %ds",
                          window_start, secs_left, SETTLE_SECS, SETTLE_SECS)
             last_window = window_start
