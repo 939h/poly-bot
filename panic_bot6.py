@@ -124,14 +124,14 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
+ENTRY_PRICE_CAP  = 0.07   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
+SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 5.0   # take profit 2 — sell remaining 50% of shares at entry x this
+TP2_MULT         = 10.0   # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
@@ -149,7 +149,7 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.25  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
                               # Mirrors rebound_detector.py state machine logic.
