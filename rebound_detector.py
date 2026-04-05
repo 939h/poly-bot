@@ -8,24 +8,27 @@ State machine per token (asset × side = 8 machines):
   watching      → in_trough     : price < TROUGH_THRESHOLD (0.05)
   in_trough     → in_trough     : price < trough_min  (update rolling min)
   in_trough     → tracking_peak : price > REBOUND_MULT × trough_min
-                                   (2x signal fires — log immediately)
-  tracking_peak → tracking_peak : track max price until window ends
-  window end    → write to Google Sheet + CSV, then reset
+                                   → "signal" row written immediately
+  tracking_peak → tracking_peak : track max price; "peak_update" row every 60s
+  window end    → "peak_final" row written, then reset
 
-Google Sheet (tab: "Rebound Signals"):
+Google Sheet (tab: "Rebound Signals") + CSV (rebound_signals.csv):
   datetime_utc8, asset, side, window_start,
   trough_price, trough_time,
   signal_price, signal_time, signal_ratio,
-  peak_price, peak_time, peak_ratio
+  peak_price, peak_time, peak_ratio, record_type
 
-CSV fallback (rebound_signals.csv) — same columns.
+record_type values:
+  "signal"      — written immediately when 2× rebound fires
+  "peak_update" — written every 60s while tracking the peak
+  "peak_final"  — written at window end with the absolute peak
 
 Requirements:
     pip install py-clob-client requests python-dotenv colorama gspread google-auth
 
 .env keys:
     GOOGLE_SHEET_ID=1X9...          # required for Sheets
-    GOOGLE_CREDS_JSON={"type":...}  # service account JSON (required for Sheets)
+    GOOGLE_CREDS_JSON={"type":...}  # service account JSON
     DRY_RUN=true                    # set false for live prices
     POLY_PRIVATE_KEY=0x...          # only needed when DRY_RUN=false
     POLY_API_KEY=...
@@ -76,8 +79,8 @@ load_dotenv()
 # =============================================================================
 #  USER SETTINGS
 # =============================================================================
-ASSETS           = ["btc", "eth", "sol", "xrp"]
-TROUGH_THRESHOLD = 0.05   # price must drop below this to begin tracking
+ASSETS           = ["eth", "sol", "xrp"]
+TROUGH_THRESHOLD = 0.06   # price must drop below this to begin tracking
 REBOUND_MULT     = 2.0    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -94,9 +97,8 @@ WINDOW_SECS = 900
 CSV_FILE    = "rebound_signals.csv"
 UTC8        = timezone(timedelta(hours=8))
 
-# Keys for per-token state: "btc_yes", "btc_no", "eth_yes", ...
-SIDES     = ["yes", "no"]
-ALL_KEYS  = [f"{asset}_{side}" for asset in ASSETS for side in SIDES]
+SIDES    = ["yes", "no"]
+ALL_KEYS = [f"{asset}_{side}" for asset in ASSETS for side in SIDES]
 
 # =============================================================================
 #  LOGGING
@@ -126,7 +128,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # =============================================================================
-#  INFRASTRUCTURE HELPERS  (patterns from panic_bot6.py)
+#  INFRASTRUCTURE HELPERS
 # =============================================================================
 
 def get_server_time():
@@ -150,7 +152,6 @@ def build_slug(asset, window_ts):
 
 
 def fetch_market_by_slug(slug):
-    """Fetch from Gamma /markets; falls back to /events if not found."""
     try:
         r = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=10)
         data = r.json()
@@ -212,18 +213,148 @@ def build_client():
     return client
 
 # =============================================================================
+#  RECORDING — CSV + Google Sheets
+# =============================================================================
+_CSV_HEADERS = [
+    "datetime_utc8", "asset", "side", "window_start",
+    "trough_price", "trough_time",
+    "signal_price", "signal_time", "signal_ratio",
+    "peak_price",   "peak_time",   "peak_ratio",
+    "record_type",          # signal | peak_update | peak_final
+    "signal_period_sec",    # signal_time - trough_time  (int)
+    "peak_period_sec",      # peak_time   - signal_time  (int)
+]
+
+_sheet_ws        = None   # "Rebound Signals" worksheet
+_sheet_row_count = 1      # tracks total rows written (header = 1); updated on connect + write
+_window_colors   = {}     # window_str -> 0 (plain) or 1 (banded)
+_color_flip      = [0]    # alternates 0/1 per new window
+
+# Light blue for banded window rows; plain windows keep default white
+BAND_COLOR = {"red": 0.851, "green": 0.918, "blue": 0.988}
+
+# Column index of window_start in _CSV_HEADERS (used for banding)
+_WIN_COL = 3  # datetime_utc8(0), asset(1), side(2), window_start(3)
+
+
+def _window_color_idx(window_str):
+    """Return 0 (no fill) or 1 (BAND_COLOR) for the given window string."""
+    if window_str not in _window_colors:
+        _window_colors[window_str] = _color_flip[0]
+        _color_flip[0] ^= 1
+    return _window_colors[window_str]
+
+
+def _ts_str(ts):
+    return datetime.fromtimestamp(ts, tz=UTC8).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _make_row(key, s, window_start, record_type):
+    now_str    = datetime.now(UTC8).strftime("%Y-%m-%d %H:%M:%S")
+    window_str = datetime.fromtimestamp(window_start, tz=UTC8).strftime("%Y-%m-%d %H:%M:%S")
+    asset, side = key.rsplit("_", 1)
+    sig_ratio     = round(s["signal_price"] / s["trough_min"], 4) if s["trough_min"] else 0
+    signal_period = int(s["signal_time"] - s["trough_time"]) if s["trough_time"] and s["signal_time"] else 0
+    if record_type == "signal":
+        # peak not yet tracked — leave peak columns blank
+        peak_price_val  = ""
+        peak_time_val   = ""
+        peak_ratio_val  = ""
+        peak_period_val = ""
+    else:
+        peak_ratio      = round(s["peak_price"] / s["trough_min"], 4) if s["trough_min"] else 0
+        peak_price_val  = round(s["peak_price"], 4)
+        peak_time_val   = _ts_str(s["peak_time"])
+        peak_ratio_val  = peak_ratio
+        peak_period_val = int(s["peak_time"] - s["signal_time"]) if s["signal_time"] and s["peak_time"] else 0
+    return [
+        now_str,
+        asset.upper(),
+        side.upper(),
+        window_str,
+        round(s["trough_min"],   4),  _ts_str(s["trough_time"]),
+        round(s["signal_price"], 4),  _ts_str(s["signal_time"]),  sig_ratio,
+        peak_price_val,               peak_time_val,              peak_ratio_val,
+        record_type,
+        signal_period,
+        peak_period_val,
+    ]
+
+
+def reset_csv_if_needed():
+    """
+    Check CSV header against _CSV_HEADERS. If missing or mismatched,
+    back up the old file and start a fresh one with correct headers.
+    """
+    if not os.path.isfile(CSV_FILE):
+        return  # will be created on first write
+    with open(CSV_FILE, newline="", encoding="utf-8") as f:
+        first = next(csv.reader(f), None)
+    if first == _CSV_HEADERS:
+        return  # all good
+    # Header mismatch — rename old file and create fresh one
+    backup = CSV_FILE + ".bak"
+    os.replace(CSV_FILE, backup)
+    with open(CSV_FILE, mode="w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(_CSV_HEADERS)
+    log.warning("[CSV] Header mismatch — old file backed up to %s, fresh CSV created", backup)
+
+
+def write_rows(rows):
+    """Append rows to Google Sheet (with window color banding) and CSV."""
+    global _sheet_row_count
+    if not rows:
+        return
+
+    # ── Google Sheets ─────────────────────────────────────────────────────
+    if _sheet_ws is not None:
+        try:
+            prev = _sheet_row_count
+            _sheet_ws.append_rows(rows, value_input_option="USER_ENTERED")
+            _sheet_row_count += len(rows)
+
+            # Group rows by window_start value to apply color per window
+            win_groups = {}
+            for offset, row in enumerate(rows):
+                win = row[_WIN_COL] if len(row) > _WIN_COL else ""
+                win_groups.setdefault(win, []).append(prev + 1 + offset)  # 1-indexed
+
+            for win, row_nums in win_groups.items():
+                if _window_color_idx(win) == 1:
+                    r1, r2 = min(row_nums), max(row_nums)
+                    _sheet_ws.format(f"A{r1}:Z{r2}", {"backgroundColor": BAND_COLOR})
+        except Exception as e:
+            log.error("[Sheets] write failed: %s", e)
+
+    # ── CSV backup ────────────────────────────────────────────────────────
+    file_exists = os.path.isfile(CSV_FILE)
+    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(_CSV_HEADERS)
+        writer.writerows(rows)
+
+
+# =============================================================================
 #  GOOGLE SHEETS
 # =============================================================================
-_sheet_ws = None   # gspread Worksheet object, set by connect_sheet()
+
+def _get_or_create_ws(spreadsheet, title, rows, cols, headers):
+    """Get or create a worksheet; write headers if A1 is blank."""
+    try:
+        ws = spreadsheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+        log.info("[Sheets] Created tab '%s'", title)
+    if not ws.acell("A1").value:
+        ws.append_row(headers)
+        log.info("[Sheets] Wrote headers to '%s'", title)
+    return ws
 
 
 def connect_sheet():
-    """
-    Connect to the Google Sheet and return the 'Rebound Signals' worksheet.
-    Creates the tab and writes headers if it doesn't exist yet.
-    Returns None if config is missing or gspread not installed.
-    """
-    global _sheet_ws
+    """Connect both worksheets; creates tabs + headers if missing."""
+    global _sheet_ws, _sheet_row_count
     if not GSHEETS_OK:
         return None
     if not SHEET_ID:
@@ -241,32 +372,22 @@ def connect_sheet():
         )
         gc          = gspread.authorize(creds)
         spreadsheet = gc.open_by_key(SHEET_ID)
-        try:
-            ws = spreadsheet.worksheet(SHEET_TAB)
-        except gspread.exceptions.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=SHEET_TAB, rows=10000, cols=12)
-            ws.append_row(_CSV_HEADERS)
-            log.info("[Sheets] Created tab '%s' with headers", SHEET_TAB)
-        # Write headers if sheet is empty
-        if ws.row_count == 0 or ws.acell("A1").value != _CSV_HEADERS[0]:
-            if not ws.get_all_values():
-                ws.append_row(_CSV_HEADERS)
-        _sheet_ws = ws
-        log.info("[Sheets] Connected to '%s' → tab '%s'", SHEET_ID[:12] + "...", SHEET_TAB)
-        return ws
+        _sheet_ws        = _get_or_create_ws(spreadsheet, SHEET_TAB, 10000, len(_CSV_HEADERS), _CSV_HEADERS)
+        _sheet_row_count = len(_sheet_ws.col_values(1))
+        log.info("[Sheets] Connected → '%s' (%d existing rows)", SHEET_TAB, _sheet_row_count)
+        return _sheet_ws
     except Exception as e:
         log.error("[Sheets] Connect failed: %s", e)
         return None
 
 
 # =============================================================================
-#  TOKEN CACHE  — stores (yes_tok, no_tok) per (asset, window_start)
+#  TOKEN CACHE
 # =============================================================================
 token_cache = {}   # (asset, window_start) -> (yes_tok, no_tok)
 
 
 def get_tokens_cached(asset, window_start):
-    """Return (yes_tok, no_tok) for asset/window using cache. Either may be None."""
     key = (asset, window_start)
     if key in token_cache:
         return token_cache[key]
@@ -286,50 +407,45 @@ def get_tokens_cached(asset, window_start):
 # =============================================================================
 
 def fresh_state():
-    """Return a clean per-token state dict for a new window."""
     return {
         "phase":        "watching",   # watching | in_trough | tracking_peak
-        "trough_min":   None,         # lowest price while in_trough
-        "trough_time":  None,         # unix timestamp of trough_min
-        "signal_price": None,         # price at 2× trigger
-        "signal_time":  None,         # unix timestamp of trigger
-        "peak_price":   None,         # max price observed after trigger
-        "peak_time":    None,         # unix timestamp of peak_price
+        "trough_min":   None,
+        "trough_time":  None,
+        "signal_price": None,
+        "signal_time":  None,
+        "peak_price":   None,
+        "peak_time":    None,
     }
 
 
-# Module-level runtime state — keyed by "asset_side" e.g. "btc_yes"
 token_states = {key: fresh_state() for key in ALL_KEYS}
 last_window  = None
 
 
-def update_state(key, price, server_ts):
+def update_state(key, price, server_ts, window_start):
     """
-    Advance the token state machine.
-    Returns True if the 2× signal just fired (for logging), else False.
-    In tracking_peak phase, silently updates peak_price.
+    Advance the state machine. Returns "signal" if 2× just fired, else None.
     """
     s = token_states[key]
-    label = key.upper()
+    asset, side = key.rsplit("_", 1)
+    label = f"{asset.upper()} {side.upper()}"
 
     if s["phase"] == "tracking_peak":
-        # Keep tracking max price until window resets
         if price > s["peak_price"]:
             s["peak_price"] = price
             s["peak_time"]  = server_ts
-            log.info("[%s] PEAK updated @ %.4f  (ratio=%.2fx trough)",
-                     label, price, price / s["trough_min"])
-        return False
+            log.info("[%s] PEAK updated @ %.4f  (%.2fx trough)", label, price, price / s["trough_min"])
+        return None
 
     if s["phase"] == "watching":
         if price < TROUGH_THRESHOLD:
-            s["phase"]      = "in_trough"
-            s["trough_min"] = price
-            s["trough_time"]= server_ts
+            s["phase"]       = "in_trough"
+            s["trough_min"]  = price
+            s["trough_time"] = server_ts
             log.info("[%s] TROUGH entered @ %.4f", label, price)
-        return False
+        return None
 
-    # phase == "in_trough"
+    # in_trough
     if price < s["trough_min"]:
         s["trough_min"]  = price
         s["trough_time"] = server_ts
@@ -342,96 +458,25 @@ def update_state(key, price, server_ts):
         s["signal_time"]  = server_ts
         s["peak_price"]   = price
         s["peak_time"]    = server_ts
-        log.info(
-            "[%s] SIGNAL REBOUND! price=%.4f trough=%.4f ratio=%.2fx — tracking peak...",
-            label, price, s["trough_min"], ratio,
-        )
-        return True
+        log.info("[%s] SIGNAL REBOUND! price=%.4f trough=%.4f ratio=%.2fx",
+                 label, price, s["trough_min"], ratio)
+        return "signal"
 
-    return False
+    return None
 
 # =============================================================================
-#  CSV RECORDING  — written at window end with full peak data
-# =============================================================================
-_CSV_HEADERS = [
-    "datetime_utc8", "asset", "side", "window_start",
-    "trough_price", "trough_time",
-    "signal_price", "signal_time", "signal_ratio",
-    "peak_price",   "peak_time",   "peak_ratio",
-]
-
-
-def _ts_str(ts):
-    return datetime.fromtimestamp(ts, tz=UTC8).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def flush_completed_signals(window_start):
-    """
-    Called at window end. Write one row per token that reached tracking_peak,
-    with its final peak price. Writes to Google Sheet + CSV backup.
-    """
-    rows = []
-    now_str    = datetime.now(UTC8).strftime("%Y-%m-%d %H:%M:%S")
-    window_str = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-    for key, s in token_states.items():
-        if s["phase"] != "tracking_peak":
-            continue
-        asset, side = key.rsplit("_", 1)
-        sig_ratio  = round(s["signal_price"] / s["trough_min"], 4) if s["trough_min"] else 0
-        peak_ratio = round(s["peak_price"]   / s["trough_min"], 4) if s["trough_min"] else 0
-        rows.append([
-            now_str,
-            asset.upper(),
-            side.upper(),
-            window_str,
-            round(s["trough_min"],   4),  _ts_str(s["trough_time"]),
-            round(s["signal_price"], 4),  _ts_str(s["signal_time"]),  sig_ratio,
-            round(s["peak_price"],   4),  _ts_str(s["peak_time"]),    peak_ratio,
-        ])
-        log.info(
-            "[%s] PEAK FINAL  signal=%.4f peak=%.4f peak_ratio=%.2fx",
-            key.upper(), s["signal_price"], s["peak_price"], peak_ratio,
-        )
-
-    if not rows:
-        return
-
-    # ── Google Sheets ─────────────────────────────────────────────────────
-    if _sheet_ws is not None:
-        try:
-            _sheet_ws.append_rows(rows, value_input_option="USER_ENTERED")
-            log.info("[Sheets] Appended %d signal(s) to '%s'", len(rows), SHEET_TAB)
-        except Exception as e:
-            log.error("[Sheets] append_rows failed: %s", e)
-
-    # ── CSV backup ────────────────────────────────────────────────────────
-    file_exists = os.path.isfile(CSV_FILE)
-    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(_CSV_HEADERS)
-        writer.writerows(rows)
-
-    log.info("[CSV] Wrote %d signal(s) for window %s", len(rows), window_str)
-
-# =============================================================================
-#  DRY-RUN PRICE SIMULATION  — separate walk per "asset_side" key
+#  DRY-RUN SIMULATION
 # =============================================================================
 _sim_prices = {key: 0.50 for key in ALL_KEYS}
 
 
 def simulate_price(key):
-    """
-    Random-walk price simulator for DRY_RUN mode.
-    YES and NO are simulated independently so either side can trigger.
-    """
     p = _sim_prices[key]
     r = random.random()
     if r < 0.02:
-        p = max(0.01, p * random.uniform(0.05, 0.30))   # sharp dip → trough
+        p = max(0.01, p * random.uniform(0.05, 0.30))
     elif r < 0.10:
-        p = min(0.99, p * random.uniform(2.5, 4.5))     # spike → rebound
+        p = min(0.99, p * random.uniform(2.5, 4.5))
     else:
         p = max(0.01, min(0.99, p * random.uniform(0.97, 1.03)))
     _sim_prices[key] = round(p, 4)
@@ -444,8 +489,10 @@ def simulate_price(key):
 def main():
     global last_window, token_states, token_cache, _sim_prices
 
-    client = build_client()
-    connect_sheet()   # sets _sheet_ws; no-op if env vars missing
+    client           = build_client()
+    rebounded_assets = set()
+    reset_csv_if_needed()
+    connect_sheet()
 
     log.info("=" * 60)
     log.info("rebound_detector  |  DRY_RUN=%s", DRY_RUN)
@@ -464,41 +511,78 @@ def main():
             secs_into    = server_ts - window_start
             secs_left    = WINDOW_SECS - secs_into
 
-            # ── New window ─────────────────────────────────────────────────
+            # ── New window — flush finals, then reset ──────────────────────
             if window_start != last_window:
-                # Flush completed signals before resetting
                 if last_window is not None:
-                    flush_completed_signals(last_window)
+                    # Write peak_final for all tracking tokens
+                    rows = [
+                        _make_row(k, s, last_window, "peak_final")
+                        for k, s in token_states.items()
+                        if s["phase"] == "tracking_peak"
+                        and s["peak_price"] != s["signal_price"]
+                    ]
+                    if rows:
+                        write_rows(rows)
+                        log.info("[WINDOW] Wrote %d peak_final row(s)", len(rows))
 
-                token_states = {key: fresh_state() for key in ALL_KEYS}
-                token_cache  = {}
+                token_states     = {key: fresh_state() for key in ALL_KEYS}
+                token_cache      = {}
+                rebounded_assets = set()
                 if DRY_RUN:
                     _sim_prices = {key: 0.50 for key in ALL_KEYS}
-                log.info(
-                    "[WINDOW] New window start=%d  secs_left=%d",
-                    window_start, secs_left,
-                )
+                log.info("[WINDOW] New window start=%d  secs_left=%d", window_start, secs_left)
                 last_window = window_start
 
             # ── Per-token price fetch and state update ─────────────────────
+            # Stop scanning 10s before window ends (flush happens at next window start)
+            if secs_left <= 10:
+                time.sleep(POLL_SECS)
+                continue
+
+            signal_rows = []
             for asset in ASSETS:
+                yes_key = f"{asset}_yes"
+                no_key  = f"{asset}_no"
+                yes_phase = token_states[yes_key]["phase"]
+                no_phase  = token_states[no_key]["phase"]
+
+                # Skip asset only when already rebounded AND no side is tracking a peak
+                if asset in rebounded_assets \
+                        and yes_phase != "tracking_peak" \
+                        and no_phase  != "tracking_peak":
+                    continue
+
                 if DRY_RUN:
-                    yes_price = simulate_price(f"{asset}_yes")
-                    no_price  = simulate_price(f"{asset}_no")
+                    yes_price = simulate_price(yes_key)
+                    no_price  = simulate_price(no_key)
                 else:
                     yes_tok, no_tok = get_tokens_cached(asset, window_start)
                     yes_price = get_midpoint(client, yes_tok) if yes_tok else 0.0
                     no_price  = get_midpoint(client, no_tok)  if no_tok  else 0.0
 
-                if yes_price > 0:
-                    update_state(f"{asset}_yes", yes_price, server_ts)
-                if no_price > 0:
-                    update_state(f"{asset}_no",  no_price,  server_ts)
+                for key, price in [(yes_key, yes_price), (no_key, no_price)]:
+                    if price <= 0.01:
+                        continue
+                    result = update_state(key, price, server_ts, window_start)
+                    if result == "signal":
+                        rebounded_assets.add(asset)
+                        signal_rows.append(_make_row(key, token_states[key], window_start, "signal"))
+
+            if signal_rows:
+                write_rows(signal_rows)
+                log.info("[RECORD] Wrote %d signal row(s) immediately", len(signal_rows))
 
         except KeyboardInterrupt:
             log.info("Flushing final signals before exit...")
-            if last_window is not None:
-                flush_completed_signals(last_window)
+            rows = [
+                _make_row(k, s, last_window, "peak_final")
+                for k, s in token_states.items()
+                if s["phase"] == "tracking_peak"
+                and last_window is not None
+                and s["peak_price"] != s["signal_price"]
+            ]
+            if rows:
+                write_rows(rows)
             log.info("Stopped by user.")
             break
         except Exception as e:
