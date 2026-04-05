@@ -994,6 +994,13 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if current is None:
             continue
 
+        # Dead market guard — discard if price falls into dead zone
+        if current <= 0.025:
+            log.info("[TROUGH] %s  discarded — price %.4f below dead zone (<=0.025)",
+                     key, current)
+            del pending_buys[key]
+            continue
+
         # Update rolling trough minimum — price still falling, keep tracking
         if current < pb["trough_min"]:
             pb["trough_min"]  = current
