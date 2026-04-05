@@ -81,7 +81,7 @@ load_dotenv()
 # =============================================================================
 ASSETS           = ["eth", "sol", "xrp"]
 TROUGH_THRESHOLD = 0.06   # price must drop below this to begin tracking
-REBOUND_MULT     = 2.0    # signal fires when price > REBOUND_MULT × trough_min
+REBOUND_MULT     = 1.5    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
 SHEET_ID         = os.getenv("GOOGLE_SHEET_ID", "")
