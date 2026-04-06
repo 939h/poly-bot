@@ -390,7 +390,15 @@ def market_buy(client, token_id, label, price_hint=None):
         raw_making = float(resp.get("makingAmount") or 0)  # quote spent
         filled_shares = int(max(math.floor(raw_taking), 0))
         filled_price = (raw_making / raw_taking) if raw_taking > 0 and raw_making > 0 else 0.0
+
+        # FOK zero-fill guard — if both amounts are zero the order was not executed
+        # (liquidity gone, order cancelled). Do NOT fabricate a position.
+        if raw_taking == 0 and raw_making == 0:
+            log.warning("[BUY] %s FOK returned zero fill — order not executed, skipping", label)
+            return {"ok": False, "resp": resp, "filled_shares": 0, "filled_price": 0.0}
+
         if filled_shares <= 0:
+            # Amounts present but shares unreadable — estimate as last resort
             log.warning("[BUY] %s filled shares unavailable in response; falling back to estimate", label)
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
             filled_shares = int(max(math.floor(amount / entry_est), 0)) if entry_est > 0 else 0
@@ -445,7 +453,10 @@ def market_sell(client, token_id, shares, price, label):
                 )
             except Exception as e:
                 log.warning("[SELL] post-sell balance refresh failed for %s: %s", label, e)
-            filled_shares = int(max(math.floor(float(resp.get("makingAmount") or attempt_shares or 0)), 0))
+            raw_making = float(resp.get("makingAmount") or 0)
+            if raw_making <= 0:
+                log.warning("[SELL] %s makingAmount missing from response — fill size unknown", label)
+            filled_shares = int(max(math.floor(raw_making), 0))
             filled_quote = float(resp.get("takingAmount") or 0)  # quote received
             return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_quote": filled_quote}
         except Exception as e:
