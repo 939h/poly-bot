@@ -369,7 +369,8 @@ def get_tokens(market):
         no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  None)
         if yes_idx is not None and no_idx is not None:
             return raw[yes_idx].strip(), raw[no_idx].strip()
-    log.warning("get_tokens: outcomes field missing or mismatched — falling back to positional [0]=YES [1]=NO")
+    log.warning("get_tokens: outcomes field missing or mismatched — raw outcomes=%r  raw_tokens=%r  falling back to positional",
+                market.get("outcomes"), raw)
     return raw[0].strip(), raw[1].strip()
 
 
