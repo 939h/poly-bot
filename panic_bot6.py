@@ -131,7 +131,7 @@ SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more s
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 10.0   # take profit 2 — sell remaining 50% of shares at entry x this
+TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
@@ -1486,7 +1486,7 @@ function render(s){
       </tbody></table>
     </div>
 
-    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; panic_bot6 &nbsp;&mdash;&nbsp; PnL chart records every 5 min</footer>`;
+    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; panic_bot6 &nbsp;&mdash;&nbsp; PnL chart records every 30 min</footer>`;
 
   // Draw chart after DOM is updated
   const wrap = document.getElementById('chartWrap');
@@ -1639,7 +1639,7 @@ def main():
             last_pnl_snapshot = now_t
             pnl_history.append({
                 "ts":    datetime.now().strftime("%H"),
-                "pnl":   round(stats["pnl"], 4),
+                "pnl":   round(stats["pnl"], 1),
             })
             if len(pnl_history) > 288:  # keep max 24h of 5-min snapshots
                 pnl_history.pop(0)
