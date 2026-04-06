@@ -360,7 +360,7 @@ def get_tokens(market):
         try:
             outcomes = json.loads(outcomes)
         except Exception:
-            outcomes = []
+            outcomes = [o.strip() for o in outcomes.split(",") if o.strip()]
     if not raw or len(raw) < 2:
         return None, None
     if outcomes and len(outcomes) == len(raw):
