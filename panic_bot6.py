@@ -191,7 +191,7 @@ CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
 # Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
-TRADING_WINDOWS_ENABLED = False
+TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
 TRADING_WINDOWS         = [(9, 11), (20, 22), (0, 1)]     # list of (start_hour, end_hour), end is exclusive
 
