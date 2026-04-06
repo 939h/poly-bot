@@ -365,12 +365,12 @@ def get_tokens(market):
     if not raw or len(raw) < 2:
         return None, None
     if outcomes and len(outcomes) == len(raw):
-        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
-        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  None)
+        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), None)
+        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "down")), None)
         if yes_idx is not None and no_idx is not None:
             return raw[yes_idx].strip(), raw[no_idx].strip()
-    log.warning("get_tokens: outcomes field missing or mismatched — raw outcomes=%r  raw_tokens=%r  falling back to positional",
-                market.get("outcomes"), raw)
+    log.warning("get_tokens: outcomes field unrecognised — raw outcomes=%r  falling back to positional [0]=YES [1]=NO",
+                market.get("outcomes"))
     return raw[0].strip(), raw[1].strip()
 
 
