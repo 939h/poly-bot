@@ -395,13 +395,17 @@ def market_buy(client, token_id, label, price_hint=None):
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
             filled_shares = int(max(math.floor(amount / entry_est), 0)) if entry_est > 0 else 0
             filled_price = float(entry_est) if entry_est > 0 else 0.0
+        elif filled_price <= 0:
+            # Shares known but price missing — estimate from price_hint or midpoint
+            log.warning("[BUY] %s filled price unavailable in response; falling back to estimate", label)
+            filled_price = float(price_hint or 0) or get_midpoint(client, token_id)
         # Refresh conditional token balance so sell works immediately
         try:
             client.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("[BUY] balance refresh failed for %s: %s", label, e)
         return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_price": filled_price}
     except Exception as e:
         log.error("[BUY] Failed %s: %s", label, e)
@@ -424,8 +428,8 @@ def market_sell(client, token_id, shares, price, label):
         client.update_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("[SELL] pre-sell balance refresh failed for %s: %s", label, e)
 
     attempt_shares = sell_shares
     for attempt in range(2):
@@ -439,8 +443,8 @@ def market_sell(client, token_id, shares, price, label):
                 client.update_balance_allowance(
                     BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[SELL] post-sell balance refresh failed for %s: %s", label, e)
             filled_shares = int(max(math.floor(float(resp.get("makingAmount") or attempt_shares or 0)), 0))
             filled_quote = float(resp.get("takingAmount") or 0)  # quote received
             return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_quote": filled_quote}
@@ -677,7 +681,7 @@ def _within_unsold_tolerance(pos, remaining_shares):
     return remaining_shares <= (base * UNSOLD_TOLERANCE_RATIO)
 
 
-def manage_positions(client):
+def manage_positions(client, server_ts=None):
     """
     Exit logic:
       Exit 0 — Force stop (cooldown): sell ALL remaining shares
@@ -711,7 +715,7 @@ def manage_positions(client):
         if current_price <= force_stop_price:
             now = time.time()
             if pos.get("force_stop_triggered") is None:
-                server_ts_now = get_server_time()
+                server_ts_now = server_ts if server_ts is not None else get_server_time()
                 secs_in = server_ts_now - get_current_window_start(server_ts_now)
                 if secs_in < 300:
                     cooldown, period = HOLD_EARLY_SECS, "early"
@@ -1589,7 +1593,7 @@ def main():
                     log.info("[IDLE] Trading window is open: bot resumed")
                 was_idle = False
                 scan_markets(client, window_start, secs_into, server_ts, executor)
-            manage_positions(client)
+            manage_positions(client, server_ts)
               
             save_state()
 
