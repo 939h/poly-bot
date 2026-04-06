@@ -755,7 +755,7 @@ def manage_positions(client, server_ts=None):
             sell = market_sell(client, pos["token_id"], remaining, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(remaining), int(max(math.floor(float(sell.get("filled_shares") or remaining)), 0)))
+                sold_sh = min(int(remaining), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 sold_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + sold_revenue, 4)
                 leftover = int(max(pos["net_shares"] - sold_sh, 0))
@@ -788,7 +788,7 @@ def manage_positions(client, server_ts=None):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(tp1_sh), int(max(math.floor(float(sell.get("filled_shares") or tp1_sh)), 0)))
+                sold_sh = min(int(tp1_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 tp1_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp1_revenue, 4)
                 remaining_after_sell = int(max(pos["net_shares"] - sold_sh, 0))
@@ -823,7 +823,7 @@ def manage_positions(client, server_ts=None):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                 leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
@@ -852,7 +852,7 @@ def manage_positions(client, server_ts=None):
                 )
                 pos["last_exit_attempt_ts"] = time.time()
                 if sell["ok"]:
-                    sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                    sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                     tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                     pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                     leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
