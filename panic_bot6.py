@@ -165,8 +165,8 @@ EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
 CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position closed
 UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=2% leftover as dust and close the trade
-TP_SELL_MAX_ATTEMPTS = 10     # once TP triggers, retry sell immediately up to N times
-TP_SELL_RETRY_DELAY_SECS = 0.25
+TP_SELL_MAX_ATTEMPTS = 5     # once TP triggers, retry sell immediately up to N times
+TP_SELL_RETRY_DELAY_SECS = 0.5
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # =============================================================================
