@@ -180,7 +180,7 @@ HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before sellin
 
 # --- Timing ------------------------------------------------------------------
 POLL_SECS        = 0.5      # seconds between each price scan
-STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
+STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
 CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
