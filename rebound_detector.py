@@ -79,7 +79,7 @@ load_dotenv()
 # =============================================================================
 #  USER SETTINGS
 # =============================================================================
-ASSETS           = ["eth", "sol", "xrp"]
+ASSETS           = ["btc", "eth", "sol", "xrp"]
 TROUGH_THRESHOLD = 0.06   # price must drop below this to begin tracking
 REBOUND_MULT     = 1.5    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
