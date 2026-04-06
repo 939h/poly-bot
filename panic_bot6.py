@@ -56,6 +56,14 @@ from dotenv import load_dotenv
 sys.stdout.reconfigure(line_buffering=True)
 
 try:
+    import colorama
+    from colorama import Fore, Style
+    colorama.init()
+    COLORS = True
+except ImportError:
+    COLORS = False
+
+try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import (
         MarketOrderArgs, OrderType, ApiCreds,
@@ -70,17 +78,43 @@ except ImportError:
 load_dotenv()
 
 # ── Logging (UTF-8 so Windows never crashes on special chars) -----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(
-            open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
-        ),
-        logging.FileHandler("panic_bot.log", encoding="utf-8"),
-    ],
-    force=True,
+class _ColorFormatter(logging.Formatter):
+    def format(self, record):
+        msg = super().format(record)
+        if not COLORS:
+            return msg
+        # Wins / successful entries
+        if any(t in msg for t in ("[REBOUND]", "[OPEN]", "[TP2]")):
+            return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
+        if any(t in msg for t in ("[TP1]", "[ARMED]")):
+            return Fore.GREEN + msg + Style.RESET_ALL
+        # Losses / stops
+        if any(t in msg for t in ("[FORCE-STOP]", "[TRAIL-STOP]", "[STOP-WAIT]", "[STOP-CANCEL]")):
+            return Fore.RED + msg + Style.RESET_ALL
+        # Signals / trough tracking / retries
+        if any(t in msg for t in ("[PANIC]", "[TROUGH]", "[SELL-RETRY]")):
+            return Fore.YELLOW + msg + Style.RESET_ALL
+        # Window / market info
+        if any(t in msg for t in ("[WINDOW]", "[MARKET]", "[STATUS]")):
+            return Fore.CYAN + msg + Style.RESET_ALL
+        # Dry-run mode
+        if "[DRY-RUN]" in msg:
+            return Fore.MAGENTA + msg + Style.RESET_ALL
+        # Fallback on log level
+        if record.levelno >= logging.ERROR:
+            return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
+        if record.levelno >= logging.WARNING:
+            return Fore.YELLOW + msg + Style.RESET_ALL
+        return msg
+
+_fmt = "%(asctime)s [%(levelname)s] %(message)s"
+_console = logging.StreamHandler(
+    open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
 )
+_console.setFormatter(_ColorFormatter(_fmt))
+_file = logging.FileHandler("panic_bot.log", encoding="utf-8")
+_file.setFormatter(logging.Formatter(_fmt))
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file], force=True)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
