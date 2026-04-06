@@ -109,7 +109,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["eth", "sol", "xrp"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["btc", "eth", "sol", "xrp"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -124,14 +124,14 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.30   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
-SD_THRESH        = 2.1    #              sigma floor multiplier (looser = more signals)
+ENTRY_PRICE_CAP  = 0.10   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
+SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
+SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more signals)
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 7.0   # take profit 2 — sell remaining 50% of shares at entry x this
+TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
+TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
@@ -149,6 +149,10 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
+CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
+                              # >= this multiple from the trough_min after trigger fires.
+                              # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
+                              # Mirrors rebound_detector.py state machine logic.
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
@@ -161,8 +165,8 @@ EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
 CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position closed
 UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=2% leftover as dust and close the trade
-TP_SELL_MAX_ATTEMPTS = 10     # once TP triggers, retry sell immediately up to N times
-TP_SELL_RETRY_DELAY_SECS = 0.25
+TP_SELL_MAX_ATTEMPTS = 5     # once TP triggers, retry sell immediately up to N times
+TP_SELL_RETRY_DELAY_SECS = 0.5
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # =============================================================================
@@ -180,9 +184,11 @@ open_positions  = {}   # "btc_yes" -> position dict
 token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
+pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
 asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
+trade_log          = []     # [{time, asset, side, entry, tp1, tp1_hit, tp2, tp2_hit, exit, pnl}] newest-first
 last_pnl_snapshot  = 0      # unix timestamp of last pnl_history append
 pnl_history = []
 
@@ -349,8 +355,20 @@ def get_tokens(market):
             raw = json.loads(raw)
         except Exception:
             return None, None
+    outcomes = market.get("outcomes", [])
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except Exception:
+            outcomes = []
     if not raw or len(raw) < 2:
         return None, None
+    if outcomes and len(outcomes) == len(raw):
+        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
+        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  None)
+        if yes_idx is not None and no_idx is not None:
+            return raw[yes_idx].strip(), raw[no_idx].strip()
+    log.warning("get_tokens: outcomes field missing or mismatched — falling back to positional [0]=YES [1]=NO")
     return raw[0].strip(), raw[1].strip()
 
 
@@ -384,18 +402,30 @@ def market_buy(client, token_id, label, price_hint=None):
         raw_making = float(resp.get("makingAmount") or 0)  # quote spent
         filled_shares = int(max(math.floor(raw_taking), 0))
         filled_price = (raw_making / raw_taking) if raw_taking > 0 and raw_making > 0 else 0.0
+
+        # FOK zero-fill guard — if both amounts are zero the order was not executed
+        # (liquidity gone, order cancelled). Do NOT fabricate a position.
+        if raw_taking == 0 and raw_making == 0:
+            log.warning("[BUY] %s FOK returned zero fill — order not executed, skipping", label)
+            return {"ok": False, "resp": resp, "filled_shares": 0, "filled_price": 0.0}
+
         if filled_shares <= 0:
+            # Amounts present but shares unreadable — estimate as last resort
             log.warning("[BUY] %s filled shares unavailable in response; falling back to estimate", label)
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
             filled_shares = int(max(math.floor(amount / entry_est), 0)) if entry_est > 0 else 0
             filled_price = float(entry_est) if entry_est > 0 else 0.0
+        elif filled_price <= 0:
+            # Shares known but price missing — estimate from price_hint or midpoint
+            log.warning("[BUY] %s filled price unavailable in response; falling back to estimate", label)
+            filled_price = float(price_hint or 0) or get_midpoint(client, token_id)
         # Refresh conditional token balance so sell works immediately
         try:
             client.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("[BUY] balance refresh failed for %s: %s", label, e)
         return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_price": filled_price}
     except Exception as e:
         log.error("[BUY] Failed %s: %s", label, e)
@@ -418,8 +448,8 @@ def market_sell(client, token_id, shares, price, label):
         client.update_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("[SELL] pre-sell balance refresh failed for %s: %s", label, e)
 
     attempt_shares = sell_shares
     for attempt in range(2):
@@ -433,9 +463,12 @@ def market_sell(client, token_id, shares, price, label):
                 client.update_balance_allowance(
                     BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
                 )
-            except Exception:
-                pass
-            filled_shares = int(max(math.floor(float(resp.get("makingAmount") or attempt_shares or 0)), 0))
+            except Exception as e:
+                log.warning("[SELL] post-sell balance refresh failed for %s: %s", label, e)
+            raw_making = float(resp.get("makingAmount") or 0)
+            if raw_making <= 0:
+                log.warning("[SELL] %s makingAmount missing from response — fill size unknown", label)
+            filled_shares = int(max(math.floor(raw_making), 0))
             filled_quote = float(resp.get("takingAmount") or 0)  # quote received
             return {"ok": True, "resp": resp, "filled_shares": filled_shares, "filled_quote": filled_quote}
         except Exception as e:
@@ -583,7 +616,7 @@ def check_trigger(key, current_price, secs_into):
 
 # ── Position management -------------------------------------------------------
 
-def open_position(key, token_id, entry_price, filled_shares=None):
+def open_position(key, token_id, entry_price, filled_shares=None, window_start=None):
     # Use executed fill size (from buy response) to keep inventory in sync.
     if filled_shares is not None and filled_shares > 0:
         net_shares = int(max(math.floor(float(filled_shares)), 0))
@@ -607,8 +640,11 @@ def open_position(key, token_id, entry_price, filled_shares=None):
         "force_stop_triggered":  None,   # timestamp when force stop cooldown started
         "force_stop_cooldown":   None,   # cooldown duration in seconds
         "tp1_revenue":           0.0,    # actual revenue received at TP1 sell
+        "tp1_hit_price":         None,   # actual price when TP1 was filled
         "realized_revenue":      0.0,    # cumulative realized revenue across all successful sells
         "last_exit_attempt_ts":  0.0,    # avoids retry-spam when venue rejects exits
+        "opened_at":   datetime.now().strftime("%H:%M"),
+        "window_start": window_start,
     }
     stats["buys"] += 1
     log.info(
@@ -636,6 +672,26 @@ def _record_closed_trade(key, pnl):
     r["pnl"] = round(r["pnl"] + pnl, 4)
 
 
+def _record_trade_log(key, pos, exit_type, close_price, pnl):
+    """Append one closed-trade record to trade_log (newest-first, capped at 200)."""
+    parts = key.split("_", 1)
+    record = {
+        "time":     pos.get("opened_at", "—"),
+        "asset":    parts[0].upper(),
+        "side":     parts[1].upper() if len(parts) > 1 else "—",
+        "entry":    round(pos["entry_price"], 4),
+        "tp1":      round(pos["tp1_price"], 4),
+        "tp1_hit":  round(pos["tp1_hit_price"], 4) if pos.get("tp1_hit_price") is not None else None,
+        "tp2":      round(pos["tp2_price"], 4),
+        "tp2_hit":  round(close_price, 4) if exit_type == "TP2" else None,
+        "exit":     exit_type,
+        "pnl":      round(pnl, 4),
+    }
+    trade_log.insert(0, record)
+    if len(trade_log) > 200:
+        trade_log.pop()
+
+
 def _calc_pnl(pos, final_revenue):
     """pnl = (realized_revenue + final_revenue) - cost"""
     return round((pos.get("realized_revenue", 0.0) + final_revenue) - pos["cost"], 4)
@@ -648,7 +704,7 @@ def _within_unsold_tolerance(pos, remaining_shares):
     return remaining_shares <= (base * UNSOLD_TOLERANCE_RATIO)
 
 
-def manage_positions(client):
+def manage_positions(client, server_ts=None):
     """
     Exit logic:
       Exit 0 — Force stop (cooldown): sell ALL remaining shares
@@ -682,7 +738,7 @@ def manage_positions(client):
         if current_price <= force_stop_price:
             now = time.time()
             if pos.get("force_stop_triggered") is None:
-                server_ts_now = get_server_time()
+                server_ts_now = server_ts if server_ts is not None else get_server_time()
                 secs_in = server_ts_now - get_current_window_start(server_ts_now)
                 if secs_in < 300:
                     cooldown, period = HOLD_EARLY_SECS, "early"
@@ -711,7 +767,7 @@ def manage_positions(client):
             sell = market_sell(client, pos["token_id"], remaining, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(remaining), int(max(math.floor(float(sell.get("filled_shares") or remaining)), 0)))
+                sold_sh = min(int(remaining), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 sold_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + sold_revenue, 4)
                 leftover = int(max(pos["net_shares"] - sold_sh, 0))
@@ -721,6 +777,7 @@ def manage_positions(client):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "STOP", current_price, pnl)
                 to_close.append(key)
             continue
 
@@ -743,17 +800,18 @@ def manage_positions(client):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(tp1_sh), int(max(math.floor(float(sell.get("filled_shares") or tp1_sh)), 0)))
+                sold_sh = min(int(tp1_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 tp1_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp1_revenue, 4)
                 remaining_after_sell = int(max(pos["net_shares"] - sold_sh, 0))
                 if sold_sh >= tp1_sh * TP1_MIN_FILL_RATIO:
-                    pos["tp1_done"]    = True
-                    pos["tp1_revenue"] = round(pos.get("tp1_revenue", 0.0) + tp1_revenue, 4)
-                    pos["net_shares"]  = remaining_after_sell
-                    pos["tp1_shares"]  = 0
-                    pos["tp2_shares"]  = remaining_after_sell
-                    pos["peak_price"]  = current_price
+                    pos["tp1_done"]      = True
+                    pos["tp1_revenue"]   = round(pos.get("tp1_revenue", 0.0) + tp1_revenue, 4)
+                    pos["tp1_hit_price"] = current_price
+                    pos["net_shares"]    = remaining_after_sell
+                    pos["tp1_shares"]    = 0
+                    pos["tp2_shares"]    = remaining_after_sell
+                    pos["peak_price"]    = current_price
                     log.info("[TP1] %s executed  sold=%.4fsh  revenue=$%.4f  holding %.4fsh",
                              key, sold_sh, tp1_revenue, remaining_after_sell)
                 else:
@@ -777,7 +835,7 @@ def manage_positions(client):
             )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
-                sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                 tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                 leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
@@ -787,6 +845,7 @@ def manage_positions(client):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "TP2", current_price, pnl)
                 to_close.append(key)
             continue
 
@@ -805,7 +864,7 @@ def manage_positions(client):
                 )
                 pos["last_exit_attempt_ts"] = time.time()
                 if sell["ok"]:
-                    sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or tp2_sh)), 0)))
+                    sold_sh = min(int(tp2_sh), int(max(math.floor(float(sell.get("filled_shares") or 0)), 0)))
                     tp2_revenue = float(sell.get("filled_quote") or round(sold_sh * current_price, 4))
                     pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + tp2_revenue, 4)
                     leftover = int(max(pos["tp2_shares"] - sold_sh, 0))
@@ -815,6 +874,7 @@ def manage_positions(client):
                     stats["wins" if pnl > 0 else "losses"] += 1
                     stats["pnl"] += pnl
                     _record_closed_trade(key, pnl)
+                    _record_trade_log(key, pos, "TRAIL", current_price, pnl)
                     to_close.append(key)
 
     for key in to_close:
@@ -867,7 +927,6 @@ def _update_prices_and_history(result):
     if result is None:
         return
     asset, yes_price, yes_token, no_token = result
-   # --- ADD THIS LINE HERE ---
     log_price_to_csv(asset, yes_price)
     no_price = round(1.0 - yes_price, 4)
     live_prices[f"{asset}_yes"] = yes_price
@@ -935,25 +994,94 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     for asset in ASSETS:
         _update_prices_and_history(results.get(asset))
 
+    # ── Step 1: Advance pending confirmations (rebound detector logic) ────────
+    # Runs regardless of trading window — pending troughs must still be tracked
+    # and discarded (e.g. past STOP_TRADE_SECS, dead zone) even when idle.
+    # Mirrors rebound_detector.py state machine:
+    #   in_trough  : track rolling trough_min while price keeps falling
+    #   → buy fires : price >= CONFIRM_REBOUND_MULT × trough_min  (genuine bounce)
+    # This ensures we buy AFTER the bottom, not INTO a falling knife.
+    for key in list(pending_buys.keys()):
+        pb    = pending_buys[key]
+        asset = key.split("_")[0]
+
+        if asset in traded_this_window:
+            del pending_buys[key]
+            continue
+
+        if secs_into >= STOP_TRADE_SECS:
+            log.info("[TROUGH] %s  discarded — past trade cutoff  trough=%.4f",
+                     key, pb["trough_min"])
+            del pending_buys[key]
+            continue
+
+        current = live_prices.get(key)
+        if current is None:
+            continue
+
+        # Dead market guard — discard if price falls into dead zone
+        if current <= 0.025:
+            log.info("[TROUGH] %s  discarded — price %.4f below dead zone (<=0.025)",
+                     key, current)
+            del pending_buys[key]
+            continue
+
+        # Update rolling trough minimum — price still falling, keep tracking
+        if current < pb["trough_min"]:
+            pb["trough_min"]  = current
+            pb["trough_time"] = server_ts
+            log.info("[TROUGH] %s  new low=%.4f", key, current)
+            continue
+
+        # Check rebound ratio
+        rebound_ratio = current / pb["trough_min"] if pb["trough_min"] > 0 else 0.0
+        log.info("[TROUGH] %s  price=%.4f  trough=%.4f  ratio=%.3fx  need=%.2fx",
+                 key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
+
+        if rebound_ratio >= CONFIRM_REBOUND_MULT:
+            # Cap check — rebound price must still be in the lottery zone
+            if current > ENTRY_PRICE_CAP:
+                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap %.4f",
+                         key, current, ENTRY_PRICE_CAP)
+                del pending_buys[key]
+                continue
+            # Genuine rebound confirmed — fire the buy
+            log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx",
+                     key, pb["trough_min"], current, rebound_ratio)
+            label = f"{asset.upper()}-{key.split('_')[1].upper()}"
+            buy = market_buy(client, pb["token_id"], label, price_hint=current)
+            del pending_buys[key]
+            if buy["ok"]:
+                entry_px = float(buy.get("filled_price") or current)
+                open_position(key, pb["token_id"], entry_px,
+                              filled_shares=buy.get("filled_shares"),
+                              window_start=window_start)
+                traded_this_window.add(asset)
+
     if not can_open_new_trades(server_ts):
         return
 
-    # ── Evaluate trigger only for assets not yet traded this window ───────────
+    # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
         if asset in traded_this_window:
             log.debug("[SKIP] %s already traded this window", asset.upper())
+            continue
+
+        # Skip if either side is already awaiting confirmation
+        if f"{asset}_yes" in pending_buys or f"{asset}_no" in pending_buys:
             continue
 
         buy_signal = _evaluate_asset(results.get(asset), secs_into)
         if buy_signal:
             key, check_token, check_price = buy_signal
             stats["triggers"] += 1
-            label = f"{asset.upper()}-{key.split('_')[1].upper()}"
-            buy = market_buy(client, check_token, label, price_hint=check_price)
-            if buy["ok"]:
-                entry_px = float(buy.get("filled_price") or check_price)
-                open_position(key, check_token, entry_px, filled_shares=buy.get("filled_shares"))
-                traded_this_window.add(asset)
+            pending_buys[key] = {
+                "token_id":   check_token,
+                "trough_min": check_price,
+                "trough_time": server_ts,
+            }
+            log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
+                     key, check_price, CONFIRM_REBOUND_MULT)
 
 # ── Status print --------------------------------------------------------------
 
@@ -1011,12 +1139,14 @@ def _build_state_snapshot():
             "period": "early" if secs_in < 300 else ("mid" if secs_in < 600 else "late"),
         },
         "pnl_history":   list(pnl_history),
-        "asset_history":  dict(asset_history),
+        "asset_history": dict(asset_history),
+        "trade_log":     list(trade_log),
         "settings": {
             "assets": ASSETS, "sigma": SD_THRESH, "cap": ENTRY_PRICE_CAP,
             "drop_ref": DROP_FROM_REF, "settle": SETTLE_SECS,
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
+            "confirm_rebound": CONFIRM_REBOUND_MULT,
         },
     }
 
@@ -1168,6 +1298,68 @@ function drawChart(history){
   if(last%step!==0) ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
+// ── Trade log ─────────────────────────────────────────────────────────────────
+let _tradeLogExpanded = false;
+const TRADE_LOG_COLLAPSE = 5;
+
+function renderTradeLog(log){
+  if(!log||log.length===0){
+    return '<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
+  }
+  const exitBadge=e=>{
+    const m={TP2:'green',TRAIL:'amber',STOP:'red'};
+    return `<span class="badge" style="background:${e==='TP2'?'#0d2a1e':e==='TRAIL'?'#2a1e08':'#2a0d0d'};color:${e==='TP2'?'#4ade9f':e==='TRAIL'?'#fbbf24':'#f87171'};border:1px solid ${e==='TP2'?'#1a5c3a':e==='TRAIL'?'#5c3d08':'#5c1d1d'}">${e}</span>`;
+  };
+  const tp1Cell=t=>{
+    if(t.tp1_hit!==null&&t.tp1_hit!==undefined)
+      return `<span style="font-family:monospace">$${t.tp1.toFixed(4)}</span> <span class="green" style="font-size:11px">✓</span>`;
+    return `<span style="font-family:monospace">$${t.tp1.toFixed(4)}</span> <span class="red" style="font-size:11px">✗</span>`;
+  };
+  const tp2Cell=t=>{
+    if(t.tp2_hit!==null&&t.tp2_hit!==undefined)
+      return `<span style="font-family:monospace">$${t.tp2.toFixed(4)}</span> <span class="green" style="font-size:11px">✓</span>`;
+    return `<span class="dim">—</span>`;
+  };
+  const rows=log.map((t,i)=>{
+    const p=t.pnl||0;
+    const pStr=(p>=0?'+':'')+p.toFixed(4);
+    const pCol=p>0?'green':p<0?'red':'dim';
+    return `<tr class="tl-row" style="${i>=TRADE_LOG_COLLAPSE&&!_tradeLogExpanded?'display:none':''}">
+      <td>${t.time||'—'}</td>
+      <td><strong>${t.asset}-${t.side}</strong></td>
+      <td style="font-family:monospace">$${(t.entry||0).toFixed(4)}</td>
+      <td>${tp1Cell(t)}</td>
+      <td>${tp2Cell(t)}</td>
+      <td>${exitBadge(t.exit)}</td>
+      <td class="${pCol}" style="font-family:monospace;font-weight:600">$${pStr}</td>
+    </tr>`;
+  }).join('');
+
+  const extra=log.length-TRADE_LOG_COLLAPSE;
+  const toggleBtn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tradeLogExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
+
+  return `<div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>TP1</th><th>TP2</th><th>Exit</th><th>PnL</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>${toggleBtn}`;
+}
+
+function tlToggle(){
+  _tradeLogExpanded=!_tradeLogExpanded;
+  document.querySelectorAll('.tl-row').forEach((r,i)=>{
+    if(i>=TRADE_LOG_COLLAPSE) r.style.display=_tradeLogExpanded?'':'none';
+  });
+  const btn=document.getElementById('tlToggle');
+  if(btn){
+    const extra=parseInt(btn.textContent.replace(/\D/g,''))||0;
+    // recount hidden rows
+    const hidden=Array.from(document.querySelectorAll('.tl-row')).filter(r=>r.style.display==='none').length;
+    btn.textContent=_tradeLogExpanded?'▲ Show less':'▼ Show '+(hidden||extra)+' more';
+  }
+}
+
 // ── Asset history breakdown ───────────────────────────────────────────────────
 function renderAssetHistory(assetHist, assets){
   if(!assetHist||Object.keys(assetHist).length===0){
@@ -1196,6 +1388,7 @@ function render(s){
   const cfg=s.settings||{}, w=s.window||{};
   const pnlHist=s.pnl_history||[];
   const assetHist=s.asset_history||{};
+  const tLog=s.trade_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const cap=cfg.cap||0.08;
 
@@ -1273,7 +1466,12 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>Closed Trades — Per Asset</h2>
+      <h2>Trade Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(${tLog.length} closed)</span></h2>
+      ${renderTradeLog(tLog)}
+    </div>
+
+    <div class="section">
+      <h2>Per-Asset Summary</h2>
       ${renderAssetHistory(assetHist, assets)}
     </div>
 
@@ -1284,10 +1482,11 @@ function render(s){
         <tr><td>Drop from ref</td><td>${((cfg.drop_ref||0.30)*100).toFixed(0)}%</td><td>Sigma</td><td>${cfg.sigma||2.2} (n=${cfg.lookback||10})</td></tr>
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
+        <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
       </tbody></table>
     </div>
 
-    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; panic_bot6 &nbsp;&mdash;&nbsp; PnL chart records every 5 min</footer>`;
+    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; panic_bot6 &nbsp;&mdash;&nbsp; PnL chart records every 30 min</footer>`;
 
   // Draw chart after DOM is updated
   const wrap = document.getElementById('chartWrap');
@@ -1397,9 +1596,10 @@ def main():
                 price_history.clear()
                 live_prices.clear()
                 traded_this_window.clear()
+                pending_buys.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  settle=%ds  armed at %ds",
                          window_start, secs_left, SETTLE_SECS, SETTLE_SECS)
-
+            last_window = window_start
 
             if secs_into >= SETTLE_SECS and not armed_logged:
                 log.debug("[ARMED] Window armed — scanning for panic triggers")
@@ -1408,14 +1608,14 @@ def main():
             idle_now = not can_open_new_trades(server_ts)
             if idle_now:
                 if was_idle is not True:
-                    log.info("[IDLE] Outside trading window: bot is fully idle (no scans, no entries, no exits)")
+                    log.info("[IDLE] Outside trading window: bot is idle (no new entries)")
                 was_idle = True
             else:
                 if was_idle is not False:
                     log.info("[IDLE] Trading window is open: bot resumed")
                 was_idle = False
                 scan_markets(client, window_start, secs_into, server_ts, executor)
-                manage_positions(client)
+            manage_positions(client, server_ts)
               
             save_state()
 
@@ -1433,12 +1633,9 @@ def main():
             print_status()
             last_status = time.time()
 
-        # Record PnL snapshot every 5 minutes for chart
-        def your_loop_function():
-          global last_pnl_snapshot
-        
+        # Record PnL snapshot every 30 minutes for chart
         now_t = time.time()
-        if now_t - last_pnl_snapshot >= 1800:
+        if now_t - last_pnl_snapshot >= 1800:  # 30 minutes
             last_pnl_snapshot = now_t
             pnl_history.append({
                 "ts":    datetime.now().strftime("%H"),
