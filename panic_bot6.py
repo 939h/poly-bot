@@ -1639,7 +1639,7 @@ def main():
             last_pnl_snapshot = now_t
             pnl_history.append({
                 "ts":    datetime.now().strftime("%H"),
-                "pnl":   round(stats["pnl"], 1),
+                "pnl":   round(stats["pnl"], 4),
             })
             if len(pnl_history) > 288:  # keep max 24h of 5-min snapshots
                 pnl_history.pop(0)
