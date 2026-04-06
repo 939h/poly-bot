@@ -193,7 +193,7 @@ CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
 # Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
 TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
-TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 23), (23, 0)]     # list of (start_hour, end_hour), end is exclusive
+TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 23)]     # list of (start_hour, end_hour), end is exclusive
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
