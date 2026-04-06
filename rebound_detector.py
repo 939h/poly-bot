@@ -80,7 +80,7 @@ load_dotenv()
 #  USER SETTINGS
 # =============================================================================
 ASSETS           = ["btc", "eth", "sol", "xrp"]
-TROUGH_THRESHOLD = 0.06   # price must drop below this to begin tracking
+TROUGH_THRESHOLD = 0.10   # price must drop below this to begin tracking
 REBOUND_MULT     = 1.5    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -561,7 +561,7 @@ def main():
                     no_price  = get_midpoint(client, no_tok)  if no_tok  else 0.0
 
                 for key, price in [(yes_key, yes_price), (no_key, no_price)]:
-                    if price <= 0.01:
+                    if price <= 0.025:
                         continue
                     result = update_state(key, price, server_ts, window_start)
                     if result == "signal":
