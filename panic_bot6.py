@@ -167,7 +167,6 @@ CLOSE_FILL_RATIO = 0.98       # require near-complete fill to mark position clos
 UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=2% leftover as dust and close the trade
 TP_SELL_MAX_ATTEMPTS = 5     # once TP triggers, retry sell immediately up to N times
 TP_SELL_RETRY_DELAY_SECS = 0.5
-MAX_SPREAD       = 0.03  # reject buy if ask − bid > this (wide spread = thin/illiquid market)
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # =============================================================================
@@ -379,23 +378,6 @@ def get_midpoint(client, token_id):
         return float(client.get_midpoint(token_id)["mid"])
     except Exception:
         return 0.0
-
-
-def get_best_ask_and_spread(token_id):
-    """Fetch best ask and spread from CLOB orderbook.
-    Returns (ask, spread) or (None, None) on failure — callers must fail-open."""
-    try:
-        r = requests.get(f"{CLOB_API}/book", params={"token_id": token_id}, timeout=5)
-        book = r.json()
-        asks = book.get("asks") or []
-        bids = book.get("bids") or []
-        if not asks or not bids:
-            return None, None
-        best_ask = float(asks[0]["price"])
-        best_bid = float(bids[0]["price"])
-        return best_ask, round(best_ask - best_bid, 4)
-    except Exception:
-        return None, None
 
 
 def market_buy(client, token_id, label, price_hint=None):
@@ -1064,20 +1046,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                          key, current, ENTRY_PRICE_CAP)
                 del pending_buys[key]
                 continue
-            # Genuine rebound confirmed — check spread before buying
+            # Genuine rebound confirmed — fire the buy
             log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx",
                      key, pb["trough_min"], current, rebound_ratio)
-            ask, spread = get_best_ask_and_spread(pb["token_id"])
-            if ask is not None and ask > ENTRY_PRICE_CAP:
-                log.info("[SKIP] %s  ask=%.4f above cap=%.4f (spread=%.4f) — waiting for spread to tighten",
-                         key, ask, ENTRY_PRICE_CAP, spread or 0)
-                continue
-            if spread is not None and spread > MAX_SPREAD:
-                log.info("[SKIP] %s  spread=%.4f exceeds max=%.4f — thin market, waiting",
-                         key, spread, MAX_SPREAD)
-                continue
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
-            buy = market_buy(client, pb["token_id"], label, price_hint=ask or current)
+            buy = market_buy(client, pb["token_id"], label, price_hint=current)
             del pending_buys[key]
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or current)
