@@ -355,8 +355,20 @@ def get_tokens(market):
             raw = json.loads(raw)
         except Exception:
             return None, None
+    outcomes = market.get("outcomes", [])
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except Exception:
+            outcomes = []
     if not raw or len(raw) < 2:
         return None, None
+    if outcomes and len(outcomes) == len(raw):
+        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
+        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  None)
+        if yes_idx is not None and no_idx is not None:
+            return raw[yes_idx].strip(), raw[no_idx].strip()
+    log.warning("get_tokens: outcomes field missing or mismatched — falling back to positional [0]=YES [1]=NO")
     return raw[0].strip(), raw[1].strip()
 
 
@@ -915,7 +927,6 @@ def _update_prices_and_history(result):
     if result is None:
         return
     asset, yes_price, yes_token, no_token = result
-   # --- ADD THIS LINE HERE ---
     log_price_to_csv(asset, yes_price)
     no_price = round(1.0 - yes_price, 4)
     live_prices[f"{asset}_yes"] = yes_price
