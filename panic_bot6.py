@@ -192,7 +192,7 @@ REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × th
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
 # Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
-TRADING_WINDOWS_ENABLED = True
+TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
 TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 24)]     # list of (start_hour, end_hour), end is exclusive
 
