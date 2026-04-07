@@ -211,8 +211,9 @@ MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell
 # =============================================================================
 GAMMA_API        = "https://gamma-api.polymarket.com"
 CLOB_API         = "https://clob.polymarket.com"
-INTERVAL         = "1h"
 WINDOW_SECS      = 3600
+ET               = timezone(timedelta(hours=-4))  # Eastern Time (EDT, UTC-4; change to -5 in winter)
+ASSET_NAMES      = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "ripple"}
 HTTP_PORT        = int(os.getenv('PORT', 8080))  # Railway injects PORT automatically
 
 # ── State ---------------------------------------------------------------------
@@ -375,7 +376,19 @@ def can_open_new_trades(server_ts):
 
 
 def build_slug(asset, window_ts):
-    return f"{asset}-updown-{INTERVAL}-{window_ts}"
+    """Build Polymarket slug for 1-hour up/down market (ET-based, human-readable)."""
+    dt      = datetime.fromtimestamp(window_ts, tz=ET)
+    hour_dt = dt.replace(minute=0, second=0, microsecond=0)
+    name    = ASSET_NAMES.get(asset, asset)
+    month   = hour_dt.strftime("%B").lower()
+    day     = hour_dt.day
+    year    = hour_dt.year
+    h       = hour_dt.hour
+    if h == 0:    ampm = "12am"
+    elif h < 12:  ampm = f"{h}am"
+    elif h == 12: ampm = "12pm"
+    else:         ampm = f"{h-12}pm"
+    return f"{name}-up-or-down-{month}-{day}-{year}-{ampm}-et"
 
 
 def fetch_market_by_slug(slug):
