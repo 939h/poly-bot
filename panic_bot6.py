@@ -11,7 +11,7 @@ Strategy:
       2. VELOCITY — price dropped >= DROP_FROM_REF from reference
       3. SIGMA    — price < sigma floor  (statistical confirmation)
     YES cheap → buy YES  |  NO cheap (YES pumped) → buy NO
-  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 373
+  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 591
 
 Infrastructure from fresh_bot10:
   - 4-key ApiCreds auth  (POLY_PRIVATE_KEY / POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE)
@@ -56,6 +56,14 @@ from dotenv import load_dotenv
 sys.stdout.reconfigure(line_buffering=True)
 
 try:
+    import colorama
+    from colorama import Fore, Style
+    colorama.init()
+    COLORS = True
+except ImportError:
+    COLORS = False
+
+try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import (
         MarketOrderArgs, OrderType, ApiCreds,
@@ -70,17 +78,43 @@ except ImportError:
 load_dotenv()
 
 # ── Logging (UTF-8 so Windows never crashes on special chars) -----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(
-            open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
-        ),
-        logging.FileHandler("panic_bot.log", encoding="utf-8"),
-    ],
-    force=True,
+class _ColorFormatter(logging.Formatter):
+    def format(self, record):
+        msg = super().format(record)
+        if not COLORS:
+            return msg
+        # Wins / successful entries
+        if any(t in msg for t in ("[REBOUND]", "[OPEN]", "[TP2]")):
+            return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
+        if any(t in msg for t in ("[TP1]", "[ARMED]")):
+            return Fore.GREEN + msg + Style.RESET_ALL
+        # Losses / stops
+        if any(t in msg for t in ("[FORCE-STOP]", "[TRAIL-STOP]", "[STOP-WAIT]", "[STOP-CANCEL]")):
+            return Fore.RED + msg + Style.RESET_ALL
+        # Signals / trough tracking / retries
+        if any(t in msg for t in ("[PANIC]", "[TROUGH]", "[SELL-RETRY]")):
+            return Fore.YELLOW + msg + Style.RESET_ALL
+        # Window / market info
+        if any(t in msg for t in ("[WINDOW]", "[MARKET]", "[STATUS]")):
+            return Fore.CYAN + msg + Style.RESET_ALL
+        # Dry-run mode
+        if "[DRY-RUN]" in msg:
+            return Fore.MAGENTA + msg + Style.RESET_ALL
+        # Fallback on log level
+        if record.levelno >= logging.ERROR:
+            return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
+        if record.levelno >= logging.WARNING:
+            return Fore.YELLOW + msg + Style.RESET_ALL
+        return msg
+
+_fmt = "%(asctime)s [%(levelname)s] %(message)s"
+_console = logging.StreamHandler(
+    open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
 )
+_console.setFormatter(_ColorFormatter(_fmt))
+_file = logging.FileHandler("panic_bot.log", encoding="utf-8")
+_file.setFormatter(logging.Formatter(_fmt))
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file], force=True)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
@@ -124,8 +158,8 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.10   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
+ENTRY_PRICE_CAP  = 0.09   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.30   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more signals)
 
@@ -146,20 +180,23 @@ HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before sellin
 
 # --- Timing ------------------------------------------------------------------
 POLL_SECS        = 0.5      # seconds between each price scan
-STOP_TRADE_SECS  = 810    # stop opening NEW trades after this many seconds into window
+STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into window
                           # 780 = 13 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
 CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-                              # Mirrors rebound_detector.py state machine logic.
+REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+                              # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
-# Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
-TRADING_WINDOWS_ENABLED = False
-TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
-TRADING_WINDOWS         = [(9, 11), (20, 22), (0, 1)]     # list of (start_hour, end_hour), end is exclusive
+# Two formats can be mixed:
+#   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
+#   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
+TRADING_WINDOWS_ENABLED = True
+TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
+TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (16, 45, 17, 0), (19, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
@@ -303,22 +340,36 @@ def get_current_window_start(server_ts):
 
 
 def can_open_new_trades(server_ts):
-    """Optional time gate for NEW entries only."""
+    """Optional time gate for NEW entries only.
+
+    TRADING_WINDOWS supports two formats (can mix both):
+      (start_h, end_h)                — whole-hour window, e.g. (21, 24)
+      (start_h, start_m, end_h, end_m) — minute-precision, e.g. (16, 45, 17, 0)
+    end hour 24 treated as midnight (same as 0 with wrap-around).
+    """
     if not TRADING_WINDOWS_ENABLED:
         return True
     if not TRADING_WINDOWS:
         return True
 
-    local_hour = (datetime.fromtimestamp(server_ts, tz=timezone.utc)
-                  + timedelta(hours=TRADING_TZ_OFFSET_HRS)).hour
-    for start_raw, end_raw in TRADING_WINDOWS:
-        start = int(start_raw) % 24
-        end = int(end_raw) % 24
+    local_dt = datetime.fromtimestamp(server_ts, tz=timezone.utc) + timedelta(hours=TRADING_TZ_OFFSET_HRS)
+    now_mins = local_dt.hour * 60 + local_dt.minute  # current time as minutes since midnight
+
+    for window in TRADING_WINDOWS:
+        if len(window) == 2:
+            sh, eh = window
+            sm, em = 0, 0
+        else:
+            sh, sm, eh, em = window
+
+        start = (int(sh) % 24) * 60 + int(sm)
+        end   = (int(eh) % 24) * 60 + int(em)
+
         if start == end:
             return True  # treat as full-day window
-        if start < end and start <= local_hour < end:
+        if start < end and start <= now_mins < end:
             return True
-        if start > end and (local_hour >= start or local_hour < end):
+        if start > end and (now_mins >= start or now_mins < end):  # crosses midnight
             return True
     return False
 
@@ -360,15 +411,16 @@ def get_tokens(market):
         try:
             outcomes = json.loads(outcomes)
         except Exception:
-            outcomes = []
+            outcomes = [o.strip() for o in outcomes.split(",") if o.strip()]
     if not raw or len(raw) < 2:
         return None, None
     if outcomes and len(outcomes) == len(raw):
-        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
-        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() == "no"),  None)
+        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("yes", "up")), None)
+        no_idx  = next((i for i, o in enumerate(outcomes) if str(o).lower() in ("no", "down")), None)
         if yes_idx is not None and no_idx is not None:
             return raw[yes_idx].strip(), raw[no_idx].strip()
-    log.warning("get_tokens: outcomes field missing or mismatched — falling back to positional [0]=YES [1]=NO")
+    log.warning("get_tokens: outcomes field unrecognised — raw outcomes=%r  falling back to positional [0]=YES [1]=NO",
+                market.get("outcomes"))
     return raw[0].strip(), raw[1].strip()
 
 
@@ -537,7 +589,7 @@ def check_trigger(key, current_price, secs_into):
         3. SIGMA    price < rolling sigma floor
     """
     # Dead market guard
-    if current_price <= 0.025:
+    if current_price <= 0.03:
         log.debug("[SKIP] %s  price=%.4f  ignored (<=0.025)", key, current_price)
         return False
 
@@ -1039,10 +1091,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                  key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
 
         if rebound_ratio >= CONFIRM_REBOUND_MULT:
-            # Cap check — rebound price must still be in the lottery zone
-            if current > ENTRY_PRICE_CAP:
-                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap %.4f",
-                         key, current, ENTRY_PRICE_CAP)
+            # Cap check — rebound price must be within cap × buffer zone
+            if current > ENTRY_PRICE_CAP * REBOUND_CAP_BUFFER:
+                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap×buffer %.4f",
+                         key, current, ENTRY_PRICE_CAP * REBOUND_CAP_BUFFER)
                 del pending_buys[key]
                 continue
             # Genuine rebound confirmed — fire the buy
@@ -1210,7 +1262,7 @@ function drawChart(history){
   const canvas = document.getElementById('pnlChart');
   if(!history||history.length<2){
     if(canvas._chartSection){
-      canvas._chartSection.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough data yet — chart updates every 5 minutes</p>';
+      canvas._chartSection.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough data yet — chart updates every 30 minutes</p>';
     }
     return;
   }
@@ -1644,7 +1696,10 @@ def main():
             if len(pnl_history) > 288:  # keep max 24h of 5-min snapshots
                 pnl_history.pop(0)
 
-        time.sleep(POLL_SECS)
+        if idle_now and not open_positions:
+            time.sleep(30)  # outside trading hours + no open positions — check every 30s
+        else:
+            time.sleep(POLL_SECS)
 
 
 if __name__ == "__main__":
