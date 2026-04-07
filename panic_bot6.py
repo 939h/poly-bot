@@ -158,7 +158,7 @@ SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.10   # condition 1: price must be below this (lottery zone)
+ENTRY_PRICE_CAP  = 0.09   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.30   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 20     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.5    #              sigma floor multiplier (looser = more signals)
@@ -186,7 +186,7 @@ STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into
 CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.20  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -194,7 +194,7 @@ REBOUND_CAP_BUFFER   = 1.20  # rebound entry allowed up to ENTRY_PRICE_CAP × th
 # Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
 TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
-TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 23)]     # list of (start_hour, end_hour), end is exclusive
+TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 24)]     # list of (start_hour, end_hour), end is exclusive
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
