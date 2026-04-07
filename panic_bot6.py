@@ -1696,7 +1696,10 @@ def main():
             if len(pnl_history) > 288:  # keep max 24h of 5-min snapshots
                 pnl_history.pop(0)
 
-        time.sleep(POLL_SECS)
+        if idle_now and not open_positions:
+            time.sleep(30)  # outside trading hours + no open positions — check every 30s
+        else:
+            time.sleep(POLL_SECS)
 
 
 if __name__ == "__main__":
