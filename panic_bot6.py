@@ -186,7 +186,8 @@ STOP_TRADE_SECS  = 780    # stop opening NEW trades after this many seconds into
 CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-                              # Mirrors rebound_detector.py state machine logic.
+REBOUND_CAP_BUFFER   = 1.20  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+                              # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
@@ -1074,10 +1075,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                  key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
 
         if rebound_ratio >= CONFIRM_REBOUND_MULT:
-            # Cap check — rebound price must still be in the lottery zone
-            if current > ENTRY_PRICE_CAP:
-                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap %.4f",
-                         key, current, ENTRY_PRICE_CAP)
+            # Cap check — rebound price must be within cap × buffer zone
+            if current > ENTRY_PRICE_CAP * REBOUND_CAP_BUFFER:
+                log.info("[TROUGH] %s  discarded — rebound price %.4f exceeds cap×buffer %.4f",
+                         key, current, ENTRY_PRICE_CAP * REBOUND_CAP_BUFFER)
                 del pending_buys[key]
                 continue
             # Genuine rebound confirmed — fire the buy
