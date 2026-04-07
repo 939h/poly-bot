@@ -191,10 +191,12 @@ REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × th
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
-# Example: trade only 8pm-10pm local time -> TRADING_WINDOWS_ENABLED=True; TRADING_WINDOWS=[(20, 22)]
+# Two formats can be mixed:
+#   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
+#   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
 TRADING_WINDOWS_ENABLED = True
-TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC
-TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (19, 24)]     # list of (start_hour, end_hour), end is exclusive
+TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
+TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (16, 45, 17, 0), (19, 24)]
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
@@ -338,22 +340,36 @@ def get_current_window_start(server_ts):
 
 
 def can_open_new_trades(server_ts):
-    """Optional time gate for NEW entries only."""
+    """Optional time gate for NEW entries only.
+
+    TRADING_WINDOWS supports two formats (can mix both):
+      (start_h, end_h)                — whole-hour window, e.g. (21, 24)
+      (start_h, start_m, end_h, end_m) — minute-precision, e.g. (16, 45, 17, 0)
+    end hour 24 treated as midnight (same as 0 with wrap-around).
+    """
     if not TRADING_WINDOWS_ENABLED:
         return True
     if not TRADING_WINDOWS:
         return True
 
-    local_hour = (datetime.fromtimestamp(server_ts, tz=timezone.utc)
-                  + timedelta(hours=TRADING_TZ_OFFSET_HRS)).hour
-    for start_raw, end_raw in TRADING_WINDOWS:
-        start = int(start_raw) % 24
-        end = int(end_raw) % 24
+    local_dt = datetime.fromtimestamp(server_ts, tz=timezone.utc) + timedelta(hours=TRADING_TZ_OFFSET_HRS)
+    now_mins = local_dt.hour * 60 + local_dt.minute  # current time as minutes since midnight
+
+    for window in TRADING_WINDOWS:
+        if len(window) == 2:
+            sh, eh = window
+            sm, em = 0, 0
+        else:
+            sh, sm, eh, em = window
+
+        start = (int(sh) % 24) * 60 + int(sm)
+        end   = (int(eh) % 24) * 60 + int(em)
+
         if start == end:
             return True  # treat as full-day window
-        if start < end and start <= local_hour < end:
+        if start < end and start <= now_mins < end:
             return True
-        if start > end and (local_hour >= start or local_hour < end):
+        if start > end and (now_mins >= start or now_mins < end):  # crosses midnight
             return True
     return False
 
