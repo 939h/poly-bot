@@ -11,7 +11,7 @@ Strategy:
       2. VELOCITY — price dropped >= DROP_FROM_REF from reference
       3. SIGMA    — price < sigma floor  (statistical confirmation)
     YES cheap → buy YES  |  NO cheap (YES pumped) → buy NO
-  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 373
+  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 591
 
 Infrastructure from fresh_bot10:
   - 4-key ApiCreds auth  (POLY_PRIVATE_KEY / POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE)
@@ -589,7 +589,7 @@ def check_trigger(key, current_price, secs_into):
         3. SIGMA    price < rolling sigma floor
     """
     # Dead market guard
-    if current_price <= 0.025:
+    if current_price <= 0.03:
         log.debug("[SKIP] %s  price=%.4f  ignored (<=0.025)", key, current_price)
         return False
 
