@@ -154,7 +154,7 @@ ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
 # Use actual fill amounts from CLOB responses whenever available.
 
 # --- Settle phase (no trading during this period) ----------------------------
-SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
+SETTLE_SECS      = 540    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
@@ -196,7 +196,7 @@ REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × th
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
 TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
-TRADING_WINDOWS         = [(16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
+TRADING_WINDOWS         = [(8, 30, 9, 30), (16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
