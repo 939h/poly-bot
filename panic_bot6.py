@@ -194,9 +194,9 @@ REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × th
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = False
+TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
-TRADING_WINDOWS         = [(1, 2), (5, 11), (13, 14), (16, 45, 17, 0), (19, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
+TRADING_WINDOWS         = [(16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
