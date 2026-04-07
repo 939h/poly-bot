@@ -213,7 +213,7 @@ GAMMA_API        = "https://gamma-api.polymarket.com"
 CLOB_API         = "https://clob.polymarket.com"
 WINDOW_SECS      = 3600
 ET               = timezone(timedelta(hours=-4))  # Eastern Time (EDT, UTC-4; change to -5 in winter)
-ASSET_NAMES      = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "ripple"}
+ASSET_NAMES      = {"btc": "bitcoin", "eth": "ethereum", "sol": "solana", "xrp": "xrp"}
 HTTP_PORT        = int(os.getenv('PORT', 8080))  # Railway injects PORT automatically
 
 # ── State ---------------------------------------------------------------------
