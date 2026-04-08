@@ -154,7 +154,7 @@ ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
 # Use actual fill amounts from CLOB responses whenever available.
 
 # --- Settle phase (no trading during this period) ----------------------------
-SETTLE_SECS      = 480    # first 120s of window = collect prices, no trading
+SETTLE_SECS      = 420    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
