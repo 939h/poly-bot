@@ -671,8 +671,8 @@ def check_trigger(key, current_price, secs_into):
     asset_name = key.split("_")[0]           # "eth" or "sol"
     rsi_val    = rsi_data.get(asset_name, 50.0)
 
-    RSI_OVERSOLD   = 30    # below = oversold  → only YES buys allowed
-    RSI_OVERBOUGHT = 70    # above = overbought → only NO  buys allowed
+    RSI_OVERSOLD   = 33    # below = oversold  → only YES buys allowed
+    RSI_OVERBOUGHT = 67    # above = overbought → only NO  buys allowed
 
     # RSI oversold — SOL/ETH falling hard → YES is likely to bounce → allow YES, block NO
     if side == "no" and rsi_val < RSI_OVERSOLD:
