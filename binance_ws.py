@@ -38,7 +38,7 @@ rsi_data = {
 }
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RSI_PERIOD   = 5
+RSI_PERIOD   = 3
 CANDLE_LIMIT = 10   # rolling window of closes — must be > RSI_PERIOD + 1
 SYMBOL_MAP   = {
     "ethusdt": "eth",
