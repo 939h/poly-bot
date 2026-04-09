@@ -1575,7 +1575,7 @@ function render(s){
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
         <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
-        <tr><td>RSI oversold</td><td>&lt;25 → BUY YES</td><td>RSI overbought</td><td>&gt;75 → BUY NO</td></tr>
+        <tr><td>RSI oversold</td><td>&lt;30 → BUY YES</td><td>RSI overbought</td><td>&gt;70 → BUY NO</td></tr>
       </tbody></table>
     </div>
 
