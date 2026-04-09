@@ -2,7 +2,7 @@
 binance_ws.py
 =============
 Runs as a background thread alongside panic_bot6.py.
-Connects to Binance WebSocket — ETHUSDT + SOLUSDT 15m candles.
+Connects to Binance WebSocket — ETHUSDT + SOLUSDT + BTCUSDT 15m candles.
 Computes RSI(7) on real candle closes — same data as TradingView.
 Writes into shared dict  rsi_data  which panic_bot6 reads every poll.
 
@@ -30,23 +30,25 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 # ── Shared dict — panic_bot6 reads this every poll ───────────────────────────
-# Keys  : "eth", "sol"
+# Keys  : "eth", "sol", "btc"
 # Values: float RSI 0-100.  50.0 = warmup / not enough data (neutral)
 rsi_data = {
     "eth": 50.0,
     "sol": 50.0,
+    "btc": 50.0,
 }
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RSI_PERIOD   = 3
+RSI_PERIOD   = 5
 CANDLE_LIMIT = 10   # rolling window of closes — must be > RSI_PERIOD + 1
 SYMBOL_MAP   = {
     "ethusdt": "eth",
     "solusdt": "sol",
+    "btcusdt": "btc",
 }
 WS_URL = (
     "wss://stream.binance.com:9443/stream"
-    "?streams=ethusdt@kline_15m/solusdt@kline_15m"
+    "?streams=ethusdt@kline_15m/solusdt@kline_15m/btcusdt@kline_15m"
 )
 BINANCE_REST = "https://api.binance.com/api/v3/klines"
 
@@ -54,10 +56,12 @@ BINANCE_REST = "https://api.binance.com/api/v3/klines"
 _closes     = {
     "eth": deque(maxlen=CANDLE_LIMIT),
     "sol": deque(maxlen=CANDLE_LIMIT),
+    "btc": deque(maxlen=CANDLE_LIMIT),
 }
 _live_close = {
     "eth": None,
     "sol": None,
+    "btc": None,
 }
 _lock = threading.Lock()   # protects _closes and _live_close from race conditions
 
@@ -129,7 +133,7 @@ def _prefetch_candles():
             resp = _requests.get(
                 BINANCE_REST,
                 params={
-                    "symbol":   symbol.upper(),   # ETHUSDT / SOLUSDT
+                    "symbol":   symbol.upper(),   # ETHUSDT / SOLUSDT / BTCUSDT
                     "interval": "15m",
                     "limit":    CANDLE_LIMIT + 1, # +1 because we skip the last open candle
                 },
@@ -173,7 +177,7 @@ def _prefetch_candles():
 # ── WebSocket callbacks ───────────────────────────────────────────────────────
 
 def _on_open(ws):
-    log.info("[RSI-WS] Connected to Binance — streaming ETH+SOL 15m candles")
+    log.info("[RSI-WS] Connected to Binance — streaming ETH+SOL+BTC 15m candles")
 
 
 def _on_message(ws, message):
@@ -260,7 +264,7 @@ def _run_forever():
 
 def start_rsi_feed():
     """
-    1. Pre-fetches last 20 candles from Binance REST — RSI ready immediately.
+    1. Pre-fetches last CANDLE_LIMIT candles from Binance REST — RSI ready immediately.
     2. Launches WebSocket in a daemon background thread — updates RSI every tick.
     Call once inside main() after build_client().
     Returns immediately.
@@ -271,8 +275,9 @@ def start_rsi_feed():
     t = threading.Thread(target=_run_forever, daemon=True, name="binance-rsi-ws")
     t.start()
     log.info(
-        "[RSI-WS] Feed started — ETH RSI(%d)=%.1f  SOL RSI(%d)=%.1f",
+        "[RSI-WS] Feed started — ETH RSI(%d)=%.1f  SOL RSI(%d)=%.1f  BTC RSI(%d)=%.1f",
         RSI_PERIOD, rsi_data["eth"],
         RSI_PERIOD, rsi_data["sol"],
+        RSI_PERIOD, rsi_data["btc"],
     )
     return t
