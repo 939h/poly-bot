@@ -676,21 +676,21 @@ def check_trigger(key, current_price, secs_into):
 
     # RSI oversold — SOL/ETH falling hard → YES is likely to bounce → allow YES, block NO
     if side == "no" and rsi_val < RSI_OVERSOLD:
-    log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI oversold=%.1f, only YES allowed)",
-             key, current_price, rsi_val, rsi_val)
-    return False
+        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI oversold=%.1f, only YES allowed)",
+                 key, current_price, rsi_val, rsi_val)
+        return False
 
     # RSI overbought — SOL/ETH pumping hard → NO is likely to bounce → allow NO, block YES
     if side == "yes" and rsi_val > RSI_OVERBOUGHT:
-    log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI overbought=%.1f, only NO allowed)",
-             key, current_price, rsi_val, rsi_val)
-    return False
+        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI overbought=%.1f, only NO allowed)",
+                 key, current_price, rsi_val, rsi_val)
+        return False
 
     # RSI neutral (30-70) — no strong directional signal → skip both sides
     if RSI_OVERSOLD <= rsi_val <= RSI_OVERBOUGHT:
-    log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (neutral range %.0f-%.0f)",
-             key, current_price, rsi_val, RSI_OVERSOLD, RSI_OVERBOUGHT)
-    return False
+        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (neutral range %.0f-%.0f)",
+                 key, current_price, rsi_val, RSI_OVERSOLD, RSI_OVERBOUGHT)
+        return False
 
     # ── All 4 conditions met — PANIC ─────────────────────────────────────────
     log.info(
