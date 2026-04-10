@@ -6,10 +6,14 @@ Strategy:
     Collect prices quietly. Build sigma baseline. No trading.
   Phase 2 — Armed (after settle):
     Lock reference_price = mean of settle prices.
-    Buy when ALL 3 conditions true:
+    Buy when ALL 4 conditions true:
       1. CAP      — price < ENTRY_PRICE_CAP  (lottery zone)
       2. VELOCITY — price dropped >= DROP_FROM_REF from reference
       3. SIGMA    — price < sigma floor  (statistical confirmation)
+      4. RSI      — Binance RSI gate (oversold/overbought directional filter)
+    Then GAP GUARD (post-signal):
+      5. GAP      — Binance candle has not moved too far from its open
+                    (prevents buying into already-exhausted moves)
     YES cheap → buy YES  |  NO cheap (YES pumped) → buy NO
   Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 591
 
@@ -77,7 +81,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import rsi_data, start_rsi_feed
+from binance_ws import rsi_data, candle_open, live_close, start_rsi_feed
 
 # ── Logging (UTF-8 so Windows never crashes on special chars) -----------------
 class _ColorFormatter(logging.Formatter):
@@ -96,6 +100,9 @@ class _ColorFormatter(logging.Formatter):
         # Signals / trough tracking / retries
         if any(t in msg for t in ("[PANIC]", "[TROUGH]", "[SELL-RETRY]")):
             return Fore.YELLOW + msg + Style.RESET_ALL
+        # Gap guard blocks
+        if "[GAP-BLOCK]" in msg:
+            return Fore.MAGENTA + Style.BRIGHT + msg + Style.RESET_ALL
         # Window / market info
         if any(t in msg for t in ("[WINDOW]", "[MARKET]", "[STATUS]")):
             return Fore.CYAN + msg + Style.RESET_ALL
@@ -156,20 +163,41 @@ ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
 # Use actual fill amounts from CLOB responses whenever available.
 
 # --- Settle phase (no trading during this period) ----------------------------
-SETTLE_SECS      = 30    # first 120s of window = collect prices, no trading
+SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
 ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.22   # condition 2: price must drop >= 30% from reference price
+DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
+RSI_OVERSOLD     = 40     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 60     # condition 4: RSI above this → only NO  buys allowed
+
+# --- Gap guard (condition 5 — post RSI gate) ---------------------------------
+# Prevents buying when Binance candle has already moved too far from its open.
+# GAP = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
+# If abs(live_close - candle_open) > GAP → discard + blacklist asset this window.
+#
+# Swing: per-asset percentage (BTC moves more in USD than ETH/SOL).
+GAP_SWING = {
+    "btc": 0.001,   # 0.1% of BTC open (~$72 on a $72,000 candle)
+    "eth": 0.001,   # 0.1% of ETH open (~$1.8 on a $1,800 candle)
+    "sol": 0.001,   # 0.1% of SOL open (~$0.15 on a $150 candle)
+}
+# Magnitude: how much tolerance to give based on window stage.
+# Early market moves are expected — give more room; late market less room.
+GAP_MAGNITUDE = {
+    "early": 4.0,   # 0–5 min  : candle just opened, large moves normal
+    "mid":   2.0,   # 5–10 min : tightening
+    "late":  1.2,   # 10–15 min: move should be exhausting, tight filter
+}
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.60   # sell remaining shares if price drops 30% from peak after TP1
-FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 35% below entry
+TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
+FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
 # --- Force stop cooldown (wait period AFTER cut loss triggers) ---------------
@@ -189,7 +217,7 @@ CONFIRM_REBOUND_MULT = 1.75  # rebound confirmation: buy only when price recover
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
 REBOUND_CAP_BUFFER   = 1.50  # rebound entry allowed up to ENTRY_PRICE_CAP × this
-                              # e.g. cap=$0.10 → buys up to $0.15; above → discard
+                              # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
 # Leave TRADING_WINDOWS_ENABLED=False to trade anytime.
@@ -224,13 +252,18 @@ token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
 pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
-# rsi_data is imported from binance_ws — {"eth": float, "sol": float}
+# rsi_data, candle_open, live_close are imported from binance_ws
 armed_logged       = False  # True after [ARMED] message shown once per window
-pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
-asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
-trade_log          = []     # [{time, asset, side, entry, tp1, tp1_hit, tp2, tp2_hit, exit, pnl}] newest-first
+pnl_history        = []     # [{ts, pnl}] snapshot every 30min for chart — persisted
+asset_history      = {}     # {asset: {trades, wins, losses, pnl}} — persisted
+trade_log          = []     # [{time, asset, side, ...}] newest-first — persisted
 last_pnl_snapshot  = 0      # unix timestamp of last pnl_history append
-pnl_history = []
+
+# ── Startup window skip ───────────────────────────────────────────────────────
+# If the bot starts mid-window we cannot trust candle_open (we missed the open).
+# Skip all new entries for the first window seen; trade normally from the second.
+_skip_first_window   = True   # True until we've seen a clean window boundary
+_startup_window_ts   = None   # window_start of the window we are skipping
 
 stats = {
     "scans":    0,
@@ -243,8 +276,64 @@ stats = {
 
 STATE_FILE = "bot_state.json"
 
+# ── Persistence: load / save / reset ─────────────────────────────────────────
+
+def load_state():
+    """
+    On startup, restore stats + pnl_history + asset_history + trade_log
+    from bot_state.json so data survives bot restarts.
+    Open positions are NOT restored (tokens change each window).
+    """
+    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    if not os.path.exists(STATE_FILE):
+        log.info("[STATE] No saved state found — starting fresh")
+        return
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        # Restore cumulative stats — merge carefully so new keys are preserved
+        saved_stats = saved.get("stats", {})
+        for k in stats:
+            if k in saved_stats:
+                stats[k] = saved_stats[k]
+        pnl_history   = saved.get("pnl_history",   [])
+        asset_history = saved.get("asset_history",  {})
+        trade_log     = saved.get("trade_log",      [])
+        # Resume PnL snapshot timer from last recorded entry
+        if pnl_history:
+            last_pnl_snapshot = time.time()
+        log.info(
+            "[STATE] Restored — buys=%d  wins=%d  losses=%d  pnl=$%.4f  "
+            "trades_in_log=%d  pnl_pts=%d",
+            stats["buys"], stats["wins"], stats["losses"], stats["pnl"],
+            len(trade_log), len(pnl_history),
+        )
+    except Exception as e:
+        log.warning("[STATE] Failed to load saved state: %s — starting fresh", e)
+
+
+def reset_state():
+    """
+    Clear all historical stats, trade log, pnl history, asset history.
+    Called by POST /reset from the dashboard.
+    Does NOT touch open_positions (live session state).
+    """
+    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
+    pnl_history   = []
+    asset_history = {}
+    trade_log     = []
+    last_pnl_snapshot = 0
+    log.info("[STATE] Reset by user — all historical stats cleared")
+    save_state()
+
+
 def save_state():
-    """Write current bot state to bot_state.json for pnl.py to read."""
+    """
+    Write full bot state to bot_state.json.
+    Persists: stats, pnl_history, asset_history, trade_log.
+    Also writes live positions + prices for the dashboard.
+    """
     positions_out = {}
     for k, p in open_positions.items():
         entry     = p["entry_price"]
@@ -254,7 +343,6 @@ def save_state():
         tp1_done  = p.get("tp1_done", False)
         net_shares = p.get("net_shares", ORDER_AMOUNT / entry)
 
-        # Progress: toward TP1 until TP1 is done, then toward TP2
         if not tp1_done:
             target = tp1
             pct = round((curr - entry) / (tp1 - entry) * 100, 1) if tp1 != entry else 0
@@ -262,7 +350,6 @@ def save_state():
             target = tp2
             pct = round((curr - entry) / (tp2 - entry) * 100, 1) if tp2 != entry else 0
 
-        # After TP1 fired, only tp2_shares remain — use correct share count
         shares_held = p.get("tp2_shares", net_shares) if tp1_done else net_shares
         pnl = round((curr - entry) * shares_held, 4)
         positions_out[k] = {
@@ -277,12 +364,15 @@ def save_state():
             "pct":      max(0, min(100, pct)),
         }
     state = {
-        "updated":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "dry_run":   DRY_RUN,
-        "stats":     dict(stats),
-        "positions": positions_out,
-        "prices":    dict(live_prices),
-        "rsi":       dict(rsi_data),
+        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dry_run":       DRY_RUN,
+        "stats":         dict(stats),
+        "positions":     positions_out,
+        "prices":        dict(live_prices),
+        "rsi":           dict(rsi_data),
+        "pnl_history":   list(pnl_history),
+        "asset_history": dict(asset_history),
+        "trade_log":     list(trade_log),
         "settings": {
             "assets":    ASSETS,
             "sigma":     SD_THRESH,
@@ -671,9 +761,6 @@ def check_trigger(key, current_price, secs_into):
     asset_name = key.split("_")[0]           # "eth" or "sol"
     rsi_val    = rsi_data.get(asset_name, 50.0)
 
-    RSI_OVERSOLD   = 33    # below = oversold  → only YES buys allowed
-    RSI_OVERBOUGHT = 67    # above = overbought → only NO  buys allowed
-
     # RSI oversold — SOL/ETH falling hard → YES is likely to bounce → allow YES, block NO
     if side == "no" and rsi_val < RSI_OVERSOLD:
         log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI oversold=%.1f, only YES allowed)",
@@ -700,6 +787,59 @@ def check_trigger(key, current_price, secs_into):
         rsi_val, mean_p, std_p
     )
     return True
+
+
+# ── Gap guard (condition 5) ───────────────────────────────────────────────────
+
+def check_gap_guard(asset, secs_into):
+    """
+    Post-signal guard: check whether the Binance candle has moved too far
+    from its open price, indicating the opportunity is already exhausted.
+
+    Returns True  → GAP TOO LARGE, discard trade and blacklist asset this window.
+    Returns False → gap is acceptable, allow trade to proceed.
+
+    Safe fallback: if candle_open or live_close data is not yet available
+    (WebSocket hasn't received the first tick), returns False (allow).
+    """
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+
+    # Data not ready — allow the trade rather than silently block it
+    if c_open <= 0.0 or c_live is None:
+        log.debug("[GAP-GUARD] %s  data not ready (open=%.4f live=%s) — skipping guard",
+                  asset.upper(), c_open, c_live)
+        return False
+
+    # Determine window stage
+    if secs_into < 300:
+        stage = "early"
+    elif secs_into < 600:
+        stage = "mid"
+    else:
+        stage = "late"
+
+    swing     = GAP_SWING.get(asset, 0.001)
+    magnitude = GAP_MAGNITUDE[stage]
+    threshold = c_open * swing * magnitude
+    actual    = abs(c_live - c_open)
+
+    log.info(
+        "[GAP-GUARD] %s  open=%.4f  live=%.4f  actual_gap=%.4f  "
+        "threshold=%.4f (swing=%.4f × mag=%.1f)  stage=%s",
+        asset.upper(), c_open, c_live, actual, threshold, swing, magnitude, stage,
+    )
+
+    if actual > threshold:
+        log.info(
+            "[GAP-BLOCK] %s  gap %.4f > threshold %.4f  "
+            "— trade discarded, asset blacklisted for this window",
+            asset.upper(), actual, threshold,
+        )
+        return True  # blocked
+
+    return False  # allowed
+
 
 # ── Position management -------------------------------------------------------
 
@@ -1053,13 +1193,15 @@ def _evaluate_asset(result, secs_into):
 
 def scan_markets(client, window_start, secs_into, server_ts, executor):
     """
-    Parallel fetch: all 4 assets fire simultaneously via ThreadPoolExecutor.
+    Parallel fetch: all assets fire simultaneously via ThreadPoolExecutor.
     Each asset = 1 network call (YES only, NO = 1.0 - YES).
 
     Trigger logic (per side, independent):
       Phase 1 settle  (0 to SETTLE_SECS):   collect prices, no trading
-      Phase 2 armed   (SETTLE_SECS onward):  cap + velocity + sigma
+      Phase 2 armed   (SETTLE_SECS onward):  cap + velocity + sigma + RSI + gap guard
     """
+    global _skip_first_window, _startup_window_ts
+
     stats["scans"] += 1
 
     if window_start not in token_cache:
@@ -1082,12 +1224,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         _update_prices_and_history(results.get(asset))
 
     # ── Step 1: Advance pending confirmations (rebound detector logic) ────────
-    # Runs regardless of trading window — pending troughs must still be tracked
-    # and discarded (e.g. past STOP_TRADE_SECS, dead zone) even when idle.
-    # Mirrors rebound_detector.py state machine:
-    #   in_trough  : track rolling trough_min while price keeps falling
-    #   → buy fires : price >= CONFIRM_REBOUND_MULT × trough_min  (genuine bounce)
-    # This ensures we buy AFTER the bottom, not INTO a falling knife.
     for key in list(pending_buys.keys()):
         pb    = pending_buys[key]
         asset = key.split("_")[0]
@@ -1148,6 +1284,27 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if not can_open_new_trades(server_ts):
         return
 
+    # ── Startup window skip — wait for a clean window boundary ───────────────
+    # If the bot started mid-window we can't trust candle_open (we missed the
+    # Binance candle open tick).  Skip new entries for the first window seen;
+    # trade normally from the second window onward.
+    if _skip_first_window:
+        if _startup_window_ts is None:
+            # First time we see any window — record it and start skipping
+            _startup_window_ts = window_start
+            log.info(
+                "[SKIP-WINDOW] Bot started mid-window (secs_into=%d) — "
+                "skipping entries for window %d, trading resumes next window",
+                secs_into, window_start,
+            )
+        if window_start == _startup_window_ts:
+            # Still in the startup window — do not evaluate any signals
+            return
+        else:
+            # A new window has begun — clear the flag and trade normally
+            _skip_first_window = False
+            log.info("[SKIP-WINDOW] Clean window started — gap guard and trading now active")
+
     # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
         if asset in traded_this_window:
@@ -1159,16 +1316,27 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             continue
 
         buy_signal = _evaluate_asset(results.get(asset), secs_into)
-        if buy_signal:
-            key, check_token, check_price = buy_signal
-            stats["triggers"] += 1
-            pending_buys[key] = {
-                "token_id":   check_token,
-                "trough_min": check_price,
-                "trough_time": server_ts,
-            }
-            log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
-                     key, check_price, CONFIRM_REBOUND_MULT)
+        if not buy_signal:
+            continue
+
+        key, check_token, check_price = buy_signal
+        stats["triggers"] += 1
+
+        # ── Condition 5: Gap guard ────────────────────────────────────────────
+        # Check AFTER all 4 trigger conditions pass.
+        # If gap too large → blacklist asset entirely for this window.
+        if check_gap_guard(asset, secs_into):
+            traded_this_window.add(asset)   # blacklist — no more scans this window
+            continue
+
+        # Gap guard passed — enter rebound confirmation phase
+        pending_buys[key] = {
+            "token_id":    check_token,
+            "trough_min":  check_price,
+            "trough_time": server_ts,
+        }
+        log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
+                 key, check_price, CONFIRM_REBOUND_MULT)
 
 # ── Status print --------------------------------------------------------------
 
@@ -1235,6 +1403,8 @@ def _build_state_snapshot():
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
             "confirm_rebound": CONFIRM_REBOUND_MULT,
+            "rsi_oversold":    RSI_OVERSOLD,
+            "rsi_overbought":  RSI_OVERBOUGHT,
         },
     }
 
@@ -1528,7 +1698,18 @@ function render(s){
   document.getElementById('root').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div><strong style="font-size:18px">Panic<span class="green">Bot</span></strong> &nbsp; ${mode}</div>
-      <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
+        <div style="display:flex;align-items:center;gap:6px" id="resetZone">
+          <button onclick="startReset()" style="padding:4px 12px;background:transparent;border:1px solid #5c1d1d;color:#f87171;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Reset Stats</button>
+          <span id="resetConfirm" style="display:none;align-items:center;gap:6px">
+            <span style="font-size:11px;color:#f87171">Clear all history?</span>
+            <button onclick="doReset()" style="padding:3px 10px;background:rgba(248,113,113,.15);border:1px solid #f87171;color:#f87171;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Confirm</button>
+            <button onclick="cancelReset()" style="padding:3px 10px;background:#161b27;border:1px solid #2a3347;color:#5a6a85;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Cancel</button>
+          </span>
+          <span id="resetOk" style="display:none;font-size:11px;color:#4ade9f">&#10003; Cleared</span>
+        </div>
+      </div>
     </div>
 
     <div class="grid">
@@ -1575,7 +1756,7 @@ function render(s){
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
         <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
-        <tr><td>RSI oversold</td><td>&lt;30 → BUY YES</td><td>RSI overbought</td><td>&gt;70 → BUY NO</td></tr>
+        <tr><td>RSI oversold</td><td>&lt;${cfg.rsi_oversold||30} → BUY YES</td><td>RSI overbought</td><td>&gt;${cfg.rsi_overbought||70} → BUY NO</td></tr>
       </tbody></table>
     </div>
 
@@ -1586,6 +1767,22 @@ function render(s){
   const cnv  = document.getElementById('pnlChart');
   if(cnv) cnv._chartSection = wrap;
   drawChart(pnlHist);
+}
+
+function startReset(){
+  document.getElementById('resetConfirm').style.display='inline-flex';
+}
+function cancelReset(){
+  document.getElementById('resetConfirm').style.display='none';
+}
+async function doReset(){
+  document.getElementById('resetConfirm').style.display='none';
+  try{
+    await fetch('/reset',{method:'POST'});
+    const ok=document.getElementById('resetOk');
+    ok.style.display='inline';
+    setTimeout(()=>{ok.style.display='none'},3000);
+  }catch(e){console.error('reset failed',e)}
 }
 
 async function poll(){
@@ -1637,6 +1834,20 @@ class _PnLHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        if self.path == "/reset":
+            reset_state()
+            resp = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(resp))
+            self.end_headers()
+            self.wfile.write(resp)
+            log.info("[HTTP] Dashboard reset triggered by user")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, fmt, *args):
         pass  # silence HTTP access logs from cluttering bot output
 
@@ -1653,6 +1864,8 @@ def start_http_server():
 def main():
     global last_pnl_snapshot
     global pnl_history
+    global armed_logged
+    load_state()   # restore stats/trade_log/pnl_history/asset_history from disk
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log.info("=" * 55)
     log.info("  Panic Bot  [%s]", mode)
@@ -1661,12 +1874,13 @@ def main():
              SETTLE_SECS, ENTRY_PRICE_CAP, DROP_FROM_REF * 100, SD_THRESH, SD_LOOKBACK,)
     log.info("  TP1=%.1fx  TP2=%.1fx  trail=%.0f%%  order=$%.0f  poll=%ds",
              TP1_MULT, TP2_MULT, TRAILING_STOP * 100, ORDER_AMOUNT, POLL_SECS)
+    log.info("  Gap guard: swing=%s  magnitude=%s",
+             {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE)
     log.info("=" * 55)
 
-    global armed_logged
     start_http_server()
     client       = build_client()
-    start_rsi_feed()   # Binance WebSocket RSI(5) — ETH + SOL 15m candles
+    start_rsi_feed()   # Binance WebSocket RSI(5) + candle_open + live_close
     last_status  = time.time()
     last_window  = None
     executor     = ThreadPoolExecutor(max_workers=len(ASSETS))
