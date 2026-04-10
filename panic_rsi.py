@@ -15,7 +15,7 @@ Strategy:
       5. GAP      — Binance candle has not moved too far from its open
                     (prevents buying into already-exhausted moves)
     YES cheap → buy YES  |  NO cheap (YES pumped) → buy NO
-  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 591
+  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 627 l RSI: ~700
 
 Infrastructure from fresh_bot10:
   - 4-key ApiCreds auth  (POLY_PRIVATE_KEY / POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE)
@@ -152,7 +152,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["btc", "eth", "sol"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["eth", "sol"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -163,7 +163,7 @@ ORDER_AMOUNT     = float(os.getenv("ORDER_AMOUNT_USDC", "5"))
 # Use actual fill amounts from CLOB responses whenever available.
 
 # --- Settle phase (no trading during this period) ----------------------------
-SETTLE_SECS      = 20    # first 120s of window = collect prices, no trading
+SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
@@ -194,7 +194,7 @@ GAP_MAGNITUDE = {
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.60   # sell remaining shares if price drops 20% from peak after TP1
+TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.40   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -214,7 +214,7 @@ STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into
 CONFIRM_REBOUND_MULT = 1.75  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.50  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -252,11 +252,10 @@ traded_this_window = set() # assets already bought this window e.g. {"btc", "eth
 pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
 # rsi_data, candle_open, live_close are imported from binance_ws
 armed_logged       = False  # True after [ARMED] message shown once per window
-pnl_history        = []     # [{ts, label, pnl}] snapshot every 5min for chart
-asset_history      = {}     # {asset: {trades, wins, losses, pnl}} closed trade records
-trade_log          = []     # [{time, asset, side, entry, tp1, tp1_hit, tp2, tp2_hit, exit, pnl}] newest-first
+pnl_history        = []     # [{ts, pnl}] snapshot every 30min for chart — persisted
+asset_history      = {}     # {asset: {trades, wins, losses, pnl}} — persisted
+trade_log          = []     # [{time, asset, side, ...}] newest-first — persisted
 last_pnl_snapshot  = 0      # unix timestamp of last pnl_history append
-pnl_history = []
 
 # ── Startup window skip ───────────────────────────────────────────────────────
 # If the bot starts mid-window we cannot trust candle_open (we missed the open).
@@ -275,8 +274,64 @@ stats = {
 
 STATE_FILE = "bot_state.json"
 
+# ── Persistence: load / save / reset ─────────────────────────────────────────
+
+def load_state():
+    """
+    On startup, restore stats + pnl_history + asset_history + trade_log
+    from bot_state.json so data survives bot restarts.
+    Open positions are NOT restored (tokens change each window).
+    """
+    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    if not os.path.exists(STATE_FILE):
+        log.info("[STATE] No saved state found — starting fresh")
+        return
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        # Restore cumulative stats — merge carefully so new keys are preserved
+        saved_stats = saved.get("stats", {})
+        for k in stats:
+            if k in saved_stats:
+                stats[k] = saved_stats[k]
+        pnl_history   = saved.get("pnl_history",   [])
+        asset_history = saved.get("asset_history",  {})
+        trade_log     = saved.get("trade_log",      [])
+        # Resume PnL snapshot timer from last recorded entry
+        if pnl_history:
+            last_pnl_snapshot = time.time()
+        log.info(
+            "[STATE] Restored — buys=%d  wins=%d  losses=%d  pnl=$%.4f  "
+            "trades_in_log=%d  pnl_pts=%d",
+            stats["buys"], stats["wins"], stats["losses"], stats["pnl"],
+            len(trade_log), len(pnl_history),
+        )
+    except Exception as e:
+        log.warning("[STATE] Failed to load saved state: %s — starting fresh", e)
+
+
+def reset_state():
+    """
+    Clear all historical stats, trade log, pnl history, asset history.
+    Called by POST /reset from the dashboard.
+    Does NOT touch open_positions (live session state).
+    """
+    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
+    pnl_history   = []
+    asset_history = {}
+    trade_log     = []
+    last_pnl_snapshot = 0
+    log.info("[STATE] Reset by user — all historical stats cleared")
+    save_state()
+
+
 def save_state():
-    """Write current bot state to bot_state.json for pnl.py to read."""
+    """
+    Write full bot state to bot_state.json.
+    Persists: stats, pnl_history, asset_history, trade_log.
+    Also writes live positions + prices for the dashboard.
+    """
     positions_out = {}
     for k, p in open_positions.items():
         entry     = p["entry_price"]
@@ -286,7 +341,6 @@ def save_state():
         tp1_done  = p.get("tp1_done", False)
         net_shares = p.get("net_shares", ORDER_AMOUNT / entry)
 
-        # Progress: toward TP1 until TP1 is done, then toward TP2
         if not tp1_done:
             target = tp1
             pct = round((curr - entry) / (tp1 - entry) * 100, 1) if tp1 != entry else 0
@@ -294,7 +348,6 @@ def save_state():
             target = tp2
             pct = round((curr - entry) / (tp2 - entry) * 100, 1) if tp2 != entry else 0
 
-        # After TP1 fired, only tp2_shares remain — use correct share count
         shares_held = p.get("tp2_shares", net_shares) if tp1_done else net_shares
         pnl = round((curr - entry) * shares_held, 4)
         positions_out[k] = {
@@ -309,12 +362,15 @@ def save_state():
             "pct":      max(0, min(100, pct)),
         }
     state = {
-        "updated":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "dry_run":   DRY_RUN,
-        "stats":     dict(stats),
-        "positions": positions_out,
-        "prices":    dict(live_prices),
-        "rsi":       dict(rsi_data),
+        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dry_run":       DRY_RUN,
+        "stats":         dict(stats),
+        "positions":     positions_out,
+        "prices":        dict(live_prices),
+        "rsi":           dict(rsi_data),
+        "pnl_history":   list(pnl_history),
+        "asset_history": dict(asset_history),
+        "trade_log":     list(trade_log),
         "settings": {
             "assets":    ASSETS,
             "sigma":     SD_THRESH,
@@ -1701,6 +1757,22 @@ function render(s){
   drawChart(pnlHist);
 }
 
+function startReset(){
+  document.getElementById('resetConfirm').style.display='inline-flex';
+}
+function cancelReset(){
+  document.getElementById('resetConfirm').style.display='none';
+}
+async function doReset(){
+  document.getElementById('resetConfirm').style.display='none';
+  try{
+    await fetch('/reset',{method:'POST'});
+    const ok=document.getElementById('resetOk');
+    ok.style.display='inline';
+    setTimeout(()=>{ok.style.display='none'},3000);
+  }catch(e){console.error('reset failed',e)}
+}
+
 async function poll(){
   try{
     const r=await fetch('/state');
@@ -1750,6 +1822,20 @@ class _PnLHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        if self.path == "/reset":
+            reset_state()
+            resp = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(resp))
+            self.end_headers()
+            self.wfile.write(resp)
+            log.info("[HTTP] Dashboard reset triggered by user")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, fmt, *args):
         pass  # silence HTTP access logs from cluttering bot output
 
@@ -1767,6 +1853,7 @@ def main():
     global last_pnl_snapshot
     global pnl_history
     global armed_logged
+    load_state()   # restore stats/trade_log/pnl_history/asset_history from disk
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log.info("=" * 55)
     log.info("  Panic Bot  [%s]", mode)
