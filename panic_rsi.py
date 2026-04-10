@@ -152,7 +152,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["btc", "eth", "sol"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["eth", "sol"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -167,12 +167,12 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
+ENTRY_PRICE_CAP  = 0.09   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
-RSI_OVERSOLD     = 40     # condition 4: RSI below this → only YES buys allowed
-RSI_OVERBOUGHT   = 60     # condition 4: RSI above this → only NO  buys allowed
+RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
 
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
@@ -189,15 +189,15 @@ GAP_SWING = {
 # Early market moves are expected — give more room; late market less room.
 GAP_MAGNITUDE = {
     "early": 4.0,   # 0–5 min  : candle just opened, large moves normal
-    "mid":   2.0,   # 5–10 min : tightening
-    "late":  1.2,   # 10–15 min: move should be exhausting, tight filter
+    "mid":   2.5,   # 5–10 min : tightening
+    "late":  1.5,   # 10–15 min: move should be exhausting, tight filter
 }
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
+TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
-FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
+TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
 # --- Force stop cooldown (wait period AFTER cut loss triggers) ---------------
@@ -213,10 +213,10 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.75  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.50  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -370,6 +370,9 @@ def save_state():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "rsi":           dict(rsi_data),
+        "gap": {a: round(abs((live_close.get(a) or 0) - candle_open.get(a, 0)), 4)
+                 if candle_open.get(a, 0) > 0 and live_close.get(a) is not None else None
+                 for a in ASSETS},
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -1660,16 +1663,23 @@ function render(s){
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
 
-  const rsi=s.rsi||{};
+  const rsi=s.rsi||{}, gap=s.gap||{};
+  const rsiOv=cfg.rsi_oversold||30, rsiOb=cfg.rsi_overbought||70;
   const priceRows=assets.map(a=>{
     const yp=pr[a+'_yes'], np=pr[a+'_no'];
-    const yr=rsi[a], nr=rsi[a]!=null?Math.round((100-rsi[a])*10)/10:null;
+    const rv=rsi[a];
     const yc=yp!=null&&yp<=cap?'red':'';
     const nc=np!=null&&np<=cap?'red':'';
-    const rc=v=>v==null?'dim':v<25?'green':v>75?'red':'amber';
-    const rl=v=>v==null?'—':v.toFixed(1);
+    const rsiColor=rv==null?'dim':rv<rsiOv?'green':rv>rsiOb?'red':'amber';
+    const rsiStr=rv==null?'—':rv.toFixed(1);
+    let sigHtml;
+    if(rv==null) sigHtml='<span class="dim">—</span>';
+    else if(rv<rsiOv) sigHtml='<span class="green" style="font-weight:600">BUY YES</span>';
+    else if(rv>rsiOb) sigHtml='<span class="red" style="font-weight:600">BUY NO</span>';
+    else sigHtml='<span class="amber">NEUTRAL</span>';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
-    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp)}</td><td class="${nc}">${fmt(np)}</td><td class="${rc(yr)}" style="font-family:monospace;font-weight:600">${rl(yr)}</td><td class="${rc(nr)}" style="font-family:monospace;font-weight:600">${rl(nr)}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    const gv=gap[a]; const gapStr=gv!=null?gv.toFixed(4):'—';
+    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp)}</td><td class="${nc}">${fmt(np)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1732,7 +1742,7 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices</h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>RSI YES</th><th>RSI NO</th><th>Holding</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>RSI</th><th>Signal</th><th>Gap</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
