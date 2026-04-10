@@ -1392,6 +1392,11 @@ def _build_state_snapshot():
         "positions":  positions_out,
         "prices":     dict(live_prices),
         "rsi":        dict(rsi_data),
+        "gap": {
+            a: round(abs((live_close.get(a) or 0) - candle_open.get(a, 0)), 4)
+            if candle_open.get(a, 0) > 0 and live_close.get(a) is not None else None
+            for a in ASSETS
+        },
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
