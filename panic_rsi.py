@@ -1681,7 +1681,7 @@ function render(s){
     if(rv==null) sigHtml='<span class="dim">—</span>';
     else if(rv<rsiOv) sigHtml='<span class="green" style="font-weight:600">BUY YES</span>';
     else if(rv>rsiOb) sigHtml='<span class="red" style="font-weight:600">BUY NO</span>';
-    else sigHtml='<span class="amber">NEUTRAL</span>';
+    else sigHtml='<span class="amber">N</span>';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
     const gv=gap[a]; const gapStr=gv!=null?gv.toFixed(4):'—';
     return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
