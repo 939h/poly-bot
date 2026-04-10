@@ -152,7 +152,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["eth", "sol"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["btc", "eth", "sol"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
