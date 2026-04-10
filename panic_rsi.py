@@ -1684,7 +1684,7 @@ function render(s){
     else sigHtml='<span class="amber">NEUTRAL</span>';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
     const gv=gap[a]; const gapStr=gv!=null?gv.toFixed(4):'—';
-    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp)}</td><td class="${nc}">${fmt(np)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
