@@ -15,7 +15,7 @@ Strategy:
       5. GAP      — Binance candle has not moved too far from its open
                     (prevents buying into already-exhausted moves)
     YES cheap → buy YES  |  NO cheap (YES pumped) → buy NO
-  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 627 l RSI: ~700
+  Exit: TP1 (50% shares) → TP2 (remaining) | trailing stop after TP1 | force stop loss | dead market guard :line 591
 
 Infrastructure from fresh_bot10:
   - 4-key ApiCreds auth  (POLY_PRIVATE_KEY / POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE)
@@ -171,6 +171,8 @@ ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
+RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
 
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
@@ -187,15 +189,15 @@ GAP_SWING = {
 # Early market moves are expected — give more room; late market less room.
 GAP_MAGNITUDE = {
     "early": 4.0,   # 0–5 min  : candle just opened, large moves normal
-    "mid":   2.5,   # 5–10 min : tightening
-    "late":  1.5,   # 10–15 min: move should be exhausting, tight filter
+    "mid":   2.0,   # 5–10 min : tightening
+    "late":  1.2,   # 10–15 min: move should be exhausting, tight filter
 }
 
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
-FORCE_STOP_LOSS  = 0.40   # cut loss ALL shares immediately if price drops 50% below entry
+FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
 # --- Force stop cooldown (wait period AFTER cut loss triggers) ---------------
@@ -214,7 +216,7 @@ STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into
 CONFIRM_REBOUND_MULT = 1.75  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.50  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -758,9 +760,6 @@ def check_trigger(key, current_price, secs_into):
     # Returns 50.0 during warmup (~90 min) so gate is transparent until ready
     asset_name = key.split("_")[0]           # "eth" or "sol"
     rsi_val    = rsi_data.get(asset_name, 50.0)
-
-    RSI_OVERSOLD   = 30    # below = oversold  → only YES buys allowed
-    RSI_OVERBOUGHT = 70    # above = overbought → only NO  buys allowed
 
     # RSI oversold — SOL/ETH falling hard → YES is likely to bounce → allow YES, block NO
     if side == "no" and rsi_val < RSI_OVERSOLD:
@@ -1404,6 +1403,8 @@ def _build_state_snapshot():
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
             "confirm_rebound": CONFIRM_REBOUND_MULT,
+            "rsi_oversold":    RSI_OVERSOLD,
+            "rsi_overbought":  RSI_OVERBOUGHT,
         },
     }
 
@@ -1697,7 +1698,18 @@ function render(s){
   document.getElementById('root').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div><strong style="font-size:18px">Panic<span class="green">Bot</span></strong> &nbsp; ${mode}</div>
-      <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
+        <div style="display:flex;align-items:center;gap:6px" id="resetZone">
+          <button onclick="startReset()" style="padding:4px 12px;background:transparent;border:1px solid #5c1d1d;color:#f87171;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Reset Stats</button>
+          <span id="resetConfirm" style="display:none;align-items:center;gap:6px">
+            <span style="font-size:11px;color:#f87171">Clear all history?</span>
+            <button onclick="doReset()" style="padding:3px 10px;background:rgba(248,113,113,.15);border:1px solid #f87171;color:#f87171;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Confirm</button>
+            <button onclick="cancelReset()" style="padding:3px 10px;background:#161b27;border:1px solid #2a3347;color:#5a6a85;font-size:11px;border-radius:4px;cursor:pointer;font-family:monospace">Cancel</button>
+          </span>
+          <span id="resetOk" style="display:none;font-size:11px;color:#4ade9f">&#10003; Cleared</span>
+        </div>
+      </div>
     </div>
 
     <div class="grid">
@@ -1744,7 +1756,7 @@ function render(s){
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
         <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
-        <tr><td>RSI oversold</td><td>&lt;25 → BUY YES</td><td>RSI overbought</td><td>&gt;75 → BUY NO</td></tr>
+        <tr><td>RSI oversold</td><td>&lt;${cfg.rsi_oversold||30} → BUY YES</td><td>RSI overbought</td><td>&gt;${cfg.rsi_overbought||70} → BUY NO</td></tr>
       </tbody></table>
     </div>
 
