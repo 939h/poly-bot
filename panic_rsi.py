@@ -182,15 +182,15 @@ RSI_OVERBOUGHT   = 65     # condition 4: RSI above this → only NO  buys allowe
 # Swing: per-asset percentage (BTC moves more in USD than ETH/SOL).
 GAP_SWING = {
     "btc": 0.001,   # 0.1% of BTC open (~$72 on a $72,000 candle)
-    "eth": 0.001,   # 0.1% of ETH open (~$1.8 on a $1,800 candle)
-    "sol": 0.001,   # 0.1% of SOL open (~$0.15 on a $150 candle)
+    "eth": 0.0015,   # 0.15% of ETH open (~$3 on a $2,000 candle)
+    "sol": 0.001,   # 0.1% of SOL open (~$0.08 on a $80 candle)
 }
 # Magnitude: how much tolerance to give based on window stage.
 # Early market moves are expected — give more room; late market less room.
 GAP_MAGNITUDE = {
-    "early": 4.0,   # 0–5 min  : candle just opened, large moves normal
-    "mid":   2.5,   # 5–10 min : tightening
-    "late":  1.5,   # 10–15 min: move should be exhausting, tight filter
+    "early": 5.0,   # 0–5 min  : candle just opened, large moves normal
+    "mid":   3.0,   # 5–10 min : tightening
+    "late":  2.0,   # 10–15 min: move should be exhausting, tight filter
 }
 
 # --- Exit strategy -----------------------------------------------------------
@@ -204,7 +204,7 @@ FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% b
 # Window divided into 3 x 5-min periods — cooldown shrinks as window ages
 # When force stop fires, bot waits this long before actually selling.
 # If price recovers above stop during cooldown → cancel (it was a wick).
-HOLD_EARLY_SECS  = 40     # 0-5 min   (early market)  — wait 60s before selling
+HOLD_EARLY_SECS  = 60     # 0-5 min   (early market)  — wait 60s before selling
 HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before selling
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
