@@ -171,8 +171,8 @@ ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
-RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
-RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
+RSI_OVERSOLD     = 50     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 50     # condition 4: RSI above this → only NO  buys allowed
 
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
