@@ -169,7 +169,7 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
 ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
+SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
 RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
 RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
@@ -196,7 +196,7 @@ GAP_MAGNITUDE = {
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
+TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -209,7 +209,7 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 0.5      # seconds between each price scan
+POLL_SECS        = 0.3      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
@@ -235,6 +235,11 @@ UNSOLD_TOLERANCE_RATIO = 0.02 # treat <=2% leftover as dust and close the trade
 TP_SELL_MAX_ATTEMPTS = 5     # once TP triggers, retry sell immediately up to N times
 TP_SELL_RETRY_DELAY_SECS = 0.5
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
+
+# --- Orderbook spread guard --------------------------------------------------
+MAX_BOOK_SPREAD        = 0.03  # max acceptable ask-bid spread before skipping entry/stop
+SPREAD_MAX_RETRIES     = 10     # discard pending buy after this many consecutive wide-spread polls
+FORCE_STOP_SPREAD_RETRIES = 10  # force exit anyway after this many wide-spread checks at stop level
 
 # =============================================================================
 #  INTERNAL CONSTANTS — do not change these
@@ -528,6 +533,19 @@ def get_midpoint(client, token_id):
         return 0.0
 
 
+def get_spread_value(client, token_id):
+    """
+    Fetch bid-ask spread for a token using Polymarket CLOB API.
+    Returns float spread, or None on failure (treat as unknown — do not block).
+    """
+    try:
+        resp = client.get_spread(token_id)
+        return float(resp["spread"])
+    except Exception as e:
+        log.debug("[SPREAD] fetch failed for %s: %s", token_id, e)
+        return None
+
+
 def market_buy(client, token_id, label, price_hint=None):
     amount = round(ORDER_AMOUNT, 4)  # amount = USDC to spend when side=BUY
     if DRY_RUN:
@@ -776,7 +794,11 @@ def check_trigger(key, current_price, secs_into):
                  key, current_price, rsi_val, rsi_val)
         return False
 
-    # RSI neutral — both sides allowed (Option A: only block wrong direction)
+    # RSI neutral (30-70) — no strong directional signal → skip both sides
+    if RSI_OVERSOLD <= rsi_val <= RSI_OVERBOUGHT:
+        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (neutral range %.0f-%.0f)",
+                 key, current_price, rsi_val, RSI_OVERSOLD, RSI_OVERBOUGHT)
+        return False
 
     # ── All 4 conditions met — PANIC ─────────────────────────────────────────
     log.info(
@@ -964,6 +986,29 @@ def manage_positions(client, server_ts=None):
         if current_price <= force_stop_price:
             now = time.time()
             if pos.get("force_stop_triggered") is None:
+                # ── Spread check — only once at first trigger ─────────────────
+                # Wide spread can cause a fake stop (midpoint looks low but book
+                # isn't real). Check once; after FORCE_STOP_SPREAD_RETRIES give up
+                # waiting and force exit anyway to protect capital.
+                fsr = pos.get("force_stop_spread_retries", 0)
+                spread = get_spread_value(client, pos["token_id"])
+                if spread is not None and spread > MAX_BOOK_SPREAD:
+                    fsr += 1
+                    pos["force_stop_spread_retries"] = fsr
+                    if fsr < FORCE_STOP_SPREAD_RETRIES:
+                        log.info(
+                            "[STOP-SPREAD-SKIP] %s  spread=%.4f > max=%.4f  "
+                            "skipping stop trigger (%d/%d)",
+                            key, spread, MAX_BOOK_SPREAD, fsr, FORCE_STOP_SPREAD_RETRIES,
+                        )
+                        continue
+                    else:
+                        log.info(
+                            "[STOP-SPREAD-FORCE] %s  spread still wide after %d checks "
+                            "— forcing stop regardless",
+                            key, fsr,
+                        )
+                # Spread OK or retries exhausted — proceed with force stop cooldown
                 server_ts_now = server_ts if server_ts is not None else get_server_time()
                 secs_in = server_ts_now - get_current_window_start(server_ts_now)
                 if secs_in < 300:
@@ -1267,9 +1312,27 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                          key, current, ENTRY_PRICE_CAP * REBOUND_CAP_BUFFER)
                 del pending_buys[key]
                 continue
+
+            # ── Spread check — verify orderbook is tight enough to enter ─────
+            spread = get_spread_value(client, pb["token_id"])
+            if spread is not None and spread > MAX_BOOK_SPREAD:
+                pb["spread_retries"] = pb.get("spread_retries", 0) + 1
+                log.info(
+                    "[SPREAD-WAIT] %s  spread=%.4f > max=%.4f  retry %d/%d",
+                    key, spread, MAX_BOOK_SPREAD,
+                    pb["spread_retries"], SPREAD_MAX_RETRIES,
+                )
+                if pb["spread_retries"] >= SPREAD_MAX_RETRIES:
+                    log.info("[SPREAD-SKIP] %s  spread still wide after %d retries — discarding",
+                             key, SPREAD_MAX_RETRIES)
+                    del pending_buys[key]
+                continue
+            # Spread OK (or unknown) — reset counter and proceed
+            pb["spread_retries"] = 0
+
             # Genuine rebound confirmed — fire the buy
-            log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx",
-                     key, pb["trough_min"], current, rebound_ratio)
+            log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx  spread=%.4f",
+                     key, pb["trough_min"], current, rebound_ratio, spread if spread is not None else -1)
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
             buy = market_buy(client, pb["token_id"], label, price_hint=current)
             del pending_buys[key]
@@ -1330,9 +1393,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         # Gap guard passed — enter rebound confirmation phase
         pending_buys[key] = {
-            "token_id":    check_token,
-            "trough_min":  check_price,
-            "trough_time": server_ts,
+            "token_id":      check_token,
+            "trough_min":    check_price,
+            "trough_time":   server_ts,
+            "spread_retries": 0,   # consecutive wide-spread count at rebound confirmation
         }
         log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
                  key, check_price, CONFIRM_REBOUND_MULT)
