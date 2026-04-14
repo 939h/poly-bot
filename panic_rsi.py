@@ -152,7 +152,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["btc", "eth", "sol"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["eth", "sol"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -167,12 +167,12 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
+ENTRY_PRICE_CAP  = 0.09   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
-RSI_OVERSOLD     = 50     # condition 4: RSI below this → only YES buys allowed
-RSI_OVERBOUGHT   = 50     # condition 4: RSI above this → only NO  buys allowed
+RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
 
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
@@ -182,29 +182,29 @@ RSI_OVERBOUGHT   = 50     # condition 4: RSI above this → only NO  buys allowe
 # Swing: per-asset percentage (BTC moves more in USD than ETH/SOL).
 GAP_SWING = {
     "btc": 0.001,   # 0.1% of BTC open (~$72 on a $72,000 candle)
-    "eth": 0.0015,   # 0.15% of ETH open (~$3 on a $2,000 candle)
-    "sol": 0.001,   # 0.1% of SOL open (~$0.08 on a $80 candle)
+    "eth": 0.001,   # 0.1% of ETH open (~$1.8 on a $1,800 candle)
+    "sol": 0.001,   # 0.1% of SOL open (~$0.15 on a $150 candle)
 }
 # Magnitude: how much tolerance to give based on window stage.
 # Early market moves are expected — give more room; late market less room.
 GAP_MAGNITUDE = {
-    "early": 5.0,   # 0–5 min  : candle just opened, large moves normal
-    "mid":   3.0,   # 5–10 min : tightening
-    "late":  2.0,   # 10–15 min: move should be exhausting, tight filter
+    "early": 4.0,   # 0–5 min  : candle just opened, large moves normal
+    "mid":   2.5,   # 5–10 min : tightening
+    "late":  1.5,   # 10–15 min: move should be exhausting, tight filter
 }
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
+TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
-FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
+TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+FORCE_STOP_LOSS  = 0.50   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
 # --- Force stop cooldown (wait period AFTER cut loss triggers) ---------------
 # Window divided into 3 x 5-min periods — cooldown shrinks as window ages
 # When force stop fires, bot waits this long before actually selling.
 # If price recovers above stop during cooldown → cancel (it was a wick).
-HOLD_EARLY_SECS  = 60     # 0-5 min   (early market)  — wait 60s before selling
+HOLD_EARLY_SECS  = 40     # 0-5 min   (early market)  — wait 60s before selling
 HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before selling
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
@@ -213,10 +213,10 @@ POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.50  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.5  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.30  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -224,9 +224,9 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = True
+TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
-TRADING_WINDOWS         = [(4, 29, 5, 15), (8, 29, 9, 30), (12, 28, 12, 45), (16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
+TRADING_WINDOWS         = [(8, 30, 9, 30), (16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
@@ -736,7 +736,7 @@ def check_trigger(key, current_price, secs_into):
     # ── Condition 2: velocity — price dropped enough from rolling mean ─────────
     drop_pct = (ref - current_price) / ref if ref > 0 else 0
     if drop_pct < DROP_FROM_REF:
-        log.debug("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
+        log.info("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  need=%.0f%%  vel=NO",
                  key, current_price, ref, drop_pct * 100, DROP_FROM_REF * 100)
         return False
 
@@ -754,7 +754,7 @@ def check_trigger(key, current_price, secs_into):
     floor = max(mean_p - (SD_THRESH * std_p), mean_p * 0.01)
 
     if current_price >= floor:
-        log.debug("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  sigma=NO(floor=%.4f)",
+        log.info("[SCAN] %s  price=%.4f  ref=%.4f  drop=%.1f%%  sigma=NO(floor=%.4f)",
                  key, current_price, ref, drop_pct * 100, floor)
         return False
 
@@ -776,11 +776,7 @@ def check_trigger(key, current_price, secs_into):
                  key, current_price, rsi_val, rsi_val)
         return False
 
-    # RSI neutral (30-70) — no strong directional signal → skip both sides
-    if RSI_OVERSOLD <= rsi_val <= RSI_OVERBOUGHT:
-        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (neutral range %.0f-%.0f)",
-                 key, current_price, rsi_val, RSI_OVERSOLD, RSI_OVERBOUGHT)
-        return False
+    # RSI neutral — both sides allowed, no block
 
     # ── All 4 conditions met — PANIC ─────────────────────────────────────────
     log.info(
@@ -1392,11 +1388,6 @@ def _build_state_snapshot():
         "positions":  positions_out,
         "prices":     dict(live_prices),
         "rsi":        dict(rsi_data),
-        "gap": {
-            a: round(abs((live_close.get(a) or 0) - candle_open.get(a, 0)), 4)
-            if candle_open.get(a, 0) > 0 and live_close.get(a) is not None else None
-            for a in ASSETS
-        },
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -1681,10 +1672,10 @@ function render(s){
     if(rv==null) sigHtml='<span class="dim">—</span>';
     else if(rv<rsiOv) sigHtml='<span class="green" style="font-weight:600">BUY YES</span>';
     else if(rv>rsiOb) sigHtml='<span class="red" style="font-weight:600">BUY NO</span>';
-    else sigHtml='<span class="amber">N</span>';
+    else sigHtml='<span class="amber">NEUTRAL</span>';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
     const gv=gap[a]; const gapStr=gv!=null?gv.toFixed(4):'—';
-    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp)}</td><td class="${nc}">${fmt(np)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
