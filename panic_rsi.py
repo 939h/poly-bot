@@ -169,10 +169,10 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
 ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
+SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
-RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
-RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
+RSI_OVERSOLD     = 50     # condition 4: RSI below this → only YES buys allowed
+RSI_OVERBOUGHT   = 50     # condition 4: RSI above this → only NO  buys allowed
 
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
@@ -196,7 +196,7 @@ GAP_MAGNITUDE = {
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -209,7 +209,7 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 0.3      # seconds between each price scan
+POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
@@ -224,7 +224,7 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = False
+TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
 TRADING_WINDOWS         = [(4, 29, 5, 15), (8, 29, 9, 30), (12, 28, 12, 45), (16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
@@ -237,9 +237,9 @@ TP_SELL_RETRY_DELAY_SECS = 0.5
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # --- Orderbook spread guard --------------------------------------------------
-MAX_BOOK_SPREAD        = 0.03  # max acceptable ask-bid spread before skipping entry/stop
-SPREAD_MAX_RETRIES     = 10     # discard pending buy after this many consecutive wide-spread polls
-FORCE_STOP_SPREAD_RETRIES = 10  # force exit anyway after this many wide-spread checks at stop level
+MAX_BOOK_SPREAD        = 0.05  # max acceptable ask-bid spread before skipping entry/stop
+SPREAD_MAX_RETRIES     = 5     # discard pending buy after this many consecutive wide-spread polls
+FORCE_STOP_SPREAD_RETRIES = 5  # force exit anyway after this many wide-spread checks at stop level
 
 # =============================================================================
 #  INTERNAL CONSTANTS — do not change these
@@ -537,12 +537,21 @@ def get_spread_value(client, token_id):
     """
     Fetch bid-ask spread for a token using Polymarket CLOB API.
     Returns float spread, or None on failure (treat as unknown — do not block).
+    Handles both dict {"spread": "0.04"} and object .spread responses.
     """
     try:
         resp = client.get_spread(token_id)
-        return float(resp["spread"])
+        # py-clob-client may return dict or object
+        if isinstance(resp, dict):
+            val = resp.get("spread") or resp.get("spread_amount") or resp.get("value")
+        else:
+            val = getattr(resp, "spread", None)
+        if val is None:
+            log.info("[SPREAD] %s — unexpected response format: %s", token_id[:12], resp)
+            return None
+        return float(val)
     except Exception as e:
-        log.debug("[SPREAD] fetch failed for %s: %s", token_id, e)
+        log.info("[SPREAD] fetch failed for %s: %s — skipping spread check", token_id[:12], e)
         return None
 
 
@@ -1329,6 +1338,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 continue
             # Spread OK (or unknown) — reset counter and proceed
             pb["spread_retries"] = 0
+            log.info("[SPREAD-OK] %s  spread=%.4f — proceeding to buy",
+                     key, spread if spread is not None else -1)
 
             # Genuine rebound confirmed — fire the buy
             log.info("[REBOUND] %s  confirmed  trough=%.4f  entry=%.4f  ratio=%.3fx  spread=%.4f",
