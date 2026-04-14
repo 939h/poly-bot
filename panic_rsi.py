@@ -10,7 +10,6 @@ Strategy:
       1. CAP      — price < ENTRY_PRICE_CAP  (lottery zone)
       2. VELOCITY — price dropped >= DROP_FROM_REF from reference
       3. SIGMA    — price < sigma floor  (statistical confirmation)
-      4. RSI      — Binance RSI gate (oversold/overbought directional filter)
     Then GAP GUARD (post-signal):
       5. GAP      — Binance candle has not moved too far from its open
                     (prevents buying into already-exhausted moves)
@@ -81,7 +80,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import rsi_data, candle_open, live_close, start_rsi_feed
+from binance_ws import candle_open, live_close, start_rsi_feed
 
 # ── Logging (UTF-8 so Windows never crashes on special chars) -----------------
 class _ColorFormatter(logging.Formatter):
@@ -169,11 +168,8 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
 ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
-SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
+SD_LOOKBACK      = 15     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
-RSI_OVERSOLD     = 30     # condition 4: RSI below this → only YES buys allowed
-RSI_OVERBOUGHT   = 70     # condition 4: RSI above this → only NO  buys allowed
-
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
 # GAP = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
@@ -196,7 +192,7 @@ GAP_MAGNITUDE = {
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -209,7 +205,7 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 0.3      # seconds between each price scan
+POLL_SECS        = 0.5      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
@@ -224,7 +220,7 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = False
+TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
 TRADING_WINDOWS         = [(4, 29, 5, 15), (8, 29, 9, 30), (12, 28, 12, 45), (16, 17), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
@@ -257,7 +253,7 @@ token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
 pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
-# rsi_data, candle_open, live_close are imported from binance_ws
+# candle_open, live_close are imported from binance_ws (gap guard)
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, pnl}] snapshot every 30min for chart — persisted
 asset_history      = {}     # {asset: {trades, wins, losses, pnl}} — persisted
@@ -374,7 +370,6 @@ def save_state():
         "stats":         dict(stats),
         "positions":     positions_out,
         "prices":        dict(live_prices),
-        "rsi":           dict(rsi_data),
         "gap": {a: round(abs((live_close.get(a) or 0) - candle_open.get(a, 0)), 4)
                  if candle_open.get(a, 0) > 0 and live_close.get(a) is not None else None
                  for a in ASSETS},
@@ -785,36 +780,12 @@ def check_trigger(key, current_price, secs_into):
                  key, current_price, ref, drop_pct * 100, floor)
         return False
 
-    # ── Condition 4: RSI(5) gate — real Binance candle data ──────────────────
-    # rsi_data fed by binance_ws.py background thread (ETH/SOL 15m candles)
-    # Returns 50.0 during warmup (~90 min) so gate is transparent until ready
-    asset_name = key.split("_")[0]           # "eth" or "sol"
-    rsi_val    = rsi_data.get(asset_name, 50.0)
-
-    # RSI oversold — SOL/ETH falling hard → YES is likely to bounce → allow YES, block NO
-    if side == "no" and rsi_val < RSI_OVERSOLD:
-        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI oversold=%.1f, only YES allowed)",
-                 key, current_price, rsi_val, rsi_val)
-        return False
-
-    # RSI overbought — SOL/ETH pumping hard → NO is likely to bounce → allow NO, block YES
-    if side == "yes" and rsi_val > RSI_OVERBOUGHT:
-        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (RSI overbought=%.1f, only NO allowed)",
-                 key, current_price, rsi_val, rsi_val)
-        return False
-
-    # RSI neutral (30-70) — no strong directional signal → skip both sides
-    if RSI_OVERSOLD <= rsi_val <= RSI_OVERBOUGHT:
-        log.info("[SCAN] %s  price=%.4f  rsi=%.1f  RSI-gate=NO (neutral range %.0f-%.0f)",
-                 key, current_price, rsi_val, RSI_OVERSOLD, RSI_OVERBOUGHT)
-        return False
-
-    # ── All 4 conditions met — PANIC ─────────────────────────────────────────
+    # ── All 3 conditions met — PANIC ─────────────────────────────────────────
     log.info(
         "[PANIC] %s  price=%.4f  ref=%.4f  drop=%.1f%%  floor=%.4f  "
-        "rsi=%.1f  mean=%.4f  std=%.4f",
+        "mean=%.4f  std=%.4f",
         key, current_price, ref, drop_pct * 100, floor,
-        rsi_val, mean_p, std_p
+        mean_p, std_p
     )
     return True
 
@@ -1251,7 +1222,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     Trigger logic (per side, independent):
       Phase 1 settle  (0 to SETTLE_SECS):   collect prices, no trading
-      Phase 2 armed   (SETTLE_SECS onward):  cap + velocity + sigma + RSI + gap guard
+      Phase 2 armed   (SETTLE_SECS onward):  cap + velocity + sigma + gap guard
     """
     global _skip_first_window, _startup_window_ts
 
@@ -1462,7 +1433,6 @@ def _build_state_snapshot():
         "stats":      dict(stats),
         "positions":  positions_out,
         "prices":     dict(live_prices),
-        "rsi":        dict(rsi_data),
         "gap": {
             a: round(abs((live_close.get(a) or 0) - candle_open.get(a, 0)), 4)
             if candle_open.get(a, 0) > 0 and live_close.get(a) is not None else None
@@ -1482,8 +1452,6 @@ def _build_state_snapshot():
             "tp1": TP1_MULT, "tp2": TP2_MULT, "trail": TRAILING_STOP,
             "order": ORDER_AMOUNT, "poll": POLL_SECS, "lookback": SD_LOOKBACK,
             "confirm_rebound": CONFIRM_REBOUND_MULT,
-            "rsi_oversold":    RSI_OVERSOLD,
-            "rsi_overbought":  RSI_OVERBOUGHT,
         },
     }
 
@@ -1739,23 +1707,14 @@ function render(s){
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
 
-  const rsi=s.rsi||{}, gap=s.gap||{};
-  const rsiOv=cfg.rsi_oversold||30, rsiOb=cfg.rsi_overbought||70;
+  const gap=s.gap||{};
   const priceRows=assets.map(a=>{
     const yp=pr[a+'_yes'], np=pr[a+'_no'];
-    const rv=rsi[a];
     const yc=yp!=null&&yp<=cap?'red':'';
     const nc=np!=null&&np<=cap?'red':'';
-    const rsiColor=rv==null?'dim':rv<rsiOv?'green':rv>rsiOb?'red':'amber';
-    const rsiStr=rv==null?'—':rv.toFixed(1);
-    let sigHtml;
-    if(rv==null) sigHtml='<span class="dim">—</span>';
-    else if(rv<rsiOv) sigHtml='<span class="green" style="font-weight:600">BUY YES</span>';
-    else if(rv>rsiOb) sigHtml='<span class="red" style="font-weight:600">BUY NO</span>';
-    else sigHtml='<span class="amber">N</span>';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
     const gv=gap[a]; const gapStr=gv!=null?gv.toFixed(4):'—';
-    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td class="${rsiColor}" style="font-family:monospace;font-weight:600">${rsiStr}</td><td>${sigHtml}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    return `<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td style="font-family:monospace">${gapStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1818,7 +1777,7 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices</h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>RSI</th><th>Signal</th><th>Gap</th><th>Holding</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Gap</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
@@ -1842,7 +1801,6 @@ function render(s){
         <tr><td>TP1</td><td>${cfg.tp1||2}x</td><td>TP2</td><td>${cfg.tp2||10}x</td></tr>
         <tr><td>Trailing stop</td><td>${((cfg.trail||0.30)*100).toFixed(0)}%</td><td>Order size</td><td>$${cfg.order||5}</td></tr>
         <tr><td>Rebound confirm</td><td>${(cfg.confirm_rebound||1.25).toFixed(2)}× trough</td><td></td><td></td></tr>
-        <tr><td>RSI oversold</td><td>&lt;${cfg.rsi_oversold||30} → BUY YES</td><td>RSI overbought</td><td>&gt;${cfg.rsi_overbought||70} → BUY NO</td></tr>
       </tbody></table>
     </div>
 
