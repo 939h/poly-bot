@@ -209,10 +209,10 @@ POLL_SECS        = 0.3      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.70  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.50  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.3  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -220,7 +220,7 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = True
+TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
 TRADING_WINDOWS         = [(4, 29, 5, 15), (8, 29, 9, 30), (12, 28, 12, 45), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
