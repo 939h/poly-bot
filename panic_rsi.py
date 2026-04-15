@@ -1,4 +1,4 @@
-"""
+l"""
 Polymarket 15-Min Crypto Up/Down — Panic Bot
 ============================================
 Strategy:
@@ -209,10 +209,10 @@ POLL_SECS        = 0.3      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.50  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.70  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.2  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
