@@ -1,4 +1,4 @@
-l"""
+"""
 Polymarket 15-Min Crypto Up/Down — Panic Bot
 ============================================
 Strategy:
