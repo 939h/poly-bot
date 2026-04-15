@@ -190,7 +190,7 @@ GAP_MAGNITUDE = {
 }
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
+TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
 TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
@@ -989,6 +989,9 @@ def manage_positions(client, server_ts=None):
                             key, fsr,
                         )
                 # Spread OK or retries exhausted — proceed with force stop cooldown
+                if spread is None or spread <= MAX_BOOK_SPREAD:
+                    log.info("[STOP-SPREAD-OK] %s  spread=%.4f — proceeding to stop cooldown",
+                             key, spread if spread is not None else 0.0)
                 server_ts_now = server_ts if server_ts is not None else get_server_time()
                 secs_in = server_ts_now - get_current_window_start(server_ts_now)
                 if secs_in < 300:
