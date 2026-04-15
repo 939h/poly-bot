@@ -1390,10 +1390,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             traded_this_window.add(asset)
             del gap_wait[asset]
         else:
-            log.info(
-                "[GAP-WAIT] %s  gap still wide  elapsed=%.1fs/%.0fs",
-                asset.upper(), elapsed, GAP_WAIT_SECS,
-            )
+            pass  # still waiting — no log to avoid spam
 
     # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
