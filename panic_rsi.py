@@ -233,7 +233,7 @@ TP_SELL_RETRY_DELAY_SECS = 0.5
 MIN_SELL_SHARES = 1           # venue/share handling: only send whole-share sell sizes
 
 # --- Orderbook spread guard --------------------------------------------------
-MAX_BOOK_SPREAD        = 0.03  # max acceptable ask-bid spread before skipping entry/stop
+MAX_BOOK_SPREAD        = 0.02  # max acceptable ask-bid spread before skipping entry/stop
 SPREAD_MAX_RETRIES     = 10     # discard pending buy after this many consecutive wide-spread polls
 FORCE_STOP_SPREAD_RETRIES = 10  # force exit anyway after this many wide-spread checks at stop level
 
