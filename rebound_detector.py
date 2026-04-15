@@ -80,7 +80,7 @@ load_dotenv()
 #  USER SETTINGS
 # =============================================================================
 ASSETS           = ["btc", "eth", "sol"]
-TROUGH_THRESHOLD = 0.10   # price must drop below this to begin tracking
+TROUGH_THRESHOLD = 0.08   # price must drop below this to begin tracking
 REBOUND_MULT     = 1.7    # signal fires when price > REBOUND_MULT × trough_min
 POLL_SECS        = 1.0
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
