@@ -256,6 +256,7 @@ token_cache     = {}   # window_start -> {"btc": yes_tok, ...}  (YES token only)
 live_prices     = {}   # "btc_yes" -> latest midpoint float
 traded_this_window = set() # assets already bought this window e.g. {"btc", "eth"}
 pending_buys       = {}    # key -> {"token_id": str, "trough_min": float, "trough_time": float}
+gap_wait           = {}    # asset -> {"triggered_at": float, "key": str, "token": str, "price": float}
 # candle_open, live_close are imported from binance_ws (gap guard)
 armed_logged       = False  # True after [ARMED] message shown once per window
 pnl_history        = []     # [{ts, pnl}] snapshot every 30min for chart — persisted
@@ -835,12 +836,7 @@ def check_gap_guard(asset, secs_into):
     )
 
     if actual > threshold:
-        log.info(
-            "[GAP-BLOCK] %s  gap %.4f > threshold %.4f  "
-            "— trade discarded, asset blacklisted for this window",
-            asset.upper(), actual, threshold,
-        )
-        return True  # blocked
+        return True  # blocked — caller decides whether to wait or discard
 
     return False  # allowed
 
@@ -1355,14 +1351,54 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             _skip_first_window = True
             log.info("[SKIP-WINDOW] Clean window started — gap guard and trading now active")
 
+    # ── Step 1.5: Re-check assets waiting on gap recovery ────────────────────
+    for asset in list(gap_wait.keys()):
+        if asset in traded_this_window:
+            del gap_wait[asset]
+            continue
+
+        gw      = gap_wait[asset]
+        elapsed = time.time() - gw["triggered_at"]
+
+        if not check_gap_guard(asset, secs_into):
+            # Gap recovered within wait window — fire the buy
+            gkey = gw["key"]
+            if gkey not in pending_buys:
+                pending_buys[gkey] = {
+                    "token_id":       gw["token"],
+                    "trough_min":     gw["price"],
+                    "trough_time":    server_ts,
+                    "spread_retries": 0,
+                }
+                log.info(
+                    "[GAP-CLEARED] %s  gap recovered after %.1fs — entering pending  price=%.4f",
+                    asset.upper(), elapsed, gw["price"],
+                )
+            del gap_wait[asset]
+        elif elapsed >= GAP_WAIT_SECS:
+            # Still wide after 10s — discard and blacklist
+            log.info(
+                "[GAP-BLOCK] %s  gap still wide after %.1fs — trade discarded, asset blacklisted",
+                asset.upper(), elapsed,
+            )
+            traded_this_window.add(asset)
+            del gap_wait[asset]
+        else:
+            log.info(
+                "[GAP-WAIT] %s  gap still wide  elapsed=%.1fs/%.0fs",
+                asset.upper(), elapsed, GAP_WAIT_SECS,
+            )
+
     # ── Step 2: Evaluate fresh signals for assets not yet pending/traded ───────
     for asset in ASSETS:
         if asset in traded_this_window:
             log.debug("[SKIP] %s already traded this window", asset.upper())
             continue
 
-        # Skip if either side is already awaiting confirmation
+        # Skip if either side is already awaiting confirmation or gap-waiting
         if f"{asset}_yes" in pending_buys or f"{asset}_no" in pending_buys:
+            continue
+        if asset in gap_wait:
             continue
 
         buy_signal = _evaluate_asset(results.get(asset), secs_into)
@@ -1374,9 +1410,18 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         # ── Condition 5: Gap guard ────────────────────────────────────────────
         # Check AFTER all 4 trigger conditions pass.
-        # If gap too large → blacklist asset entirely for this window.
+        # If gap too large → enter 10s wait, keep scanning for recovery.
         if check_gap_guard(asset, secs_into):
-            traded_this_window.add(asset)   # blacklist — no more scans this window
+            gap_wait[asset] = {
+                "triggered_at": time.time(),
+                "key":          key,
+                "token":        check_token,
+                "price":        check_price,
+            }
+            log.info(
+                "[GAP-WAIT] %s  gap too wide — waiting %.0fs for recovery  price=%.4f",
+                asset.upper(), GAP_WAIT_SECS, check_price,
+            )
             continue
 
         # Gap guard passed — enter rebound confirmation phase
@@ -1384,7 +1429,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             "token_id":      check_token,
             "trough_min":    check_price,
             "trough_time":   server_ts,
-            "spread_retries": 0,   # consecutive wide-spread count at rebound confirmation
+            "spread_retries": 0,
         }
         log.info("[TROUGH] %s  entered  price=%.4f  waiting for %.2fx rebound",
                  key, check_price, CONFIRM_REBOUND_MULT)
@@ -1955,6 +2000,7 @@ def main():
                 live_prices.clear()
                 traded_this_window.clear()
                 pending_buys.clear()
+                gap_wait.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  settle=%ds  armed at %ds",
                          window_start, secs_left, SETTLE_SECS, SETTLE_SECS)
             last_window = window_start
