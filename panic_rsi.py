@@ -1360,19 +1360,25 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         gw      = gap_wait[asset]
         elapsed = time.time() - gw["triggered_at"]
 
+        # Track rolling trough during wait — update if price drops further
+        current_live = live_prices.get(gw["key"])
+        if current_live is not None and current_live < gw["trough_min"]:
+            gw["trough_min"] = current_live
+            log.info("[GAP-WAIT] %s  new trough=%.4f  elapsed=%.1fs", asset.upper(), current_live, elapsed)
+
         if not check_gap_guard(asset, secs_into):
-            # Gap recovered within wait window — fire the buy
+            # Gap recovered within wait window — fire the buy using rolling trough
             gkey = gw["key"]
             if gkey not in pending_buys:
                 pending_buys[gkey] = {
                     "token_id":       gw["token"],
-                    "trough_min":     gw["price"],
+                    "trough_min":     gw["trough_min"],
                     "trough_time":    server_ts,
                     "spread_retries": 0,
                 }
                 log.info(
-                    "[GAP-CLEARED] %s  gap recovered after %.1fs — entering pending  price=%.4f",
-                    asset.upper(), elapsed, gw["price"],
+                    "[GAP-CLEARED] %s  gap recovered after %.1fs — entering pending  trough=%.4f",
+                    asset.upper(), elapsed, gw["trough_min"],
                 )
             del gap_wait[asset]
         elif elapsed >= GAP_WAIT_SECS:
@@ -1417,6 +1423,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 "key":          key,
                 "token":        check_token,
                 "price":        check_price,
+                "trough_min":   check_price,  # rolling lowest price during gap wait
             }
             log.info(
                 "[GAP-WAIT] %s  gap too wide — waiting %.0fs for recovery  price=%.4f",
