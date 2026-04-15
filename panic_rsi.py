@@ -185,8 +185,8 @@ GAP_SWING = {
 # Early market moves are expected — give more room; late market less room.
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min  : candle just opened, large moves normal
-    "mid":   3.0,   # 5–10 min : tightening
-    "late":  2.0,   # 10–15 min: move should be exhausting, tight filter
+    "mid":   2.5,   # 5–10 min : tightening
+    "late":  1.5,   # 10–15 min: move should be exhausting, tight filter
 }
 
 # --- Exit strategy -----------------------------------------------------------
