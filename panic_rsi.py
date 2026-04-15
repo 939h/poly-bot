@@ -263,7 +263,7 @@ last_pnl_snapshot  = 0      # unix timestamp of last pnl_history append
 # ── Startup window skip ───────────────────────────────────────────────────────
 # If the bot starts mid-window we cannot trust candle_open (we missed the open).
 # Skip all new entries for the first window seen; trade normally from the second.
-_skip_first_window   = False  # disabled — trade from the first window seen on startup
+_skip_first_window   = True   # True until we've seen a clean window boundary
 _startup_window_ts   = None   # window_start of the window we are skipping
 
 stats = {
