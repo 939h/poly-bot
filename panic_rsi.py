@@ -237,6 +237,9 @@ MAX_BOOK_SPREAD        = 0.02  # max acceptable ask-bid spread before skipping e
 SPREAD_MAX_RETRIES     = 10     # discard pending buy after this many consecutive wide-spread polls
 FORCE_STOP_SPREAD_RETRIES = 10  # force exit anyway after this many wide-spread checks at stop level
 
+# --- Gap guard wait ----------------------------------------------------------
+GAP_WAIT_SECS          = 10    # seconds to wait before discarding when gap > threshold
+
 # =============================================================================
 #  INTERNAL CONSTANTS — do not change these
 # =============================================================================
