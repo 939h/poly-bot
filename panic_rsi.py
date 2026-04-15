@@ -1348,7 +1348,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             return
         else:
             # A new window has begun — clear the flag and trade normally
-            _skip_first_window = True
+            _skip_first_window = False
             log.info("[SKIP-WINDOW] Clean window started — gap guard and trading now active")
 
     # ── Step 1.5: Re-check assets waiting on gap recovery ────────────────────
