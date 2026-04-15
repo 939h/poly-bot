@@ -166,7 +166,7 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.08   # condition 1: price must be below this (lottery zone)
+ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
@@ -212,7 +212,7 @@ STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into
 CONFIRM_REBOUND_MULT = 1.70  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.2  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
