@@ -1285,7 +1285,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         # Check rebound ratio
         rebound_ratio = current / pb["trough_min"] if pb["trough_min"] > 0 else 0.0
-        log.info("[TROUGH] %s  price=%.4f  trough=%.4f  ratio=%.3fx  need=%.2fx",
+        log.debug("[TROUGH] %s  price=%.4f  trough=%.4f  ratio=%.3fx  need=%.2fx",
                  key, current, pb["trough_min"], rebound_ratio, CONFIRM_REBOUND_MULT)
 
         if rebound_ratio >= CONFIRM_REBOUND_MULT:
