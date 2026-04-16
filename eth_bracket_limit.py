@@ -81,7 +81,7 @@ load_dotenv()
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
-ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
+ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "10"))        # shares per side
 CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves (midnight UTC)
 POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
