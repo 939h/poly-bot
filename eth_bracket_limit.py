@@ -57,6 +57,8 @@ try:
         OpenOrderParams,
         OrderType,
         ApiCreds,
+        BalanceAllowanceParams,
+        AssetType,
     )
     from py_clob_client.order_builder.constants import BUY, SELL
     from py_clob_client.constants import POLYGON
@@ -482,6 +484,45 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
             f"next cancel in {mins_left:.0f}m"
         )
 
+# ── Startup checks ───────────────────────────────────────────────────────────
+
+def find_open_buy_order(client: ClobClient, condition_id: str, token_id: str) -> str | None:
+    """
+    Return the order_id of an existing open BUY order for this token, or None.
+    Used on startup to avoid re-placing orders after a redeploy.
+    """
+    if DRY_RUN:
+        return None
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+        for o in (orders or []):
+            if o.get("asset_id") == token_id and o.get("side", "").upper() == "BUY":
+                oid = o.get("id") or o.get("orderID", "")
+                log.info(f"  [STARTUP] Existing open BUY order found: {oid}")
+                return oid
+    except Exception as e:
+        log.warning(f"  [STARTUP] open order check failed for {token_id[:12]}: {e}")
+    return None
+
+
+def get_token_position(client: ClobClient, token_id: str) -> int:
+    """
+    Return number of shares currently held for this conditional token.
+    Used on startup to detect filled positions from a previous run.
+    """
+    if DRY_RUN:
+        return 0
+    try:
+        resp = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        )
+        raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", 0)
+        return int(float(raw or 0))
+    except Exception as e:
+        log.warning(f"  [STARTUP] position check failed for {token_id[:12]}: {e}")
+    return 0
+
+
 # ── Per-date placement ────────────────────────────────────────────────────────
 
 def place_for_date(
@@ -533,6 +574,35 @@ def place_for_date(
         price = snap_price(ORDER_PRICE, tick)
         if price != ORDER_PRICE:
             log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
+
+        # ── Startup guard: don't re-place if already open or already filled ──
+        existing_oid = find_open_buy_order(client, condition_id, token_id)
+        if existing_oid:
+            log.info(f"  [STARTUP] Resuming monitor for existing order: {label}")
+            cancel_at = datetime(
+                target_date.year, target_date.month, target_date.day,
+                24 - CANCEL_BEFORE_END_HOURS, 0, 0, tzinfo=timezone.utc,
+            ).timestamp()
+            placed.append({
+                "label": label, "order_id": existing_oid,
+                "condition_id": condition_id, "token_id": token_id,
+                "buy_price": price, "cancel_at": cancel_at,
+            })
+            if skip_slugs is not None:
+                skip_slugs.add(slug)
+            continue
+
+        existing_shares = get_token_position(client, token_id)
+        if existing_shares > 0:
+            log.info(
+                f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
+                f" — placing sell tranches"
+            )
+            place_sell_tranches(client, token_id, label, existing_shares, price)
+            if skip_slugs is not None:
+                skip_slugs.add(slug)
+            continue
+        # ─────────────────────────────────────────────────────────────────────
 
         order_id = place_limit_order(
             client, token_id, label, price, ORDER_SIZE, BUY
