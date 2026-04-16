@@ -1046,7 +1046,18 @@ def main() -> None:
                 st_set_eth(eth, upper, lower)
 
                 all_orders: list[dict] = []
-                all_orders += place_for_date(client, today, upper, lower)
+
+                # Skip today if < 6h remain before midnight UTC resolution
+                utc_now  = datetime.now(timezone.utc)
+                hours_left = 24 - utc_now.hour - utc_now.minute / 60
+                if hours_left <= 6:
+                    log.info(
+                        f"[SKIP] {hours_left:.1f}h until market end — "
+                        f"skipping today's BUY orders (threshold: 6h)"
+                    )
+                else:
+                    all_orders += place_for_date(client, today, upper, lower)
+
                 placed_dates.add(today)
                 tmrw_placed.clear()  # new day — reset tomorrow tracking
 
