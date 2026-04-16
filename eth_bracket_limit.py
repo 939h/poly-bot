@@ -856,6 +856,39 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         time.sleep(POLL_SECS)
         now = time.time()
 
+        # ── Tick-size upgrade check ───────────────────────────────────────────
+        # If a snapped order (e.g. 0.01) can now be placed at the original price
+        # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
+        for oid in list(pending.keys()):
+            o = pending[oid]
+            placed_price = o["buy_price"]
+            if placed_price <= ORDER_PRICE:
+                continue  # already at desired price, nothing to do
+            new_tick = get_tick_size(client, o["token_id"], {})
+            ideal_price = snap_price(ORDER_PRICE, new_tick)
+            if ideal_price < placed_price:
+                log.info(
+                    f"  Tick upgrade detected for {o['label']}: "
+                    f"tick={new_tick}, re-placing at ${ideal_price} (was ${placed_price})"
+                )
+                cancel_order(client, oid, o["label"])
+                new_oid = place_limit_order(
+                    client, o["token_id"], o["label"], ideal_price, ORDER_SIZE, BUY
+                )
+                if new_oid:
+                    new_entry = dict(o)
+                    new_entry["order_id"] = new_oid
+                    new_entry["buy_price"] = ideal_price
+                    pending[new_oid] = new_entry
+                    st_buy_placed(
+                        o["label"], new_oid,
+                        o.get("bracket", 0), o.get("side_label", ""),
+                        o.get("target_date", datetime.now(timezone.utc).date()),
+                        ideal_price, ORDER_SIZE, o["cancel_at"], o["token_id"],
+                    )
+                pending.pop(oid)
+        # ─────────────────────────────────────────────────────────────────────
+
         # Group by condition_id to minimise API calls
         by_condition: dict[str, list[str]] = {}
         for oid, o in pending.items():
@@ -1009,6 +1042,7 @@ def place_for_date(
                 "label": label, "order_id": existing_oid,
                 "condition_id": condition_id, "token_id": token_id,
                 "buy_price": price, "cancel_at": cancel_at,
+                "bracket": bracket, "side_label": side_label, "target_date": target_date,
             })
             st_buy_existing(label, existing_oid, bracket, side_label,
                             target_date, price, ORDER_SIZE, cancel_at, token_id)
@@ -1042,6 +1076,9 @@ def place_for_date(
                 "token_id":     token_id,
                 "buy_price":    price,
                 "cancel_at":    cancel_at,
+                "bracket":      bracket,
+                "side_label":   side_label,
+                "target_date":  target_date,
             })
             st_buy_placed(label, order_id, bracket, side_label,
                           target_date, price, ORDER_SIZE, cancel_at, token_id)
