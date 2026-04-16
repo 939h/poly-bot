@@ -761,6 +761,16 @@ def place_sell_tranches(
     TP2  25% shares  at buy_price * 10
     TP3  remaining   at buy_price * 50
     """
+    # Re-verify actual wallet balance to avoid "not enough shares" errors
+    if not DRY_RUN:
+        actual = get_token_position(client, token_id)
+        if actual > 0 and actual < filled_shares:
+            log.warning(
+                f"  Share count mismatch for {label}: "
+                f"filled={filled_shares} but wallet={actual} — using wallet balance"
+            )
+            filled_shares = actual
+
     tp1_shares = math.floor(filled_shares * 0.50)
     tp2_shares = math.floor(filled_shares * 0.25)
     tp3_shares = filled_shares - tp1_shares - tp2_shares
@@ -911,6 +921,14 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                             + (f" ({-mins_to_end:.0f}m past deadline)" if mins_to_end < 0 else "")
                         )
                         cancel_order(client, oid, o["label"])
+                    # Check for partial fill before discarding
+                    partial = get_filled_shares(client, oid)
+                    if partial > 0:
+                        log.info(f"  Partial fill on cancelled order: {partial} shares — placing sells")
+                        st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
+                        place_sell_tranches(client, o["token_id"], o["label"], partial, o["buy_price"])
+                    else:
+                        st_buy_cancelled(oid)
                     pending.pop(oid)
                     continue
 
