@@ -540,22 +540,51 @@ def build_slug(bracket: int, target_date: date) -> str:
     return f"ethereum-above-{bracket}-on-{date_str}"
 
 
-def get_tick_size(market: dict) -> float:
+def get_tick_size(client, token_id: str, market: dict) -> float:
     """
     Return the minimum price tick for this market.
-    Reads minimumTickSize from Gamma market data; falls back to 0.01.
+
+    1. Try known Gamma API field names.
+    2. Infer from live orderbook ask-price increments.
+    3. Fall back to 0.01.
     """
-    raw = (
-        market.get("minimumTickSize")
-        or market.get("minimum_tick_size")
-        or market.get("minTickSize")
-    )
-    if raw is not None:
+    # 1. Gamma market fields
+    for key in ("minimumTickSize", "minimum_tick_size", "minTickSize", "tickSize"):
+        raw = market.get(key)
+        if raw is not None:
+            try:
+                v = float(raw)
+                if v > 0:
+                    log.info(f"  tick_size={v} (from market.{key})")
+                    return v
+            except (ValueError, TypeError):
+                pass
+
+    # 2. Infer from orderbook (skipped in dry-run — no client)
+    if client is not None and not DRY_RUN:
         try:
-            return float(raw)
-        except (ValueError, TypeError):
-            pass
-    return 0.01  # safe default
+            book = client.get_order_book(token_id)
+            asks = book.get("asks", []) if isinstance(book, dict) else getattr(book, "asks", [])
+            prices = sorted({
+                float(a["price"] if isinstance(a, dict) else getattr(a, "price", None))
+                for a in asks
+                if (a.get("price") if isinstance(a, dict) else getattr(a, "price", None)) is not None
+            })
+            if len(prices) >= 2:
+                diffs = [round(prices[i + 1] - prices[i], 6) for i in range(len(prices) - 1)]
+                min_diff = min((d for d in diffs if d > 0), default=None)
+                if min_diff is not None:
+                    tick = 0.001 if min_diff <= 0.005 else 0.01
+                    log.info(f"  tick_size={tick} (inferred from orderbook, min_diff={min_diff})")
+                    return tick
+        except Exception as e:
+            log.debug(f"  tick_size inference failed: {e}")
+
+    # 3. Finest tick in dry-run so ORDER_PRICE is not snapped unnecessarily
+    if DRY_RUN:
+        return 0.001
+
+    return 0.01
 
 
 def snap_price(price: float, tick: float) -> float:
@@ -959,7 +988,7 @@ def place_for_date(
         token_id = yes_tok if tok_idx == 0 else no_tok
         label = f"{side_label} {slug}"
 
-        tick  = get_tick_size(market)
+        tick  = get_tick_size(client, token_id, market)
         price = snap_price(ORDER_PRICE, tick)
         if price != ORDER_PRICE:
             log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
