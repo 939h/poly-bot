@@ -77,7 +77,7 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.01"))    # $ per share — min tick is $0.01
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_AFTER_HOURS = 4       # cancel unfilled BUY orders after this many hours
 POLL_SECS          = 60      # fill-check interval
@@ -452,11 +452,15 @@ def place_for_date(
     target_date: date,
     upper: int,
     lower: int,
+    skip_slugs: set[str] | None = None,
 ) -> list[dict]:
     """
     For a given date, place BUY limit orders on the upper (YES) and lower (NO)
     brackets. Returns a list of order dicts for the monitor loop.
     Silently skips any bracket whose market is not yet live.
+
+    skip_slugs: if provided, slugs already placed are skipped and newly placed
+                slugs are added to the set (used for tomorrow retry logic).
     """
     date_label = target_date.strftime("%b %-d")
     log.info(f"--- {date_label} | upper={upper} YES | lower={lower} NO ---")
@@ -469,6 +473,11 @@ def place_for_date(
 
     for bracket, side_label, tok_idx in brackets:
         slug = build_slug(bracket, target_date)
+
+        if skip_slugs is not None and slug in skip_slugs:
+            log.info(f"  Already placed: {slug} — skipping")
+            continue
+
         market = fetch_market(slug)
         if market is None:
             log.warning(f"  Market not found: {slug} — skipping")
@@ -495,6 +504,8 @@ def place_for_date(
                 "token_id":     token_id,
                 "buy_price":    ORDER_PRICE,
             })
+            if skip_slugs is not None:
+                skip_slugs.add(slug)
 
     return placed
 
@@ -511,7 +522,8 @@ def main() -> None:
     log.info("=" * 60)
 
     client = build_client()
-    placed_dates: set[date] = set()
+    placed_dates:     set[date] = set()  # today dates fully placed
+    tmrw_placed:      set[str]  = set()  # tomorrow slugs already placed (for retry)
 
     while True:
         today    = datetime.now(timezone.utc).date()
@@ -523,10 +535,13 @@ def main() -> None:
                 upper, lower = get_brackets(eth)
 
                 all_orders: list[dict] = []
-                all_orders += place_for_date(client, today,    upper, lower)
-                all_orders += place_for_date(client, tomorrow, upper, lower)
-
+                all_orders += place_for_date(client, today, upper, lower)
                 placed_dates.add(today)
+                tmrw_placed.clear()  # new day — reset tomorrow tracking
+
+                tmrw_orders = place_for_date(client, tomorrow, upper, lower,
+                                             skip_slugs=tmrw_placed)
+                all_orders += tmrw_orders
 
                 threading.Thread(
                     target=monitor_and_sell,
@@ -536,7 +551,24 @@ def main() -> None:
 
             except Exception as e:
                 log.error(f"Placement cycle failed: {e}")
-                # Don't add to placed_dates — retry next loop tick
+
+        else:
+            # Retry tomorrow brackets that weren't live yet when the day started
+            if len(tmrw_placed) < 2:
+                try:
+                    eth = fetch_eth_spot()
+                    upper, lower = get_brackets(eth)
+                    retry_orders = place_for_date(client, tomorrow, upper, lower,
+                                                  skip_slugs=tmrw_placed)
+                    if retry_orders:
+                        log.info(f"Tomorrow retry: placed {len(retry_orders)} new order(s).")
+                        threading.Thread(
+                            target=monitor_and_sell,
+                            args=(client, retry_orders),
+                            daemon=True,
+                        ).start()
+                except Exception as e:
+                    log.error(f"Tomorrow retry failed: {e}")
 
         time.sleep(LOOP_SLEEP)
 
