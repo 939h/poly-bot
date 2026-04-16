@@ -871,18 +871,10 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     f"  Tick upgrade detected for {o['label']}: "
                     f"tick={new_tick}, re-placing at ${ideal_price} (was ${placed_price})"
                 )
-                already_filled = get_filled_shares(client, oid)
                 cancel_order(client, oid, o["label"])
-                if already_filled > 0:
-                    log.info(f"  Partial fill before cancel: {already_filled} shares — handling as fill")
-                    st_buy_filled(oid, already_filled, o["token_id"], placed_price, o["label"])
-                    place_sell_tranches(client, o["token_id"], o["label"], already_filled, placed_price)
-                remaining = ORDER_SIZE - already_filled
-                new_oid = None
-                if remaining > 0:
-                    new_oid = place_limit_order(
-                        client, o["token_id"], o["label"], ideal_price, remaining, BUY
-                    )
+                new_oid = place_limit_order(
+                    client, o["token_id"], o["label"], ideal_price, ORDER_SIZE, BUY
+                )
                 if new_oid:
                     new_entry = dict(o)
                     new_entry["order_id"] = new_oid
@@ -892,7 +884,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                         o["label"], new_oid,
                         o.get("bracket", 0), o.get("side_label", ""),
                         o.get("target_date", datetime.now(timezone.utc).date()),
-                        ideal_price, remaining, o["cancel_at"], o["token_id"],
+                        ideal_price, ORDER_SIZE, o["cancel_at"], o["token_id"],
                     )
                 pending.pop(oid)
         # ─────────────────────────────────────────────────────────────────────
