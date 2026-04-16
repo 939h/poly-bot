@@ -19,7 +19,7 @@ Strategy:
     TP2  25% of shares  at buy_price * 10
     TP3  remaining 25%  at buy_price * 50
 
-  BUY orders are cancelled 2 hours before market resolution (22:00 UTC).
+  BUY orders are cancelled 2 hours before market resolution (14:00 UTC = midnight MYT-2h).
   SELL orders are placed-and-forget.
 
 Requirements:
@@ -82,7 +82,9 @@ load_dotenv()
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "10"))        # shares per side
-CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves (midnight UTC)
+CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
+MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
+MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
 POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
 
@@ -994,10 +996,11 @@ def place_for_date(
             log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
 
         # ── Startup guard: don't re-place if already open or already filled ──
-        cancel_at = datetime(
+        market_end = datetime(
             target_date.year, target_date.month, target_date.day,
-            24 - CANCEL_BEFORE_END_HOURS, 0, 0, tzinfo=timezone.utc,
-        ).timestamp()
+            MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc,
+        )
+        cancel_at = (market_end - timedelta(hours=CANCEL_BEFORE_END_HOURS)).timestamp()
 
         existing_oid = find_open_buy_order(client, condition_id, token_id)
         if existing_oid:
@@ -1076,9 +1079,11 @@ def main() -> None:
 
                 all_orders: list[dict] = []
 
-                # Skip today if < 6h remain before midnight UTC resolution
+                # Skip today if < 6h remain before market resolution (midnight MYT = 16:00 UTC)
                 utc_now  = datetime.now(timezone.utc)
-                hours_left = 24 - utc_now.hour - utc_now.minute / 60
+                market_end_utc = datetime(today.year, today.month, today.day,
+                                          MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
+                hours_left = (market_end_utc - utc_now).total_seconds() / 3600
                 if hours_left <= 6:
                     log.info(
                         f"[SKIP] {hours_left:.1f}h until market end — "
