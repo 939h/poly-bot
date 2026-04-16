@@ -45,6 +45,7 @@ import logging
 import threading
 import requests
 from datetime import datetime, timezone, timedelta, date
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 
@@ -85,8 +86,9 @@ CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market 
 POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
 
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API  = "https://clob.polymarket.com"
+GAMMA_API      = "https://gamma-api.polymarket.com"
+CLOB_API       = "https://clob.polymarket.com"
+HTTP_PORT      = int(os.getenv("DASHBOARD_PORT", "8765"))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -114,6 +116,385 @@ _file_handler = logging.FileHandler("eth_bracket_limit.log", encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter(_fmt))
 logging.basicConfig(level=logging.INFO, handlers=[_handler, _file_handler], force=True)
 log = logging.getLogger(__name__)
+
+# ── Global dashboard state ────────────────────────────────────────────────────
+
+_slock = threading.Lock()
+_state: dict = {
+    "mode":       "DRY RUN" if DRY_RUN else "LIVE",
+    "eth_price":  0.0,
+    "upper":      0,
+    "lower":      0,
+    "updated":    "",
+    "buy_orders": [],   # {id, label, bracket, side, date_str, price, size, cancel_at, status}
+    "positions":  [],   # {id, label, token_id, shares, buy_price, current_ask}
+    "sell_orders":[],   # {id, label, tp, shares, price, order_id, status}
+    "closed":     [],   # {label, side, buy_price, exit_type, exit_price, pnl, ts}
+    "stats": {
+        "deployed": 0.0, "fills": 0, "cancelled": 0,
+        "pnl": 0.0, "wins": 0, "losses": 0,
+    },
+}
+_next_id = 0
+
+def _new_id() -> int:
+    global _next_id
+    _next_id += 1
+    return _next_id
+
+def _now_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def st_set_eth(price: float, upper: int, lower: int) -> None:
+    with _slock:
+        _state["eth_price"] = price
+        _state["upper"]     = upper
+        _state["lower"]     = lower
+        _state["updated"]   = _now_str()
+
+def st_buy_placed(label: str, order_id: str, bracket: int, side: str,
+                  market_date: date, price: float, size: int, cancel_at: float,
+                  token_id: str) -> int:
+    rec_id = _new_id()
+    with _slock:
+        _state["buy_orders"].append({
+            "id": rec_id, "label": label, "order_id": order_id,
+            "bracket": bracket, "side": side,
+            "date_str": market_date.strftime("%b %-d"),
+            "price": price, "size": size, "cost": round(price * size, 4),
+            "cancel_at": cancel_at, "status": "OPEN", "token_id": token_id,
+        })
+        _state["stats"]["deployed"] = round(
+            _state["stats"]["deployed"] + price * size, 4)
+        _state["updated"] = _now_str()
+    return rec_id
+
+def st_buy_existing(label: str, order_id: str, bracket: int, side: str,
+                    market_date: date, price: float, size: int,
+                    cancel_at: float, token_id: str) -> int:
+    rec_id = _new_id()
+    with _slock:
+        _state["buy_orders"].append({
+            "id": rec_id, "label": label, "order_id": order_id,
+            "bracket": bracket, "side": side,
+            "date_str": market_date.strftime("%b %-d"),
+            "price": price, "size": size, "cost": round(price * size, 4),
+            "cancel_at": cancel_at, "status": "RESUMING", "token_id": token_id,
+        })
+        _state["updated"] = _now_str()
+    return rec_id
+
+def st_buy_filled(order_id: str, filled_shares: int, token_id: str,
+                  buy_price: float, label: str) -> int:
+    pos_id = _new_id()
+    with _slock:
+        for o in _state["buy_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "FILLED"
+                break
+        _state["positions"].append({
+            "id": pos_id, "label": label, "token_id": token_id,
+            "shares": filled_shares, "buy_price": buy_price,
+            "current_ask": None,
+        })
+        _state["stats"]["fills"] += 1
+        _state["updated"] = _now_str()
+    return pos_id
+
+def st_buy_cancelled(order_id: str) -> None:
+    with _slock:
+        for o in _state["buy_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "CANCELLED"
+                break
+        _state["stats"]["cancelled"] += 1
+        _state["updated"] = _now_str()
+
+def st_sell_placed(label: str, order_id: str, tp: int,
+                   shares: int, price: float) -> None:
+    with _slock:
+        _state["sell_orders"].append({
+            "id": _new_id(), "label": label, "order_id": order_id,
+            "tp": tp, "shares": shares, "price": price, "status": "OPEN",
+        })
+        _state["updated"] = _now_str()
+
+def st_update_ask(token_id: str, ask: float | None) -> None:
+    with _slock:
+        for p in _state["positions"]:
+            if p["token_id"] == token_id:
+                p["current_ask"] = ask
+        _state["updated"] = _now_str()
+
+def _state_snapshot() -> dict:
+    with _slock:
+        snap = json.loads(json.dumps(_state))   # deep copy via JSON
+    now = time.time()
+    for o in snap["buy_orders"]:
+        secs = o["cancel_at"] - now
+        o["cancel_dt"] = datetime.fromtimestamp(
+            o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+        o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
+    return snap
+
+# ── Dashboard HTML ────────────────────────────────────────────────────────────
+
+_DASH_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ETH Bracket Bot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e8edf5;font-size:14px;padding:20px}
+h2{font-size:14px;font-weight:600;margin:0 0 12px;color:#c8d0e0;text-transform:uppercase;letter-spacing:.06em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px}
+.card{background:#161b27;border:1px solid #2a3347;border-radius:10px;padding:14px}
+.card .lbl{font-size:11px;color:#5a6a85;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.card .val{font-size:20px;font-weight:700;font-family:monospace}
+.section{background:#161b27;border:1px solid #2a3347;border-radius:10px;padding:16px;margin-bottom:14px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:#5a6a85;font-weight:500;padding:0 8px 8px 0;font-size:11px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+td{padding:7px 8px 7px 0;border-top:1px solid #1e2535;font-family:monospace;font-size:12px;vertical-align:middle}
+td:first-child{font-family:system-ui;color:#c8d0e0}
+.green{color:#4ade9f}.red{color:#f87171}.amber{color:#fbbf24}.blue{color:#60a5fa}.dim{color:#5a6a85}.white{color:#e8edf5}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;font-family:monospace}
+.b-dry{background:#1e1608;color:#fbbf24;border:1px solid #5c3d08}
+.b-live{background:#1e0808;color:#f87171;border:1px solid #5c1d1d}
+.b-open{background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c}
+.b-fill{background:#0d2a1e;color:#4ade9f;border:1px solid #1a5c3a}
+.b-cancel{background:#1e1010;color:#f87171;border:1px solid #5c2020}
+.b-resume{background:#1e1e08;color:#fbbf24;border:1px solid #5c5008}
+.b-tp1{background:#0d2a2a;color:#67e8f9;border:1px solid #0e6b6b}
+.b-tp2{background:#1a0d2a;color:#c084fc;border:1px solid #5c2a8a}
+.b-tp3{background:#2a1a0d;color:#fb923c;border:1px solid #8a5a1a}
+.pos-card{background:#1a2130;border:1px solid #2a3347;border-radius:8px;padding:12px;margin-bottom:8px}
+.pos-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px}
+.pos-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#8a9ab5;font-family:monospace}
+.tp-row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.tp-pill{padding:4px 10px;border-radius:6px;font-size:11px;font-family:monospace;font-weight:600}
+.hdr-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#4ade9f;margin-right:6px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.refresh-badge{font-size:11px;color:#5a6a85}
+footer{text-align:center;color:#2a3347;font-size:11px;margin-top:16px;padding-bottom:8px}
+</style>
+</head>
+<body>
+<div id="root"><p style="color:#5a6a85;padding:40px;text-align:center">Loading...</p></div>
+<script>
+function fmt2(v){return v!=null?'$'+parseFloat(v).toFixed(2):'—'}
+function fmt4(v){return v!=null?'$'+parseFloat(v).toFixed(4):'—'}
+function fmtPnl(v){
+  const n=parseFloat(v)||0;
+  return `<span class="${n>0?'green':n<0?'red':'dim'}">${n>=0?'+':''}$${Math.abs(n).toFixed(4)}</span>`;
+}
+function badge(cls,txt){return `<span class="badge ${cls}">${txt}</span>`}
+function statusBadge(s){
+  const m={OPEN:'b-open',FILLED:'b-fill',CANCELLED:'b-cancel',RESUMING:'b-resume'};
+  return badge(m[s]||'b-open',s);
+}
+function tpBadge(tp){return badge(['','b-tp1','b-tp2','b-tp3'][tp]||'b-tp1','TP'+tp)}
+
+function render(s){
+  const st=s.stats||{};
+  const pnl=parseFloat(st.pnl||0);
+  const mode=s.mode==='DRY RUN'?badge('b-dry','DRY RUN'):badge('b-live','⚡ LIVE');
+  const buys=s.buy_orders||[];
+  const pos=s.positions||[];
+  const sells=s.sell_orders||[];
+  const closed=s.closed||[];
+  const openBuys=buys.filter(o=>o.status==='OPEN'||o.status==='RESUMING').length;
+  const totalCost=buys.filter(o=>o.status!=='CANCELLED').reduce((a,o)=>a+(o.cost||0),0);
+
+  // BUY orders table
+  const buyRows=buys.length?buys.map(o=>{
+    const tLeft=o.mins_left>0?
+      (o.mins_left>60?`${(o.mins_left/60).toFixed(1)}h`:`${Math.round(o.mins_left)}m`)
+      :'<span class="red">past</span>';
+    return `<tr>
+      <td>${o.date_str}</td>
+      <td>${o.bracket.toLocaleString()}</td>
+      <td class="${o.side==='YES'?'green':'amber'}">${o.side}</td>
+      <td>${fmt4(o.price)}</td>
+      <td>${(o.size||0).toLocaleString()}</td>
+      <td>${fmt4(o.cost)}</td>
+      <td>${statusBadge(o.status)}</td>
+      <td>${o.cancel_dt}</td>
+      <td>${tLeft}</td>
+    </tr>`;
+  }).join('')
+  :'<tr><td colspan="9" class="dim" style="padding:12px 0">No BUY orders placed yet</td></tr>';
+
+  // Position cards
+  const posCards=pos.length?pos.map(p=>{
+    const ask=p.current_ask!=null?fmt4(p.current_ask):'<span class="dim">—</span>';
+    const unreal=p.current_ask!=null?fmtPnl((p.current_ask-p.buy_price)*p.shares):'<span class="dim">—</span>';
+    const sellsForPos=sells.filter(o=>o.label&&o.label.startsWith(p.label));
+    const tpPills=sellsForPos.map(o=>`
+      <div class="tp-pill ${['','b-tp1','b-tp2','b-tp3'][o.tp]||'b-tp1'}">
+        TP${o.tp} ${o.shares}sh @ ${fmt4(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
+      </div>`).join('');
+    return `<div class="pos-card">
+      <div class="pos-hdr">
+        <strong style="font-size:13px">${p.label}</strong>
+        <span class="green" style="font-size:12px">${p.shares} shares filled</span>
+      </div>
+      <div class="pos-meta">
+        <span>Buy @ ${fmt4(p.buy_price)}</span>
+        <span>Ask ${ask}</span>
+        <span>Unrealised ${unreal}</span>
+        <span>Cost ${fmt4(p.buy_price*p.shares)}</span>
+      </div>
+      ${tpPills?`<div class="tp-row">${tpPills}</div>`:''}
+    </div>`;
+  }).join('')
+  :'<p class="dim" style="padding:8px 0;font-size:12px">No filled positions</p>';
+
+  // Closed trades table
+  const closedRows=closed.length?closed.map(c=>`<tr>
+    <td>${c.ts||'—'}</td>
+    <td>${c.label||'—'}</td>
+    <td class="${c.side==='YES'?'green':'amber'}">${c.side||'—'}</td>
+    <td>${fmt4(c.buy_price)}</td>
+    <td>${badge(c.exit_type==='CANCEL'?'b-cancel':c.exit_type==='TP1'?'b-tp1':c.exit_type==='TP2'?'b-tp2':'b-tp3',c.exit_type||'—')}</td>
+    <td>${c.exit_price!=null?fmt4(c.exit_price):'—'}</td>
+    <td>${fmtPnl(c.pnl)}</td>
+  </tr>`).join('')
+  :'<tr><td colspan="7" class="dim" style="padding:12px 0">No closed trades yet</td></tr>';
+
+  document.getElementById('root').innerHTML=`
+    <div class="hdr-row">
+      <div style="display:flex;align-items:center;gap:10px">
+        <strong style="font-size:18px;letter-spacing:-.5px">ETH <span class="blue">Bracket</span> Bot</strong>
+        ${mode}
+      </div>
+      <div style="font-size:12px;color:#5a6a85">
+        <span class="dot"></span>${s.updated||'—'} &nbsp;
+        <span class="refresh-badge">↻ 10s</span>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><div class="lbl">ETH Price</div><div class="val white">$${s.eth_price?s.eth_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</div></div>
+      <div class="card"><div class="lbl">Upper Bracket</div><div class="val green">${s.upper?'$'+s.upper.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Lower Bracket</div><div class="val amber">${s.lower?'$'+s.lower.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Open Orders</div><div class="val blue">${openBuys}</div></div>
+      <div class="card"><div class="lbl">Filled</div><div class="val green">${st.fills||0}</div></div>
+      <div class="card"><div class="lbl">Cancelled</div><div class="val ${(st.cancelled||0)>0?'red':'dim'}">${st.cancelled||0}</div></div>
+      <div class="card"><div class="lbl">Cost</div><div class="val">${fmt4(totalCost)}</div></div>
+      <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnl>0?'green':pnl<0?'red':'dim'}">${pnl>=0?'+':''}${fmt4(pnl)}</div></div>
+    </div>
+
+    <div class="section">
+      <h2>BUY Orders (${buys.length})</h2>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Bracket</th><th>Side</th><th>Price</th>
+          <th>Shares</th><th>Cost</th><th>Status</th><th>Cancel At</th><th>Time Left</th>
+        </tr></thead>
+        <tbody>${buyRows}</tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Positions — Filled &amp; Awaiting Sell (${pos.length})</h2>
+      ${posCards}
+    </div>
+
+    <div class="section">
+      <h2>Sell Orders (${sells.length})</h2>
+      ${sells.length?`<div style="overflow-x:auto"><table>
+        <thead><tr><th>Market</th><th>TP</th><th>Shares</th><th>Sell @</th><th>Status</th></tr></thead>
+        <tbody>${sells.map(o=>`<tr>
+          <td>${o.label||'—'}</td>
+          <td>${tpBadge(o.tp)}</td>
+          <td>${o.shares}</td>
+          <td>${fmt4(o.price)}</td>
+          <td>${statusBadge(o.status)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+      :'<p class="dim" style="font-size:12px;padding:4px 0">No sell orders yet</p>'}
+    </div>
+
+    <div class="section">
+      <h2>Closed Trades (${closed.length})</h2>
+      <div style="overflow-x:auto"><table>
+        <thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Buy @</th><th>Exit</th><th>Exit @</th><th>PnL</th></tr></thead>
+        <tbody>${closedRows}</tbody>
+      </table></div>
+    </div>
+
+    <div class="section">
+      <h2>Settings</h2>
+      <table style="max-width:480px"><tbody>
+        <tr><td style="color:#5a6a85">Order price</td><td>$${(${ORDER_PRICE}||0.004).toFixed(4)}</td>
+            <td style="color:#5a6a85;padding-left:24px">Order size</td><td>${ORDER_SIZE} shares</td></tr>
+        <tr><td style="color:#5a6a85">Cancel before</td><td>${CANCEL_BEFORE_END_HOURS}h before market end</td>
+            <td style="color:#5a6a85;padding-left:24px">Poll interval</td><td>${POLL_SECS}s</td></tr>
+        <tr><td style="color:#5a6a85">TP1</td><td>50% @ 2x</td>
+            <td style="color:#5a6a85;padding-left:24px">TP2</td><td>25% @ 10x</td></tr>
+        <tr><td style="color:#5a6a85">TP3</td><td>25% @ 50x</td>
+            <td style="color:#5a6a85;padding-left:24px">Dashboard</td><td>:${HTTP_PORT}</td></tr>
+      </tbody></table>
+    </div>
+
+    <footer>Auto-refreshes every 10s &nbsp;&mdash;&nbsp; ETH Bracket Bot</footer>`;
+}
+
+async function poll(){
+  try{
+    const r=await fetch('/state');
+    const d=await r.json();
+    render(d);
+  }catch(e){console.error('fetch error',e);}
+}
+poll();
+setInterval(poll,10000);
+</script>
+</body>
+</html>"""
+
+# Replace JS template placeholders with Python values at module load
+_DASH_HTML = (
+    _DASH_HTML
+    .replace("${ORDER_PRICE}", str(ORDER_PRICE))
+    .replace("${ORDER_SIZE}", str(ORDER_SIZE))
+    .replace("${CANCEL_BEFORE_END_HOURS}", str(CANCEL_BEFORE_END_HOURS))
+    .replace("${POLL_SECS}", str(POLL_SECS))
+    .replace("${HTTP_PORT}", str(HTTP_PORT))
+)
+
+
+class _DashHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/state":
+            data = json.dumps(_state_snapshot()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            body = _DASH_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # silence access log
+        pass
+
+
+def start_dashboard():
+    server = HTTPServer(("0.0.0.0", HTTP_PORT), _DashHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log.info("[DASH] Dashboard running on http://0.0.0.0:%d", HTTP_PORT)
 
 # ── Binance ───────────────────────────────────────────────────────────────────
 
@@ -366,13 +747,18 @@ def place_sell_tranches(
     else:
         log.info(f"  [DRY RUN] TP1 would check orderbook; using 2x=${tp1_base}")
 
+    tp2_price = round(buy_price * 10, 4)
+    tp3_price = round(buy_price * 50, 4)
     log.info(
         f"  Placing sell tranches for {label}"
         f" | filled={filled_shares} shares | buy_price=${buy_price}"
     )
-    place_limit_order(client, token_id, f"{label}-TP1", tp1_base,  tp1_shares, SELL)
-    place_limit_order(client, token_id, f"{label}-TP2", round(buy_price * 10, 4), tp2_shares, SELL)
-    place_limit_order(client, token_id, f"{label}-TP3", round(buy_price * 50, 4), tp3_shares, SELL)
+    for tp_num, (tp_shares, tp_price) in enumerate(
+        [(tp1_shares, tp1_base), (tp2_shares, tp2_price), (tp3_shares, tp3_price)], 1
+    ):
+        oid = place_limit_order(client, token_id, f"{label}-TP{tp_num}", tp_price, tp_shares, SELL)
+        if oid:
+            st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
 
 
 def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
@@ -393,10 +779,12 @@ def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
     """Cancel a single order by ID."""
     if DRY_RUN:
         log.info(f"  [DRY RUN] CANCEL {label} order_id={order_id}")
+        st_buy_cancelled(order_id)
         return
     try:
         client.cancel(order_id)
         log.info(f"  CANCELLED {label} order_id={order_id}")
+        st_buy_cancelled(order_id)
     except Exception as e:
         log.error(f"  Cancel failed ({label} / {order_id}): {e}")
 
@@ -468,6 +856,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     filled = get_filled_shares(client, oid)
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
+                        st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
                         place_sell_tranches(client, o["token_id"], o["label"], filled, o["buy_price"])
                     else:
                         log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
@@ -576,18 +965,21 @@ def place_for_date(
             log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
 
         # ── Startup guard: don't re-place if already open or already filled ──
+        cancel_at = datetime(
+            target_date.year, target_date.month, target_date.day,
+            24 - CANCEL_BEFORE_END_HOURS, 0, 0, tzinfo=timezone.utc,
+        ).timestamp()
+
         existing_oid = find_open_buy_order(client, condition_id, token_id)
         if existing_oid:
             log.info(f"  [STARTUP] Resuming monitor for existing order: {label}")
-            cancel_at = datetime(
-                target_date.year, target_date.month, target_date.day,
-                24 - CANCEL_BEFORE_END_HOURS, 0, 0, tzinfo=timezone.utc,
-            ).timestamp()
             placed.append({
                 "label": label, "order_id": existing_oid,
                 "condition_id": condition_id, "token_id": token_id,
                 "buy_price": price, "cancel_at": cancel_at,
             })
+            st_buy_existing(label, existing_oid, bracket, side_label,
+                            target_date, price, ORDER_SIZE, cancel_at, token_id)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
             continue
@@ -598,6 +990,8 @@ def place_for_date(
                 f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                 f" — placing sell tranches"
             )
+            st_buy_filled("startup-" + token_id[:8], existing_shares,
+                          token_id, price, label)
             place_sell_tranches(client, token_id, label, existing_shares, price)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
@@ -609,12 +1003,6 @@ def place_for_date(
         )
 
         if order_id:
-            # Cancel deadline = 22:00 UTC on market date (2h before midnight resolution)
-            cancel_at = datetime(
-                target_date.year, target_date.month, target_date.day,
-                24 - CANCEL_BEFORE_END_HOURS, 0, 0,
-                tzinfo=timezone.utc,
-            ).timestamp()
             placed.append({
                 "label":        label,
                 "order_id":     order_id,
@@ -623,6 +1011,8 @@ def place_for_date(
                 "buy_price":    price,
                 "cancel_at":    cancel_at,
             })
+            st_buy_placed(label, order_id, bracket, side_label,
+                          target_date, price, ORDER_SIZE, cancel_at, token_id)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
 
@@ -640,6 +1030,7 @@ def main() -> None:
     log.info(f"TP3   : 25% @ 50x = ${ORDER_PRICE * 50:.4f}")
     log.info("=" * 60)
 
+    start_dashboard()
     client = build_client()
     placed_dates:     set[date] = set()  # today dates fully placed
     tmrw_placed:      set[str]  = set()  # tomorrow slugs already placed (for retry)
@@ -652,6 +1043,7 @@ def main() -> None:
             try:
                 eth   = fetch_eth_spot()
                 upper, lower = get_brackets(eth)
+                st_set_eth(eth, upper, lower)
 
                 all_orders: list[dict] = []
                 all_orders += place_for_date(client, today, upper, lower)
@@ -677,6 +1069,7 @@ def main() -> None:
                 try:
                     eth = fetch_eth_spot()
                     upper, lower = get_brackets(eth)
+                    st_set_eth(eth, upper, lower)
                     retry_orders = place_for_date(client, tomorrow, upper, lower,
                                                   skip_slugs=tmrw_placed)
                     if retry_orders:
