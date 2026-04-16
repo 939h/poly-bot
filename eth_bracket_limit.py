@@ -1068,7 +1068,13 @@ def main() -> None:
     tmrw_placed:      set[str]  = set()  # tomorrow slugs already placed (for retry)
 
     while True:
-        today    = datetime.now(timezone.utc).date()
+        utc_now  = datetime.now(timezone.utc)
+        # After market close (16:00 UTC), the active window shifts forward —
+        # Apr 16 closes at 16:00 UTC, so from then "today" is Apr 17 and "tomorrow" is Apr 18.
+        if utc_now.hour >= MARKET_END_UTC_HOUR:
+            today = utc_now.date() + timedelta(days=1)
+        else:
+            today = utc_now.date()
         tomorrow = today + timedelta(days=1)
 
         if today not in placed_dates:
@@ -1080,7 +1086,6 @@ def main() -> None:
                 all_orders: list[dict] = []
 
                 # Skip today if < 6h remain before market resolution (midnight MYT = 16:00 UTC)
-                utc_now  = datetime.now(timezone.utc)
                 market_end_utc = datetime(today.year, today.month, today.day,
                                           MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
                 hours_left = (market_end_utc - utc_now).total_seconds() / 3600
