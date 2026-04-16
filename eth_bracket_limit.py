@@ -77,7 +77,7 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.01"))    # $ per share — min tick is $0.01
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_AFTER_HOURS = 4       # cancel unfilled BUY orders after this many hours
 POLL_SECS          = 60      # fill-check interval
@@ -155,6 +155,30 @@ def build_slug(bracket: int, target_date: date) -> str:
     """
     date_str = target_date.strftime("%B-%-d").lower()
     return f"ethereum-above-{bracket}-on-{date_str}"
+
+
+def get_tick_size(market: dict) -> float:
+    """
+    Return the minimum price tick for this market.
+    Reads minimumTickSize from Gamma market data; falls back to 0.01.
+    """
+    raw = (
+        market.get("minimumTickSize")
+        or market.get("minimum_tick_size")
+        or market.get("minTickSize")
+    )
+    if raw is not None:
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            pass
+    return 0.01  # safe default
+
+
+def snap_price(price: float, tick: float) -> float:
+    """Round price UP to the nearest valid tick increment."""
+    snapped = math.ceil(round(price / tick, 10)) * tick
+    return round(snapped, 10)
 
 
 def fetch_market(slug: str) -> dict | None:
@@ -492,8 +516,13 @@ def place_for_date(
         token_id = yes_tok if tok_idx == 0 else no_tok
         label = f"{side_label} {slug}"
 
+        tick  = get_tick_size(market)
+        price = snap_price(ORDER_PRICE, tick)
+        if price != ORDER_PRICE:
+            log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
+
         order_id = place_limit_order(
-            client, token_id, label, ORDER_PRICE, ORDER_SIZE, BUY
+            client, token_id, label, price, ORDER_SIZE, BUY
         )
 
         if order_id:
@@ -502,7 +531,7 @@ def place_for_date(
                 "order_id":     order_id,
                 "condition_id": condition_id,
                 "token_id":     token_id,
-                "buy_price":    ORDER_PRICE,
+                "buy_price":    price,
             })
             if skip_slugs is not None:
                 skip_slugs.add(slug)
