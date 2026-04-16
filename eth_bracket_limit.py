@@ -77,7 +77,7 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.001"))   # $ per share
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_AFTER_HOURS = 4       # cancel unfilled BUY orders after this many hours
 POLL_SECS          = 60      # fill-check interval
