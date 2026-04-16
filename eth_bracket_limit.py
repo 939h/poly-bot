@@ -19,7 +19,7 @@ Strategy:
     TP2  25% of shares  at buy_price * 10
     TP3  remaining 25%  at buy_price * 50
 
-  BUY orders are cancelled after CANCEL_AFTER_HOURS if unfilled.
+  BUY orders are cancelled 2 hours before market resolution (22:00 UTC).
   SELL orders are placed-and-forget.
 
 Requirements:
@@ -79,7 +79,7 @@ load_dotenv()
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
-CANCEL_AFTER_HOURS = 4       # cancel unfilled BUY orders after this many hours
+CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves (midnight UTC)
 POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
 
@@ -417,17 +417,19 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
             place_sell_tranches(client, o["token_id"], o["label"], ORDER_SIZE, o["buy_price"])
         return
 
-    deadline = time.time() + CANCEL_AFTER_HOURS * 3600
-    pending  = {o["order_id"]: o for o in orders if o.get("order_id")}
+    pending = {o["order_id"]: o for o in orders if o.get("order_id")}
 
     if not pending:
         log.warning("No valid order IDs to monitor.")
         return
 
-    log.info(
-        f"Monitoring {len(pending)} order(s) — "
-        f"cancel deadline in {CANCEL_AFTER_HOURS}h"
-    )
+    for o in pending.values():
+        cancel_dt = datetime.fromtimestamp(o["cancel_at"], tz=timezone.utc)
+        log.info(
+            f"  Monitoring {o['label']} — "
+            f"cancel at {cancel_dt.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"({CANCEL_BEFORE_END_HOURS}h before market end)"
+        )
 
     while pending:
         time.sleep(POLL_SECS)
@@ -440,9 +442,27 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
 
         for cid, oids in by_condition.items():
             open_ids = get_open_order_ids(client, cid)
-            for oid in oids:
-                if oid not in open_ids and oid in pending:
-                    o = pending.pop(oid)
+            for oid in list(oids):
+                if oid not in pending:
+                    continue
+                o = pending[oid]
+
+                # Cancel if deadline passed and order still open
+                if now >= o["cancel_at"]:
+                    if oid in open_ids:
+                        mins_to_end = (o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600 - now) / 60
+                        log.warning(
+                            f"  Cancelling {o['label']} — "
+                            f"{CANCEL_BEFORE_END_HOURS}h before market end"
+                            + (f" ({-mins_to_end:.0f}m past deadline)" if mins_to_end < 0 else "")
+                        )
+                        cancel_order(client, oid, o["label"])
+                    pending.pop(oid)
+                    continue
+
+                # Detect fill (order no longer open)
+                if oid not in open_ids:
+                    pending.pop(oid)
                     filled = get_filled_shares(client, oid)
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
@@ -454,19 +474,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
             log.info("All orders filled or gone.")
             return
 
-        if now >= deadline:
-            log.warning(
-                f"Timeout — cancelling {len(pending)} unfilled order(s): "
-                + ", ".join(pending[oid]["label"] for oid in pending)
-            )
-            for oid, o in list(pending.items()):
-                cancel_order(client, oid, o["label"])
-            return
-
-        remaining_min = (deadline - now) / 60
+        # Status line — show closest cancel deadline
+        earliest = min(o["cancel_at"] for o in pending.values())
+        mins_left = (earliest - now) / 60
         log.info(
-            f"Waiting on {[pending[oid]['label'] for oid in pending]} | "
-            f"{remaining_min:.0f}m until cancel"
+            f"  Waiting on {len(pending)} order(s) | "
+            f"next cancel in {mins_left:.0f}m"
         )
 
 # ── Per-date placement ────────────────────────────────────────────────────────
@@ -526,12 +539,19 @@ def place_for_date(
         )
 
         if order_id:
+            # Cancel deadline = 22:00 UTC on market date (2h before midnight resolution)
+            cancel_at = datetime(
+                target_date.year, target_date.month, target_date.day,
+                24 - CANCEL_BEFORE_END_HOURS, 0, 0,
+                tzinfo=timezone.utc,
+            ).timestamp()
             placed.append({
                 "label":        label,
                 "order_id":     order_id,
                 "condition_id": condition_id,
                 "token_id":     token_id,
                 "buy_price":    price,
+                "cancel_at":    cancel_at,
             })
             if skip_slugs is not None:
                 skip_slugs.add(slug)
