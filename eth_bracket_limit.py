@@ -504,14 +504,16 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table style="max-width:480px"><tbody>
-        <tr><td style="color:#5a6a85">Order price</td><td>$${(${ORDER_PRICE}||0.004).toFixed(4)}</td>
-            <td style="color:#5a6a85;padding-left:24px">Order size</td><td>${ORDER_SIZE} shares</td></tr>
-        <tr><td style="color:#5a6a85">Cancel before</td><td>${CANCEL_BEFORE_END_HOURS}h before market end</td>
-            <td style="color:#5a6a85;padding-left:24px">Poll interval</td><td>${POLL_SECS}s</td></tr>
+        <tr><td style="color:#5a6a85">Inner price</td><td>$${(${ORDER_PRICE}||0.004).toFixed(4)}</td>
+            <td style="color:#5a6a85;padding-left:24px">Outer price</td><td>$${(${ORDER_PRICE_EXT}||0.002).toFixed(4)}</td></tr>
+        <tr><td style="color:#5a6a85">Order size</td><td>${ORDER_SIZE} shares</td>
+            <td style="color:#5a6a85;padding-left:24px">Cancel before</td><td>${CANCEL_BEFORE_END_HOURS}h before end</td></tr>
+        <tr><td style="color:#5a6a85">Poll interval</td><td>${POLL_SECS}s</td>
+            <td style="color:#5a6a85;padding-left:24px">Dashboard</td><td>:${HTTP_PORT}</td></tr>
         <tr><td style="color:#5a6a85">TP1</td><td>50% @ 2x</td>
             <td style="color:#5a6a85;padding-left:24px">TP2</td><td>25% @ 10x</td></tr>
         <tr><td style="color:#5a6a85">TP3</td><td>25% @ 50x</td>
-            <td style="color:#5a6a85;padding-left:24px">Dashboard</td><td>:${HTTP_PORT}</td></tr>
+            <td></td><td></td></tr>
       </tbody></table>
     </div>
 
@@ -534,6 +536,7 @@ setInterval(poll,10000);
 # Replace JS template placeholders with Python values at module load
 _DASH_HTML = (
     _DASH_HTML
+    .replace("${ORDER_PRICE_EXT}", str(ORDER_PRICE_EXT))
     .replace("${ORDER_PRICE}", str(ORDER_PRICE))
     .replace("${ORDER_SIZE}", str(ORDER_SIZE))
     .replace("${CANCEL_BEFORE_END_HOURS}", str(CANCEL_BEFORE_END_HOURS))
@@ -1298,7 +1301,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info("ETH Daily Bracket Limit Order Bot")
     log.info(f"Mode  : {'DRY RUN' if DRY_RUN else 'LIVE'}")
-    log.info(f"Order : {ORDER_SIZE} shares @ ${ORDER_PRICE} each side")
+    log.info(f"Order : {ORDER_SIZE} shares | inner=${ORDER_PRICE} | outer=${ORDER_PRICE_EXT}")
     log.info(f"TP1   : 50% @ 2x = ${ORDER_PRICE * 2:.4f}  (or best ask if higher)")
     log.info(f"TP2   : 25% @ 10x = ${ORDER_PRICE * 10:.4f}")
     log.info(f"TP3   : 25% @ 50x = ${ORDER_PRICE * 50:.4f}")
