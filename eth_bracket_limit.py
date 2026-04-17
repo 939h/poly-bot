@@ -397,6 +397,7 @@ function render(s){
   const closed=s.closed||[];
   const openBuys=buys.filter(o=>o.status==='OPEN'||o.status==='RESUMING').length;
   const totalCost=buys.filter(o=>o.status!=='CANCELLED').reduce((a,o)=>a+(o.cost||0),0);
+  const filledCost=buys.filter(o=>o.status==='FILLED').reduce((a,o)=>a+(o.cost||0),0);
 
   // BUY orders table
   const buyRows=buys.length?buys.map(o=>{
@@ -475,7 +476,8 @@ function render(s){
       <div class="card"><div class="lbl">Open Orders</div><div class="val blue">${openBuys}</div></div>
       <div class="card"><div class="lbl">Filled</div><div class="val green">${st.fills||0}</div></div>
       <div class="card"><div class="lbl">Cancelled</div><div class="val ${(st.cancelled||0)>0?'red':'dim'}">${st.cancelled||0}</div></div>
-      <div class="card"><div class="lbl">Cost</div><div class="val">${fmt4(totalCost)}</div></div>
+      <div class="card"><div class="lbl">Deployed</div><div class="val dim">${fmt4(totalCost)}</div></div>
+      <div class="card"><div class="lbl">Filled Cost</div><div class="val ${filledCost>0?'green':'dim'}">${fmt4(filledCost)}</div></div>
       <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnl>0?'green':pnl<0?'red':'dim'}">${pnl>=0?'+':''}${fmt4(pnl)}</div></div>
     </div>
 
