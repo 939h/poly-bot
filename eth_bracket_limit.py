@@ -80,8 +80,8 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.002"))   # $ per share — snapped to market tick
-ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "20"))        # shares per side
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.003"))   # $ per share — snapped to market tick
+ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "200"))        # shares per side
 CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
