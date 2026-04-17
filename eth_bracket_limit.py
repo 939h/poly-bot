@@ -80,7 +80,8 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brackets (upper/lower)
+ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
@@ -190,7 +191,9 @@ _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
     "upper":      0,
+    "upper2":     0,
     "lower":      0,
+    "lower2":     0,
     "updated":    "",
     "buy_orders": [],   # {id, label, bracket, side, date_str, price, size, cancel_at, status}
     "positions":  [],   # {id, label, token_id, shares, buy_price, current_ask}
@@ -211,11 +214,13 @@ def _new_id() -> int:
 def _now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def st_set_eth(price: float, upper: int, lower: int) -> None:
+def st_set_eth(price: float, upper: int, upper2: int, lower: int, lower2: int) -> None:
     with _slock:
         _state["eth_price"] = price
         _state["upper"]     = upper
+        _state["upper2"]    = upper2
         _state["lower"]     = lower
+        _state["lower2"]    = lower2
         _state["updated"]   = _now_str()
 
 def st_buy_placed(label: str, order_id: str, bracket: int, side: str,
@@ -445,7 +450,9 @@ function render(s){
     <div class="grid">
       <div class="card"><div class="lbl">ETH Price</div><div class="val white">$${s.eth_price?s.eth_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</div></div>
       <div class="card"><div class="lbl">Upper Bracket</div><div class="val green">${s.upper?'$'+s.upper.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Upper 2</div><div class="val green">${s.upper2?'$'+s.upper2.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Lower Bracket</div><div class="val amber">${s.lower?'$'+s.lower.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Lower 2</div><div class="val amber">${s.lower2?'$'+s.lower2.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Open Orders</div><div class="val blue">${openBuys}</div></div>
       <div class="card"><div class="lbl">Filled</div><div class="val green">${st.fills||0}</div></div>
       <div class="card"><div class="lbl">Cancelled</div><div class="val ${(st.cancelled||0)>0?'red':'dim'}">${st.cancelled||0}</div></div>
@@ -581,18 +588,22 @@ def fetch_eth_spot() -> float:
 
 # ── Bracket ───────────────────────────────────────────────────────────────────
 
-def get_brackets(eth_price: float) -> tuple[int, int]:
+def get_brackets(eth_price: float) -> tuple[int, int, int, int]:
     """
-    Return (upper_bracket, lower_bracket) based on ETH spot price.
+    Return (upper, upper2, lower, lower2) based on ETH spot price.
 
     Example: eth_price = 2333
-      upper = ceil(2333 / 100) * 100       = 2400
-      lower = floor(2333 / 100) * 100 - 100 = 2200
+      upper  = ceil(2333/100)*100       = 2400
+      upper2 = upper + 100              = 2500
+      lower  = floor(2333/100)*100-100  = 2200
+      lower2 = lower - 100              = 2100
     """
-    upper = int(math.ceil(eth_price / 100) * 100)
-    lower = int(math.floor(eth_price / 100) * 100) - 100
-    log.info(f"Brackets: upper={upper}, lower={lower} (ETH ${eth_price:,.2f})")
-    return upper, lower
+    upper  = int(math.ceil(eth_price / 100) * 100)
+    upper2 = upper + 100
+    lower  = int(math.floor(eth_price / 100) * 100) - 100
+    lower2 = lower - 100
+    log.info(f"Brackets: upper={upper}/{upper2}, lower={lower}/{lower2} (ETH ${eth_price:,.2f})")
+    return upper, upper2, lower, lower2
 
 # ── Slug / Market ─────────────────────────────────────────────────────────────
 
@@ -1007,11 +1018,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
-            placed_price = o["buy_price"]
-            if placed_price <= ORDER_PRICE:
+            placed_price   = o["buy_price"]
+            intended_price = o.get("intended_price", ORDER_PRICE)
+            if placed_price <= intended_price:
                 continue  # already at desired price, nothing to do
             new_tick = get_tick_size(client, o["token_id"], {})
-            ideal_price = snap_price(ORDER_PRICE, new_tick)
+            ideal_price = snap_price(intended_price, new_tick)
             if ideal_price < placed_price:
                 log.info(
                     f"  Tick upgrade detected for {o['label']}: "
@@ -1154,27 +1166,31 @@ def place_for_date(
     client: ClobClient,
     target_date: date,
     upper: int,
+    upper2: int,
     lower: int,
+    lower2: int,
     skip_slugs: set[str] | None = None,
 ) -> list[dict]:
     """
-    For a given date, place BUY limit orders on the upper (YES) and lower (NO)
-    brackets. Returns a list of order dicts for the monitor loop.
+    For a given date, place BUY limit orders on all four brackets.
+    Returns a list of order dicts for the monitor loop.
     Silently skips any bracket whose market is not yet live.
 
     skip_slugs: if provided, slugs already placed are skipped and newly placed
                 slugs are added to the set (used for tomorrow retry logic).
     """
     date_label = target_date.strftime("%b %-d")
-    log.info(f"--- {date_label} | upper={upper} YES | lower={lower} NO ---")
+    log.info(f"--- {date_label} | upper={upper}/{upper2} YES | lower={lower}/{lower2} NO ---")
     placed = []
 
     brackets = [
-        (upper, "YES", 0),  # (bracket, side_label, token_index)
-        (lower, "NO",  1),
+        (upper,  "YES", 0, ORDER_PRICE),      # (bracket, side_label, token_index, order_price)
+        (upper2, "YES", 0, ORDER_PRICE_EXT),
+        (lower,  "NO",  1, ORDER_PRICE),
+        (lower2, "NO",  1, ORDER_PRICE_EXT),
     ]
 
-    for bracket, side_label, tok_idx in brackets:
+    for bracket, side_label, tok_idx, order_price in brackets:
         slug = build_slug(bracket, target_date)
 
         if skip_slugs is not None and slug in skip_slugs:
@@ -1196,9 +1212,9 @@ def place_for_date(
         label = f"{side_label} {slug}"
 
         tick  = get_tick_size(client, token_id, market)
-        price = snap_price(ORDER_PRICE, tick)
-        if price != ORDER_PRICE:
-            log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
+        price = snap_price(order_price, tick)
+        if price != order_price:
+            log.info(f"  Price snapped: ${order_price} → ${price} (tick=${tick})")
 
         # ── Startup guard: don't re-place if already open or already filled ──
         market_end = datetime(
@@ -1213,7 +1229,7 @@ def place_for_date(
             placed.append({
                 "label": label, "order_id": existing_oid,
                 "condition_id": condition_id, "token_id": token_id,
-                "buy_price": price, "cancel_at": cancel_at,
+                "buy_price": price, "intended_price": order_price, "cancel_at": cancel_at,
                 "bracket": bracket, "side_label": side_label, "target_date": target_date,
             })
             st_buy_existing(label, existing_oid, bracket, side_label,
@@ -1258,15 +1274,16 @@ def place_for_date(
 
         if order_id:
             placed.append({
-                "label":        label,
-                "order_id":     order_id,
-                "condition_id": condition_id,
-                "token_id":     token_id,
-                "buy_price":    price,
-                "cancel_at":    cancel_at,
-                "bracket":      bracket,
-                "side_label":   side_label,
-                "target_date":  target_date,
+                "label":          label,
+                "order_id":       order_id,
+                "condition_id":   condition_id,
+                "token_id":       token_id,
+                "buy_price":      price,
+                "intended_price": order_price,
+                "cancel_at":      cancel_at,
+                "bracket":        bracket,
+                "side_label":     side_label,
+                "target_date":    target_date,
             })
             st_buy_placed(label, order_id, bracket, side_label,
                           target_date, price, ORDER_SIZE, cancel_at, token_id)
@@ -1305,8 +1322,8 @@ def main() -> None:
         if today not in placed_dates:
             try:
                 eth   = fetch_eth_spot()
-                upper, lower = get_brackets(eth)
-                st_set_eth(eth, upper, lower)
+                upper, upper2, lower, lower2 = get_brackets(eth)
+                st_set_eth(eth, upper, upper2, lower, lower2)
 
                 all_orders: list[dict] = []
 
@@ -1320,12 +1337,12 @@ def main() -> None:
                         f"skipping today's BUY orders (threshold: 6h)"
                     )
                 else:
-                    all_orders += place_for_date(client, today, upper, lower)
+                    all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
 
                 placed_dates.add(today)
                 tmrw_placed.clear()  # new day — reset tomorrow tracking
 
-                tmrw_orders = place_for_date(client, tomorrow, upper, lower,
+                tmrw_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
                                              skip_slugs=tmrw_placed)
                 all_orders += tmrw_orders
 
@@ -1340,12 +1357,12 @@ def main() -> None:
 
         else:
             # Retry tomorrow brackets that weren't live yet when the day started
-            if len(tmrw_placed) < 2:
+            if len(tmrw_placed) < 4:
                 try:
                     eth = fetch_eth_spot()
-                    upper, lower = get_brackets(eth)
-                    st_set_eth(eth, upper, lower)
-                    retry_orders = place_for_date(client, tomorrow, upper, lower,
+                    upper, upper2, lower, lower2 = get_brackets(eth)
+                    st_set_eth(eth, upper, upper2, lower, lower2)
+                    retry_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
                                                   skip_slugs=tmrw_placed)
                     if retry_orders:
                         log.info(f"Tomorrow retry: placed {len(retry_orders)} new order(s).")
