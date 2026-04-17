@@ -100,14 +100,75 @@ class _ColorFormatter(logging.Formatter):
         msg = super().format(record)
         if not _COLORS:
             return msg
+
+        # ── Errors & warnings (check level first) ────────────────────────────
+        if record.levelno >= logging.ERROR:
+            return Style.BRIGHT + Fore.RED + msg + Style.RESET_ALL
+        if record.levelno == logging.WARNING:
+            return Style.BRIGHT + Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Fill events ───────────────────────────────────────────────────────
+        if "FILLED ✓" in msg:
+            return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+        if "All orders filled" in msg:
+            return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+
+        # ── Expiry strategy outcomes ──────────────────────────────────────────
+        if "[EXPIRY]" in msg:
+            if "HOLD to resolution" in msg:
+                return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
+            if "uncertain" in msg or "selling all" in msg:
+                return Fore.YELLOW + msg + Style.RESET_ALL
+            if "likely losing" in msg:
+                return Style.DIM + Fore.RED + msg + Style.RESET_ALL
+            return Fore.MAGENTA + msg + Style.RESET_ALL     # [EXPIRY] info line
+
+        # ── Sell / TP orders placed ───────────────────────────────────────────
+        if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
+                                   "Partial fill", "sell tranches")):
+            return Fore.GREEN + msg + Style.RESET_ALL
+
+        # ── Buy orders placed ─────────────────────────────────────────────────
+        if "Limit BUY placed" in msg:
+            return Style.BRIGHT + Fore.CYAN + msg + Style.RESET_ALL
+
+        # ── Cancellations ─────────────────────────────────────────────────────
+        if any(t in msg for t in ("CANCEL", "Cancelling")):
+            return Fore.RED + msg + Style.RESET_ALL
+
+        # ── Dry run ───────────────────────────────────────────────────────────
         if "[DRY RUN]" in msg:
             return Fore.CYAN + msg + Style.RESET_ALL
-        if any(t in msg for t in ("FILLED", "SELL TP", "placed")):
-            return Fore.GREEN + msg + Style.RESET_ALL
-        if any(t in msg for t in ("CANCEL", "ERROR", "error", "not found")):
+
+        # ── Startup resumption ────────────────────────────────────────────────
+        if "[STARTUP]" in msg:
+            return Fore.BLUE + msg + Style.RESET_ALL
+
+        # ── Market / order not found ──────────────────────────────────────────
+        if any(t in msg for t in ("not found", "Market not found", "gone (0 fill)")):
             return Fore.RED + msg + Style.RESET_ALL
-        if "WARNING" in msg or "warn" in msg.lower():
-            return Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Price snap / tick ─────────────────────────────────────────────────
+        if "Price snapped" in msg or "tick_size" in msg:
+            return Style.DIM + Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Monitoring / waiting ──────────────────────────────────────────────
+        if any(t in msg for t in ("Monitoring ", "Waiting on")):
+            return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── ETH price / brackets ──────────────────────────────────────────────
+        if any(t in msg for t in ("Binance ETH", "ETH price", "Brackets:")):
+            return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── Bracket placement header ──────────────────────────────────────────
+        if msg.startswith(msg[:10]) and "| upper=" in msg:
+            return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── Dashboard / connected ─────────────────────────────────────────────
+        if any(t in msg for t in ("[DASH]", "Connected to", "====", "Mode  :",
+                                   "Order :", "TP1   :", "TP2   :", "TP3   :")):
+            return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+
         return msg
 
 _fmt = "%(asctime)s [%(levelname)s] %(message)s"
