@@ -995,6 +995,21 @@ def find_open_buy_order(client: ClobClient, condition_id: str, token_id: str) ->
     return None
 
 
+def count_open_sells(client: ClobClient, condition_id: str, token_id: str) -> int:
+    """Return number of open SELL orders for this token (used on startup to avoid re-placing TPs)."""
+    if DRY_RUN:
+        return 0
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+        return sum(
+            1 for o in (orders or [])
+            if o.get("asset_id") == token_id and o.get("side", "").upper() == "SELL"
+        )
+    except Exception as e:
+        log.warning(f"  [STARTUP] open sell check failed for {token_id[:12]}: {e}")
+        return 0
+
+
 def get_token_position(client: ClobClient, token_id: str) -> int:
     """
     Return number of shares currently held for this conditional token.
@@ -1089,13 +1104,20 @@ def place_for_date(
 
         existing_shares = get_token_position(client, token_id)
         if existing_shares > 0:
-            log.info(
-                f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
-                f" — placing sell tranches"
-            )
             st_buy_filled("startup-" + token_id[:8], existing_shares,
                           token_id, price, label)
-            place_sell_tranches(client, token_id, label, existing_shares, price)
+            open_sells = count_open_sells(client, condition_id, token_id)
+            if open_sells > 0:
+                log.info(
+                    f"  [STARTUP] {open_sells} open SELL order(s) already exist for {label}"
+                    f" — skipping sell placement"
+                )
+            else:
+                log.info(
+                    f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
+                    f" — placing sell tranches"
+                )
+                place_sell_tranches(client, token_id, label, existing_shares, price)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
             continue
