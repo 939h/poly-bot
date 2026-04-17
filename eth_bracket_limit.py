@@ -733,15 +733,30 @@ def get_filled_shares(client: ClobClient, order_id: str) -> int:
     try:
         details = client.get_order(order_id)
         if isinstance(details, dict):
-            raw = (
-                details.get("sizeFilled")
-                or details.get("size_filled")
-                or details.get("filledSize")
-                or 0
-            )
+            for field in (
+                "size_matched", "sizeMatched",
+                "sizeFilled", "size_filled", "filledSize",
+            ):
+                val = details.get(field)
+                if val is not None:
+                    n = int(float(val))
+                    if n > 0:
+                        return n
+            # If status indicates fully matched, fall back to original size
+            if details.get("status", "").upper() in ("MATCHED", "MINED", "FILLED"):
+                size = details.get("size") or details.get("original_size") or 0
+                return int(float(size))
         else:
-            raw = getattr(details, "size_filled", 0) or getattr(details, "sizeFilled", 0)
-        return int(float(raw))
+            for attr in ("size_matched", "sizeMatched", "size_filled", "sizeFilled"):
+                val = getattr(details, attr, None)
+                if val is not None:
+                    n = int(float(val))
+                    if n > 0:
+                        return n
+            if getattr(details, "status", "").upper() in ("MATCHED", "MINED", "FILLED"):
+                size = getattr(details, "size", 0) or getattr(details, "original_size", 0)
+                return int(float(size or 0))
+        return 0
     except Exception as e:
         log.warning(f"  get_filled_shares failed for {order_id}: {e}")
         return ORDER_SIZE  # assume full fill as fallback
