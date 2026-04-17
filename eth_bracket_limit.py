@@ -117,6 +117,8 @@ _handler.setFormatter(_ColorFormatter(_fmt))
 _file_handler = logging.FileHandler("eth_bracket_limit.log", encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter(_fmt))
 logging.basicConfig(level=logging.INFO, handlers=[_handler, _file_handler], force=True)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ── Global dashboard state ────────────────────────────────────────────────────
