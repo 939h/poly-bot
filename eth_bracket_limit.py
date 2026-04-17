@@ -83,6 +83,7 @@ DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
+EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
 POLL_SECS          = 60      # fill-check interval
@@ -820,6 +821,61 @@ def place_sell_tranches(
             st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
 
 
+def sell_at_expiry(
+    client: ClobClient,
+    token_id: str,
+    label: str,
+    shares: int,
+    buy_price: float,
+    bracket: int,
+    side_label: str,
+) -> None:
+    """
+    At cancel time (T-2h before market end), decide how to handle filled shares
+    based on ETH spot distance from the bracket.
+
+      distance > +EXPIRY_DISTANCE_THRESHOLD  → HOLD to resolution ($1.00 if wins)
+      distance < -EXPIRY_DISTANCE_THRESHOLD  → DO NOTHING (likely worthless)
+      within ±threshold                      → SELL ALL at best_ask
+    """
+    try:
+        eth = fetch_eth_spot()
+    except Exception as e:
+        log.warning(f"  [EXPIRY] ETH fetch failed ({e}) — falling back to TP sells")
+        place_sell_tranches(client, token_id, label, shares, buy_price)
+        return
+
+    distance = (eth - bracket) if side_label == "YES" else (bracket - eth)
+    log.info(
+        f"  [EXPIRY] {label} | ETH=${eth:,.2f} | bracket={bracket}"
+        f" | side={side_label} | distance={distance:+.0f}"
+    )
+
+    if distance > EXPIRY_DISTANCE_THRESHOLD:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} > +{EXPIRY_DISTANCE_THRESHOLD}"
+            f" → HOLD to resolution"
+        )
+    elif distance < -EXPIRY_DISTANCE_THRESHOLD:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} < -{EXPIRY_DISTANCE_THRESHOLD}"
+            f" → likely losing — skipping sells"
+        )
+    else:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} within"
+            f" ±{EXPIRY_DISTANCE_THRESHOLD} → uncertain — selling all {shares} shares at best_ask"
+        )
+        best_ask = get_best_ask(client, token_id)
+        if best_ask is None:
+            log.warning(f"  [EXPIRY] No asks in book for {label} — cannot exit")
+            return
+        sell_price = min(round(best_ask, 4), 0.99)
+        oid = place_limit_order(client, token_id, f"{label}-EXIT", sell_price, shares, SELL)
+        if oid:
+            st_sell_placed(label, oid, 1, shares, sell_price)
+
+
 def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
     """Return set of open order IDs for this market condition."""
     if DRY_RUN:
@@ -943,9 +999,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     # Check for partial fill before discarding
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
-                        log.info(f"  Partial fill on cancelled order: {partial} shares — placing sells")
+                        log.info(f"  Partial fill on cancelled order: {partial} shares — evaluating expiry strategy")
                         st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
-                        place_sell_tranches(client, o["token_id"], o["label"], partial, o["buy_price"])
+                        sell_at_expiry(
+                            client, o["token_id"], o["label"], partial, o["buy_price"],
+                            o["bracket"], o["side_label"],
+                        )
                     else:
                         st_buy_cancelled(oid)
                     pending.pop(oid)
