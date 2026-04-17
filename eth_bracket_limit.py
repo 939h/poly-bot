@@ -83,7 +83,8 @@ DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brackets (upper/lower)
 ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
-CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
+CANCEL_BEFORE_END_HOURS   = 2   # cancel unfilled BUY orders N hours before market resolves
+LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
@@ -123,6 +124,16 @@ class _ColorFormatter(logging.Formatter):
             if "likely losing" in msg:
                 return Style.DIM + Fore.RED + msg + Style.RESET_ALL
             return Fore.MAGENTA + msg + Style.RESET_ALL     # [EXPIRY] info line
+
+        # ── Last-hour aggressive sell ─────────────────────────────────────────
+        if "[LAST_HOUR]" in msg:
+            if "FILLED" in msg:
+                return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+            if "re-pricing" in msg or "Re-pricing" in msg:
+                return Fore.YELLOW + msg + Style.RESET_ALL
+            if "no shares" in msg or "already sold" in msg or "market window ended" in msg:
+                return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+            return Fore.CYAN + msg + Style.RESET_ALL
 
         # ── Sell / TP orders placed ───────────────────────────────────────────
         if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
@@ -279,6 +290,14 @@ def st_buy_cancelled(order_id: str) -> None:
                 o["status"] = "CANCELLED"
                 break
         _state["stats"]["cancelled"] += 1
+        _state["updated"] = _now_str()
+
+def st_sell_cancelled(order_id: str) -> None:
+    with _slock:
+        for o in _state["sell_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "CANCELLED"
+                break
         _state["updated"] = _now_str()
 
 def st_sell_placed(label: str, order_id: str, tp: int,
@@ -979,6 +998,151 @@ def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
     except Exception as e:
         log.error(f"  Cancel failed ({label} / {order_id}): {e}")
 
+# ── Last-Hour Sell ───────────────────────────────────────────────────────────
+
+def cancel_all_open_sells(
+    client: ClobClient, condition_id: str, token_id: str, label: str
+) -> int:
+    """Cancel all open SELL orders for this token. Returns count cancelled."""
+    if DRY_RUN:
+        log.info(f"  [DRY RUN] Would cancel all SELL orders for {label}")
+        return 0
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+        count = 0
+        for o in (orders or []):
+            if o.get("asset_id") == token_id and o.get("side", "").upper() == "SELL":
+                oid = o.get("id") or o.get("orderID", "")
+                if oid:
+                    try:
+                        client.cancel(oid)
+                        log.info(f"  [LAST_HOUR] Cancelled SELL {label} order_id={oid}")
+                        st_sell_cancelled(oid)
+                    except Exception as e:
+                        log.error(f"  [LAST_HOUR] Cancel SELL failed ({label}/{oid}): {e}")
+                    count += 1
+        return count
+    except Exception as e:
+        log.warning(f"  [LAST_HOUR] cancel_all_open_sells failed for {label}: {e}")
+        return 0
+
+
+def last_hour_sell_monitor(
+    client: ClobClient,
+    token_id: str,
+    label: str,
+    condition_id: str,
+    cancel_at: float,
+) -> None:
+    """
+    At T-1h before market end:
+      1. Cancel ALL open sell orders (TP1/TP2/TP3/EXIT) for this position.
+      2. Re-read actual wallet balance.
+      3. Place a single SELL at best_ask.
+      4. Every POLL_SECS: if best_ask changes → cancel current, re-place at new price.
+    """
+    if DRY_RUN:
+        log.info(f"[DRY RUN] Skipping last-hour sell monitor for {label}.")
+        return
+
+    market_end   = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
+    last_hour_at = market_end - LAST_HOUR_SELL_HOURS * 3600
+
+    now = time.time()
+    if last_hour_at > now:
+        wait = last_hour_at - now
+        log.info(
+            f"  [LAST_HOUR] {label} — aggressive sell scheduled in {wait/60:.0f}m "
+            f"(T-{LAST_HOUR_SELL_HOURS}h before market end)"
+        )
+        time.sleep(wait)
+
+    if time.time() >= market_end:
+        log.info(f"  [LAST_HOUR] {label} — market already ended, skipping")
+        return
+
+    log.info(f"  [LAST_HOUR] {label} — entering last-hour aggressive sell phase")
+
+    # Step 1: Cancel all existing sell orders
+    n = cancel_all_open_sells(client, condition_id, token_id, label)
+    if n:
+        log.info(f"  [LAST_HOUR] {label} — cancelled {n} sell order(s)")
+
+    # Step 2: Re-read actual wallet balance
+    shares = get_token_position(client, token_id)
+    if shares <= 0:
+        log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
+        return
+
+    # Inner helper: place sell at current best_ask; returns (order_id, price) or (None, None)
+    def _place(qty: int) -> tuple[str | None, float | None]:
+        ask = get_best_ask(client, token_id)
+        if ask is None:
+            log.warning(f"  [LAST_HOUR] {label} — no asks in book")
+            return None, None
+        sell_price = min(round(ask, 4), 0.99)
+        oid = place_limit_order(client, token_id, f"{label}-LAST", sell_price, qty, SELL)
+        if oid:
+            st_sell_placed(label, oid, 1, qty, sell_price)
+        return oid, sell_price
+
+    # Step 3: Place initial sell
+    current_oid, current_price = _place(shares)
+
+    # Step 4: Rescan loop until filled or market closes
+    while time.time() < market_end:
+        time.sleep(POLL_SECS)
+        if time.time() >= market_end:
+            break
+
+        # If no active order (placement failed / no asks), retry
+        if current_oid is None:
+            shares = get_token_position(client, token_id)
+            if shares <= 0:
+                log.info(f"  [LAST_HOUR] {label} — no shares remaining")
+                return
+            current_oid, current_price = _place(shares)
+            continue
+
+        # Check if current order is still open
+        open_ids = get_open_order_ids(client, condition_id)
+        if current_oid not in open_ids:
+            filled = get_filled_shares(client, current_oid)
+            if filled > 0:
+                log.info(f"  [LAST_HOUR] FILLED ✓ {label} | {filled} shares")
+            else:
+                log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
+            return
+
+        # Check if best_ask has moved
+        ask = get_best_ask(client, token_id)
+        if ask is None:
+            continue
+        new_price = min(round(ask, 4), 0.99)
+        if new_price == current_price:
+            continue
+
+        # Re-price: cancel current and place at new best_ask
+        log.info(
+            f"  [LAST_HOUR] {label} — re-pricing ${current_price} → ${new_price}"
+        )
+        try:
+            client.cancel(current_oid)
+            st_sell_cancelled(current_oid)
+        except Exception as e:
+            log.error(f"  [LAST_HOUR] Re-price cancel failed ({label}): {e}")
+            continue
+
+        shares = get_token_position(client, token_id)
+        if shares <= 0:
+            log.info(f"  [LAST_HOUR] {label} — no shares remaining after re-price")
+            return
+
+        current_oid, current_price = _place(shares)
+
+    log.info(f"  [LAST_HOUR] {label} — market window ended.")
+
+
 # ── Monitor + Sell ────────────────────────────────────────────────────────────
 
 def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
@@ -1081,6 +1245,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                             client, o["token_id"], o["label"], partial, o["buy_price"],
                             o["bracket"], o["side_label"],
                         )
+                        threading.Thread(
+                            target=last_hour_sell_monitor,
+                            args=(client, o["token_id"], o["label"],
+                                  o["condition_id"], o["cancel_at"]),
+                            daemon=True,
+                        ).start()
                     else:
                         st_buy_cancelled(oid)
                     pending.pop(oid)
@@ -1094,6 +1264,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
                         place_sell_tranches(client, o["token_id"], o["label"], filled, o["buy_price"])
+                        threading.Thread(
+                            target=last_hour_sell_monitor,
+                            args=(client, o["token_id"], o["label"],
+                                  o["condition_id"], o["cancel_at"]),
+                            daemon=True,
+                        ).start()
                     else:
                         log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
 
@@ -1266,6 +1442,11 @@ def place_for_date(
                     f" — placing sell tranches"
                 )
                 place_sell_tranches(client, token_id, label, existing_shares, price)
+            threading.Thread(
+                target=last_hour_sell_monitor,
+                args=(client, token_id, label, condition_id, cancel_at),
+                daemon=True,
+            ).start()
             if skip_slugs is not None:
                 skip_slugs.add(slug)
             continue
