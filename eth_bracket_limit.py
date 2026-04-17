@@ -1171,6 +1171,15 @@ def place_for_date(
                     f"  [STARTUP] {open_sells} open SELL order(s) already exist for {label}"
                     f" — skipping sell placement"
                 )
+            elif time.time() >= cancel_at:
+                # Past the cancel window — re-evaluate with expiry strategy
+                # (handles restart after a HOLD decision where no sells were placed)
+                log.info(
+                    f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
+                    f" — within expiry window, re-evaluating"
+                )
+                sell_at_expiry(client, token_id, label, existing_shares, price,
+                               bracket, side_label)
             else:
                 log.info(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
