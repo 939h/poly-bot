@@ -1007,7 +1007,7 @@ def get_token_position(client: ClobClient, token_id: str) -> int:
             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         )
         raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", 0)
-        return int(float(raw or 0))
+        return int(float(raw or 0) / 1e6)  # contract returns raw units; 1 share = 1e6 raw
     except Exception as e:
         log.warning(f"  [STARTUP] position check failed for {token_id[:12]}: {e}")
     return 0
