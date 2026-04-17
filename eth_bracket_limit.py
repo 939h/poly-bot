@@ -546,8 +546,8 @@ def get_tick_size(client, token_id: str, market: dict) -> float:
     """
     Return the minimum price tick for this market.
 
-    1. Try known Gamma API field names.
-    2. Infer from live orderbook ask-price increments.
+    1. Try Gamma API field names (available at placement time).
+    2. Read tick_size directly from the CLOB OrderBookSummary (authoritative).
     3. Fall back to 0.01.
     """
     # 1. Gamma market fields
@@ -562,25 +562,21 @@ def get_tick_size(client, token_id: str, market: dict) -> float:
             except (ValueError, TypeError):
                 pass
 
-    # 2. Infer from orderbook (skipped in dry-run — no client)
+    # 2. CLOB OrderBookSummary.tick_size — the canonical source per CLOB docs
     if client is not None and not DRY_RUN:
         try:
             book = client.get_order_book(token_id)
-            asks = book.get("asks", []) if isinstance(book, dict) else getattr(book, "asks", [])
-            prices = sorted({
-                float(a["price"] if isinstance(a, dict) else getattr(a, "price", None))
-                for a in asks
-                if (a.get("price") if isinstance(a, dict) else getattr(a, "price", None)) is not None
-            })
-            if len(prices) >= 2:
-                diffs = [round(prices[i + 1] - prices[i], 6) for i in range(len(prices) - 1)]
-                min_diff = min((d for d in diffs if d > 0), default=None)
-                if min_diff is not None:
-                    tick = 0.001 if min_diff <= 0.005 else 0.01
-                    log.info(f"  tick_size={tick} (inferred from orderbook, min_diff={min_diff})")
-                    return tick
+            raw_tick = (
+                book.get("tick_size") if isinstance(book, dict)
+                else getattr(book, "tick_size", None)
+            )
+            if raw_tick is not None:
+                v = float(raw_tick)
+                if v > 0:
+                    log.info(f"  tick_size={v} (from CLOB orderbook)")
+                    return v
         except Exception as e:
-            log.debug(f"  tick_size inference failed: {e}")
+            log.debug(f"  tick_size CLOB lookup failed: {e}")
 
     # 3. Finest tick in dry-run so ORDER_PRICE is not snapped unnecessarily
     if DRY_RUN:
@@ -692,6 +688,9 @@ def place_limit_order(
             )
         )
         resp = client.post_order(order, OrderType.GTC)
+        if isinstance(resp, dict) and not resp.get("success", True):
+            log.error(f"  Order rejected ({label}): {resp.get('errorMsg', 'unknown')}")
+            return None
         order_id = resp.get("orderID") or resp.get("id") or str(resp)
         log.info(
             f"  Limit {side_str} placed: {label}"
@@ -707,19 +706,15 @@ def get_best_ask(client: ClobClient, token_id: str) -> float | None:
     """Fetch the best (lowest) ask price from the orderbook."""
     try:
         book = client.get_order_book(token_id)
-        asks = None
-        if isinstance(book, dict):
-            asks = book.get("asks") or book.get("ask")
-        else:
-            asks = getattr(book, "asks", None)
+        asks = (
+            book.get("asks") if isinstance(book, dict)
+            else getattr(book, "asks", None)
+        )
         if not asks:
             return None
         prices = []
         for entry in asks:
-            if isinstance(entry, dict):
-                p = entry.get("price") or entry.get("p")
-            else:
-                p = getattr(entry, "price", None)
+            p = entry.get("price") if isinstance(entry, dict) else getattr(entry, "price", None)
             if p is not None:
                 prices.append(float(p))
         return min(prices) if prices else None
@@ -790,8 +785,11 @@ def place_sell_tranches(
     tp2_shares = math.floor(filled_shares * 0.25)
     tp3_shares = filled_shares - tp1_shares - tp2_shares
 
+    # Polymarket prices are in [0.01, 0.99]; cap all sell prices accordingly
+    MAX_SELL_PRICE = 0.99
+
     # TP1: check best ask; sell at whichever is higher
-    tp1_base = round(buy_price * 2, 4)
+    tp1_base = min(round(buy_price * 2, 4), MAX_SELL_PRICE)
     if not DRY_RUN:
         best_ask = get_best_ask(client, token_id)
         if best_ask is not None and best_ask > tp1_base:
@@ -799,12 +797,12 @@ def place_sell_tranches(
                 f"  TP1 price adjusted: best_ask={best_ask:.4f}"
                 f" > 2x={tp1_base:.4f} → using best_ask"
             )
-            tp1_base = round(best_ask, 4)
+            tp1_base = min(round(best_ask, 4), MAX_SELL_PRICE)
     else:
         log.info(f"  [DRY RUN] TP1 would check orderbook; using 2x=${tp1_base}")
 
-    tp2_price = round(buy_price * 10, 4)
-    tp3_price = round(buy_price * 50, 4)
+    tp2_price = min(round(buy_price * 10, 4), MAX_SELL_PRICE)
+    tp3_price = min(round(buy_price * 50, 4), MAX_SELL_PRICE)
     log.info(
         f"  Placing sell tranches for {label}"
         f" | filled={filled_shares} shares | buy_price=${buy_price}"
@@ -812,6 +810,9 @@ def place_sell_tranches(
     for tp_num, (tp_shares, tp_price) in enumerate(
         [(tp1_shares, tp1_base), (tp2_shares, tp2_price), (tp3_shares, tp3_price)], 1
     ):
+        if tp_shares <= 0:
+            log.debug(f"  Skipping TP{tp_num} — 0 shares")
+            continue
         oid = place_limit_order(client, token_id, f"{label}-TP{tp_num}", tp_price, tp_shares, SELL)
         if oid:
             st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
@@ -824,7 +825,8 @@ def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
     try:
         open_orders = client.get_orders(OpenOrderParams(market=condition_id))
         if isinstance(open_orders, list):
-            return {o.get("id") or o.get("orderID", "") for o in open_orders}
+            # Open order objects use "id" per CLOB API docs
+            return {o.get("id", "") for o in open_orders if o.get("id")}
         return set()
     except Exception as e:
         log.warning(f"  Could not fetch open orders: {e}")
