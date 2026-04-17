@@ -1161,7 +1161,7 @@ def main() -> None:
                 market_end_utc = datetime(today.year, today.month, today.day,
                                           MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
                 hours_left = (market_end_utc - utc_now).total_seconds() / 3600
-                if hours_left <= 6:
+                if hours_left <= 3:
                     log.info(
                         f"[SKIP] {hours_left:.1f}h until market end — "
                         f"skipping today's BUY orders (threshold: 6h)"
