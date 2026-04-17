@@ -575,7 +575,7 @@ def get_tick_size(client, token_id: str, market: dict) -> float:
             if raw_tick is not None:
                 v = float(raw_tick)
                 if v > 0:
-                    log.info(f"  tick_size={v} (from CLOB orderbook)")
+                    log.debug(f"  tick_size={v} (from CLOB orderbook)")
                     return v
         except Exception as e:
             log.debug(f"  tick_size CLOB lookup failed: {e}")
@@ -969,7 +969,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # Status line — show closest cancel deadline
         earliest = min(o["cancel_at"] for o in pending.values())
         mins_left = (earliest - now) / 60
-        log.info(
+        log.debug(
             f"  Waiting on {len(pending)} order(s) | "
             f"next cancel in {mins_left:.0f}m"
         )
