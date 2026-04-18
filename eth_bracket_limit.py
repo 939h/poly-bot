@@ -305,8 +305,14 @@ def st_sell_filled(order_id: str) -> None:
         for o in _state["sell_orders"]:
             if o["order_id"] == order_id:
                 o["status"] = "FILLED"
+                shares_sold = o.get("shares", 0)
+                sell_label  = o.get("label", "")
+                # Reduce the matching position's remaining share count
+                for p in _state["positions"]:
+                    if p["label"] == sell_label:
+                        p["shares"] = max(0, p["shares"] - shares_sold)
+                        break
                 break
-        _state["stats"]["pnl"] = round(_state["stats"].get("pnl", 0.0), 4)  # placeholder
         _state["updated"] = _now_str()
 
 def st_sell_placed(label: str, order_id: str, tp: int,
