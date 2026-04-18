@@ -80,9 +80,12 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))   # $ per share — snapped to market tick
-ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "200"))        # shares per side
-CANCEL_BEFORE_END_HOURS = 2  # cancel unfilled BUY orders N hours before market resolves
+ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brackets (upper/lower)
+ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
+ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
+CANCEL_BEFORE_END_HOURS   = 2   # cancel unfilled BUY orders N hours before market resolves
+LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
+EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
 POLL_SECS          = 60      # fill-check interval
@@ -99,14 +102,85 @@ class _ColorFormatter(logging.Formatter):
         msg = super().format(record)
         if not _COLORS:
             return msg
+
+        # ── Errors & warnings (check level first) ────────────────────────────
+        if record.levelno >= logging.ERROR:
+            return Style.BRIGHT + Fore.RED + msg + Style.RESET_ALL
+        if record.levelno == logging.WARNING:
+            return Style.BRIGHT + Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Fill events ───────────────────────────────────────────────────────
+        if "FILLED ✓" in msg:
+            return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+        if "All orders filled" in msg:
+            return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+
+        # ── Expiry strategy outcomes ──────────────────────────────────────────
+        if "[EXPIRY]" in msg:
+            if "HOLD to resolution" in msg:
+                return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
+            if "uncertain" in msg or "selling all" in msg:
+                return Fore.YELLOW + msg + Style.RESET_ALL
+            if "likely losing" in msg:
+                return Style.DIM + Fore.RED + msg + Style.RESET_ALL
+            return Fore.MAGENTA + msg + Style.RESET_ALL     # [EXPIRY] info line
+
+        # ── Last-hour aggressive sell ─────────────────────────────────────────
+        if "[LAST_HOUR]" in msg:
+            if "FILLED" in msg:
+                return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
+            if "re-pricing" in msg or "Re-pricing" in msg:
+                return Fore.YELLOW + msg + Style.RESET_ALL
+            if "no shares" in msg or "already sold" in msg or "market window ended" in msg:
+                return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+            return Fore.CYAN + msg + Style.RESET_ALL
+
+        # ── Sell / TP orders placed ───────────────────────────────────────────
+        if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
+                                   "Partial fill", "sell tranches")):
+            return Fore.GREEN + msg + Style.RESET_ALL
+
+        # ── Buy orders placed ─────────────────────────────────────────────────
+        if "Limit BUY placed" in msg:
+            return Style.BRIGHT + Fore.CYAN + msg + Style.RESET_ALL
+
+        # ── Cancellations ─────────────────────────────────────────────────────
+        if any(t in msg for t in ("CANCEL", "Cancelling")):
+            return Fore.RED + msg + Style.RESET_ALL
+
+        # ── Dry run ───────────────────────────────────────────────────────────
         if "[DRY RUN]" in msg:
             return Fore.CYAN + msg + Style.RESET_ALL
-        if any(t in msg for t in ("FILLED", "SELL TP", "placed")):
-            return Fore.GREEN + msg + Style.RESET_ALL
-        if any(t in msg for t in ("CANCEL", "ERROR", "error", "not found")):
+
+        # ── Startup resumption ────────────────────────────────────────────────
+        if "[STARTUP]" in msg:
+            return Fore.BLUE + msg + Style.RESET_ALL
+
+        # ── Market / order not found ──────────────────────────────────────────
+        if any(t in msg for t in ("not found", "Market not found", "gone (0 fill)")):
             return Fore.RED + msg + Style.RESET_ALL
-        if "WARNING" in msg or "warn" in msg.lower():
-            return Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Price snap / tick ─────────────────────────────────────────────────
+        if "Price snapped" in msg or "tick_size" in msg:
+            return Style.DIM + Fore.YELLOW + msg + Style.RESET_ALL
+
+        # ── Monitoring / waiting ──────────────────────────────────────────────
+        if any(t in msg for t in ("Monitoring ", "Waiting on")):
+            return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── ETH price / brackets ──────────────────────────────────────────────
+        if any(t in msg for t in ("Binance ETH", "ETH price", "Brackets:")):
+            return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── Bracket placement header ──────────────────────────────────────────
+        if msg.startswith(msg[:10]) and "| upper=" in msg:
+            return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
+
+        # ── Dashboard / connected ─────────────────────────────────────────────
+        if any(t in msg for t in ("[DASH]", "Connected to", "====", "Mode  :",
+                                   "Order :", "TP1   :", "TP2   :", "TP3   :")):
+            return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
+
         return msg
 
 _fmt = "%(asctime)s [%(levelname)s] %(message)s"
@@ -117,6 +191,8 @@ _handler.setFormatter(_ColorFormatter(_fmt))
 _file_handler = logging.FileHandler("eth_bracket_limit.log", encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter(_fmt))
 logging.basicConfig(level=logging.INFO, handlers=[_handler, _file_handler], force=True)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ── Global dashboard state ────────────────────────────────────────────────────
@@ -126,7 +202,9 @@ _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
     "upper":      0,
+    "upper2":     0,
     "lower":      0,
+    "lower2":     0,
     "updated":    "",
     "buy_orders": [],   # {id, label, bracket, side, date_str, price, size, cancel_at, status}
     "positions":  [],   # {id, label, token_id, shares, buy_price, current_ask}
@@ -147,11 +225,13 @@ def _new_id() -> int:
 def _now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def st_set_eth(price: float, upper: int, lower: int) -> None:
+def st_set_eth(price: float, upper: int, upper2: int, lower: int, lower2: int) -> None:
     with _slock:
         _state["eth_price"] = price
         _state["upper"]     = upper
+        _state["upper2"]    = upper2
         _state["lower"]     = lower
+        _state["lower2"]    = lower2
         _state["updated"]   = _now_str()
 
 def st_buy_placed(label: str, order_id: str, bracket: int, side: str,
@@ -210,6 +290,29 @@ def st_buy_cancelled(order_id: str) -> None:
                 o["status"] = "CANCELLED"
                 break
         _state["stats"]["cancelled"] += 1
+        _state["updated"] = _now_str()
+
+def st_sell_cancelled(order_id: str) -> None:
+    with _slock:
+        for o in _state["sell_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "CANCELLED"
+                break
+        _state["updated"] = _now_str()
+
+def st_sell_filled(order_id: str) -> None:
+    with _slock:
+        for o in _state["sell_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "FILLED"
+                shares_sold = o.get("shares", 0)
+                sell_label  = o.get("label", "")
+                # Reduce the matching position's remaining share count
+                for p in _state["positions"]:
+                    if p["label"] == sell_label:
+                        p["shares"] = max(0, p["shares"] - shares_sold)
+                        break
+                break
         _state["updated"] = _now_str()
 
 def st_sell_placed(label: str, order_id: str, tp: int,
@@ -309,6 +412,7 @@ function render(s){
   const closed=s.closed||[];
   const openBuys=buys.filter(o=>o.status==='OPEN'||o.status==='RESUMING').length;
   const totalCost=buys.filter(o=>o.status!=='CANCELLED').reduce((a,o)=>a+(o.cost||0),0);
+  const filledCost=buys.filter(o=>o.status==='FILLED').reduce((a,o)=>a+(o.cost||0),0);
 
   // BUY orders table
   const buyRows=buys.length?buys.map(o=>{
@@ -381,11 +485,14 @@ function render(s){
     <div class="grid">
       <div class="card"><div class="lbl">ETH Price</div><div class="val white">$${s.eth_price?s.eth_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</div></div>
       <div class="card"><div class="lbl">Upper Bracket</div><div class="val green">${s.upper?'$'+s.upper.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Upper 2</div><div class="val green">${s.upper2?'$'+s.upper2.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Lower Bracket</div><div class="val amber">${s.lower?'$'+s.lower.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="lbl">Lower 2</div><div class="val amber">${s.lower2?'$'+s.lower2.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Open Orders</div><div class="val blue">${openBuys}</div></div>
       <div class="card"><div class="lbl">Filled</div><div class="val green">${st.fills||0}</div></div>
       <div class="card"><div class="lbl">Cancelled</div><div class="val ${(st.cancelled||0)>0?'red':'dim'}">${st.cancelled||0}</div></div>
-      <div class="card"><div class="lbl">Cost</div><div class="val">${fmt4(totalCost)}</div></div>
+      <div class="card"><div class="lbl">Deployed</div><div class="val dim">${fmt4(totalCost)}</div></div>
+      <div class="card"><div class="lbl">Filled Cost</div><div class="val ${filledCost>0?'green':'dim'}">${fmt4(filledCost)}</div></div>
       <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnl>0?'green':pnl<0?'red':'dim'}">${pnl>=0?'+':''}${fmt4(pnl)}</div></div>
     </div>
 
@@ -433,14 +540,16 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table style="max-width:480px"><tbody>
-        <tr><td style="color:#5a6a85">Order price</td><td>$${(${ORDER_PRICE}||0.004).toFixed(4)}</td>
-            <td style="color:#5a6a85;padding-left:24px">Order size</td><td>${ORDER_SIZE} shares</td></tr>
-        <tr><td style="color:#5a6a85">Cancel before</td><td>${CANCEL_BEFORE_END_HOURS}h before market end</td>
-            <td style="color:#5a6a85;padding-left:24px">Poll interval</td><td>${POLL_SECS}s</td></tr>
+        <tr><td style="color:#5a6a85">Inner price</td><td>$${(${ORDER_PRICE}||0.004).toFixed(4)}</td>
+            <td style="color:#5a6a85;padding-left:24px">Outer price</td><td>$${(${ORDER_PRICE_EXT}||0.002).toFixed(4)}</td></tr>
+        <tr><td style="color:#5a6a85">Order size</td><td>${ORDER_SIZE} shares</td>
+            <td style="color:#5a6a85;padding-left:24px">Cancel before</td><td>${CANCEL_BEFORE_END_HOURS}h before end</td></tr>
+        <tr><td style="color:#5a6a85">Poll interval</td><td>${POLL_SECS}s</td>
+            <td style="color:#5a6a85;padding-left:24px">Dashboard</td><td>:${HTTP_PORT}</td></tr>
         <tr><td style="color:#5a6a85">TP1</td><td>50% @ 2x</td>
             <td style="color:#5a6a85;padding-left:24px">TP2</td><td>25% @ 10x</td></tr>
         <tr><td style="color:#5a6a85">TP3</td><td>25% @ 50x</td>
-            <td style="color:#5a6a85;padding-left:24px">Dashboard</td><td>:${HTTP_PORT}</td></tr>
+            <td></td><td></td></tr>
       </tbody></table>
     </div>
 
@@ -463,6 +572,7 @@ setInterval(poll,10000);
 # Replace JS template placeholders with Python values at module load
 _DASH_HTML = (
     _DASH_HTML
+    .replace("${ORDER_PRICE_EXT}", str(ORDER_PRICE_EXT))
     .replace("${ORDER_PRICE}", str(ORDER_PRICE))
     .replace("${ORDER_SIZE}", str(ORDER_SIZE))
     .replace("${CANCEL_BEFORE_END_HOURS}", str(CANCEL_BEFORE_END_HOURS))
@@ -517,18 +627,22 @@ def fetch_eth_spot() -> float:
 
 # ── Bracket ───────────────────────────────────────────────────────────────────
 
-def get_brackets(eth_price: float) -> tuple[int, int]:
+def get_brackets(eth_price: float) -> tuple[int, int, int, int]:
     """
-    Return (upper_bracket, lower_bracket) based on ETH spot price.
+    Return (upper, upper2, lower, lower2) based on ETH spot price.
 
     Example: eth_price = 2333
-      upper = ceil(2333 / 100) * 100       = 2400
-      lower = floor(2333 / 100) * 100 - 100 = 2200
+      upper  = ceil(2333/100)*100       = 2400
+      upper2 = upper + 100              = 2500
+      lower  = floor(2333/100)*100-100  = 2200
+      lower2 = lower - 100              = 2100
     """
-    upper = int(math.ceil(eth_price / 100) * 100)
-    lower = int(math.floor(eth_price / 100) * 100) - 100
-    log.info(f"Brackets: upper={upper}, lower={lower} (ETH ${eth_price:,.2f})")
-    return upper, lower
+    upper  = int(math.ceil(eth_price / 100) * 100)
+    upper2 = upper + 100
+    lower  = int(math.floor(eth_price / 100) * 100) - 100
+    lower2 = lower - 100
+    log.info(f"Brackets: upper={upper}/{upper2}, lower={lower}/{lower2} (ETH ${eth_price:,.2f})")
+    return upper, upper2, lower, lower2
 
 # ── Slug / Market ─────────────────────────────────────────────────────────────
 
@@ -546,8 +660,8 @@ def get_tick_size(client, token_id: str, market: dict) -> float:
     """
     Return the minimum price tick for this market.
 
-    1. Try known Gamma API field names.
-    2. Infer from live orderbook ask-price increments.
+    1. Try Gamma API field names (available at placement time).
+    2. Read tick_size directly from the CLOB OrderBookSummary (authoritative).
     3. Fall back to 0.01.
     """
     # 1. Gamma market fields
@@ -562,25 +676,21 @@ def get_tick_size(client, token_id: str, market: dict) -> float:
             except (ValueError, TypeError):
                 pass
 
-    # 2. Infer from orderbook (skipped in dry-run — no client)
+    # 2. CLOB OrderBookSummary.tick_size — the canonical source per CLOB docs
     if client is not None and not DRY_RUN:
         try:
             book = client.get_order_book(token_id)
-            asks = book.get("asks", []) if isinstance(book, dict) else getattr(book, "asks", [])
-            prices = sorted({
-                float(a["price"] if isinstance(a, dict) else getattr(a, "price", None))
-                for a in asks
-                if (a.get("price") if isinstance(a, dict) else getattr(a, "price", None)) is not None
-            })
-            if len(prices) >= 2:
-                diffs = [round(prices[i + 1] - prices[i], 6) for i in range(len(prices) - 1)]
-                min_diff = min((d for d in diffs if d > 0), default=None)
-                if min_diff is not None:
-                    tick = 0.001 if min_diff <= 0.005 else 0.01
-                    log.info(f"  tick_size={tick} (inferred from orderbook, min_diff={min_diff})")
-                    return tick
+            raw_tick = (
+                book.get("tick_size") if isinstance(book, dict)
+                else getattr(book, "tick_size", None)
+            )
+            if raw_tick is not None:
+                v = float(raw_tick)
+                if v > 0:
+                    log.debug(f"  tick_size={v} (from CLOB orderbook)")
+                    return v
         except Exception as e:
-            log.debug(f"  tick_size inference failed: {e}")
+            log.debug(f"  tick_size CLOB lookup failed: {e}")
 
     # 3. Finest tick in dry-run so ORDER_PRICE is not snapped unnecessarily
     if DRY_RUN:
@@ -692,6 +802,9 @@ def place_limit_order(
             )
         )
         resp = client.post_order(order, OrderType.GTC)
+        if isinstance(resp, dict) and not resp.get("success", True):
+            log.error(f"  Order rejected ({label}): {resp.get('errorMsg', 'unknown')}")
+            return None
         order_id = resp.get("orderID") or resp.get("id") or str(resp)
         log.info(
             f"  Limit {side_str} placed: {label}"
@@ -707,19 +820,15 @@ def get_best_ask(client: ClobClient, token_id: str) -> float | None:
     """Fetch the best (lowest) ask price from the orderbook."""
     try:
         book = client.get_order_book(token_id)
-        asks = None
-        if isinstance(book, dict):
-            asks = book.get("asks") or book.get("ask")
-        else:
-            asks = getattr(book, "asks", None)
+        asks = (
+            book.get("asks") if isinstance(book, dict)
+            else getattr(book, "asks", None)
+        )
         if not asks:
             return None
         prices = []
         for entry in asks:
-            if isinstance(entry, dict):
-                p = entry.get("price") or entry.get("p")
-            else:
-                p = getattr(entry, "price", None)
+            p = entry.get("price") if isinstance(entry, dict) else getattr(entry, "price", None)
             if p is not None:
                 prices.append(float(p))
         return min(prices) if prices else None
@@ -733,15 +842,30 @@ def get_filled_shares(client: ClobClient, order_id: str) -> int:
     try:
         details = client.get_order(order_id)
         if isinstance(details, dict):
-            raw = (
-                details.get("sizeFilled")
-                or details.get("size_filled")
-                or details.get("filledSize")
-                or 0
-            )
+            for field in (
+                "size_matched", "sizeMatched",
+                "sizeFilled", "size_filled", "filledSize",
+            ):
+                val = details.get(field)
+                if val is not None:
+                    n = int(float(val))
+                    if n > 0:
+                        return n
+            # If status indicates fully matched, fall back to original size
+            if details.get("status", "").upper() in ("MATCHED", "MINED", "FILLED"):
+                size = details.get("size") or details.get("original_size") or 0
+                return int(float(size))
         else:
-            raw = getattr(details, "size_filled", 0) or getattr(details, "sizeFilled", 0)
-        return int(float(raw))
+            for attr in ("size_matched", "sizeMatched", "size_filled", "sizeFilled"):
+                val = getattr(details, attr, None)
+                if val is not None:
+                    n = int(float(val))
+                    if n > 0:
+                        return n
+            if getattr(details, "status", "").upper() in ("MATCHED", "MINED", "FILLED"):
+                size = getattr(details, "size", 0) or getattr(details, "original_size", 0)
+                return int(float(size or 0))
+        return 0
     except Exception as e:
         log.warning(f"  get_filled_shares failed for {order_id}: {e}")
         return ORDER_SIZE  # assume full fill as fallback
@@ -753,13 +877,15 @@ def place_sell_tranches(
     label: str,
     filled_shares: int,
     buy_price: float,
-) -> None:
+) -> list[dict]:
     """
     Place 3 tiered GTC limit SELL orders after a BUY fills.
 
     TP1  50% shares  at max(buy_price * 2, best_ask)
     TP2  25% shares  at buy_price * 10
     TP3  remaining   at buy_price * 50
+
+    Returns list of placed order dicts for monitoring.
     """
     # Re-verify actual wallet balance to avoid "not enough shares" errors
     if not DRY_RUN:
@@ -775,8 +901,11 @@ def place_sell_tranches(
     tp2_shares = math.floor(filled_shares * 0.25)
     tp3_shares = filled_shares - tp1_shares - tp2_shares
 
+    # Polymarket prices are in [0.01, 0.99]; cap all sell prices accordingly
+    MAX_SELL_PRICE = 0.99
+
     # TP1: check best ask; sell at whichever is higher
-    tp1_base = round(buy_price * 2, 4)
+    tp1_base = min(round(buy_price * 2, 4), MAX_SELL_PRICE)
     if not DRY_RUN:
         best_ask = get_best_ask(client, token_id)
         if best_ask is not None and best_ask > tp1_base:
@@ -784,22 +913,85 @@ def place_sell_tranches(
                 f"  TP1 price adjusted: best_ask={best_ask:.4f}"
                 f" > 2x={tp1_base:.4f} → using best_ask"
             )
-            tp1_base = round(best_ask, 4)
+            tp1_base = min(round(best_ask, 4), MAX_SELL_PRICE)
     else:
         log.info(f"  [DRY RUN] TP1 would check orderbook; using 2x=${tp1_base}")
 
-    tp2_price = round(buy_price * 10, 4)
-    tp3_price = round(buy_price * 50, 4)
+    tp2_price = min(round(buy_price * 10, 4), MAX_SELL_PRICE)
+    tp3_price = min(round(buy_price * 50, 4), MAX_SELL_PRICE)
     log.info(
         f"  Placing sell tranches for {label}"
         f" | filled={filled_shares} shares | buy_price=${buy_price}"
     )
+    placed = []
     for tp_num, (tp_shares, tp_price) in enumerate(
         [(tp1_shares, tp1_base), (tp2_shares, tp2_price), (tp3_shares, tp3_price)], 1
     ):
+        if tp_shares <= 0:
+            log.debug(f"  Skipping TP{tp_num} — 0 shares")
+            continue
         oid = place_limit_order(client, token_id, f"{label}-TP{tp_num}", tp_price, tp_shares, SELL)
         if oid:
             st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
+            placed.append({"order_id": oid, "label": label, "tp": tp_num, "token_id": token_id})
+    return placed
+
+
+def sell_at_expiry(
+    client: ClobClient,
+    token_id: str,
+    label: str,
+    shares: int,
+    buy_price: float,
+    bracket: int,
+    side_label: str,
+    condition_id: str = "",
+) -> list[dict]:
+    """
+    At cancel time (T-2h before market end), decide how to handle filled shares
+    based on ETH spot distance from the bracket.
+
+      distance > +EXPIRY_DISTANCE_THRESHOLD  → HOLD to resolution ($1.00 if wins)
+      distance < -EXPIRY_DISTANCE_THRESHOLD  → DO NOTHING (likely worthless)
+      within ±threshold                      → SELL ALL at best_ask
+    """
+    try:
+        eth = fetch_eth_spot()
+    except Exception as e:
+        log.warning(f"  [EXPIRY] ETH fetch failed ({e}) — falling back to TP sells")
+        return place_sell_tranches(client, token_id, label, shares, buy_price)
+
+    distance = (eth - bracket) if side_label == "YES" else (bracket - eth)
+    log.info(
+        f"  [EXPIRY] {label} | ETH=${eth:,.2f} | bracket={bracket}"
+        f" | side={side_label} | distance={distance:+.0f}"
+    )
+
+    if distance > EXPIRY_DISTANCE_THRESHOLD:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} > +{EXPIRY_DISTANCE_THRESHOLD}"
+            f" → HOLD to resolution"
+        )
+    elif distance < -EXPIRY_DISTANCE_THRESHOLD:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} < -{EXPIRY_DISTANCE_THRESHOLD}"
+            f" → likely losing — skipping sells"
+        )
+    else:
+        log.info(
+            f"  [EXPIRY] distance={distance:+.0f} within"
+            f" ±{EXPIRY_DISTANCE_THRESHOLD} → uncertain — selling all {shares} shares at best_ask"
+        )
+        best_ask = get_best_ask(client, token_id)
+        if best_ask is None:
+            log.warning(f"  [EXPIRY] No asks in book for {label} — cannot exit")
+            return []
+        sell_price = min(round(best_ask, 4), 0.99)
+        oid = place_limit_order(client, token_id, f"{label}-EXIT", sell_price, shares, SELL)
+        if oid:
+            st_sell_placed(label, oid, 1, shares, sell_price)
+            return [{"order_id": oid, "label": label, "tp": 1, "token_id": token_id}]
+    return []
 
 
 def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
@@ -809,7 +1001,8 @@ def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
     try:
         open_orders = client.get_orders(OpenOrderParams(market=condition_id))
         if isinstance(open_orders, list):
-            return {o.get("id") or o.get("orderID", "") for o in open_orders}
+            # Open order objects use "id" per CLOB API docs
+            return {o.get("id", "") for o in open_orders if o.get("id")}
         return set()
     except Exception as e:
         log.warning(f"  Could not fetch open orders: {e}")
@@ -828,6 +1021,195 @@ def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
         st_buy_cancelled(order_id)
     except Exception as e:
         log.error(f"  Cancel failed ({label} / {order_id}): {e}")
+
+# ── Sell Fill Monitor ────────────────────────────────────────────────────────
+
+def monitor_tp_sells(
+    client: ClobClient,
+    condition_id: str,
+    token_id: str,
+    orders: list[dict],
+) -> None:
+    """
+    Daemon thread: poll open orders once per POLL_SECS until each placed SELL
+    order is either filled or goes away (cancelled/expired).
+
+    Each entry in orders: {order_id, label, tp, token_id}
+    """
+    if DRY_RUN or not orders:
+        return
+
+    pending = {o["order_id"]: o for o in orders if o.get("order_id")}
+    while pending:
+        time.sleep(POLL_SECS)
+        open_ids = get_open_order_ids(client, condition_id)
+        for oid in list(pending.keys()):
+            if oid in open_ids:
+                continue  # still open
+            o = pending.pop(oid)
+            filled = get_filled_shares(client, oid)
+            if filled > 0:
+                log.info(
+                    f"  SELL FILLED ✓ {o['label']}-TP{o['tp']}"
+                    f" | {filled} shares | order_id={oid}"
+                )
+                st_sell_filled(oid)
+            else:
+                # Silently drop if already marked cancelled (last_hour_sell cancelled it)
+                with _slock:
+                    st = next(
+                        (s["status"] for s in _state["sell_orders"] if s["order_id"] == oid),
+                        None,
+                    )
+                if st != "CANCELLED":
+                    log.info(f"  SELL gone (0 fill) {o['label']}-TP{o['tp']} | order_id={oid}")
+
+
+# ── Last-Hour Sell ───────────────────────────────────────────────────────────
+
+def cancel_all_open_sells(
+    client: ClobClient, condition_id: str, token_id: str, label: str
+) -> int:
+    """Cancel all open SELL orders for this token. Returns count cancelled."""
+    if DRY_RUN:
+        log.info(f"  [DRY RUN] Would cancel all SELL orders for {label}")
+        return 0
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+        count = 0
+        for o in (orders or []):
+            if o.get("asset_id") == token_id and o.get("side", "").upper() == "SELL":
+                oid = o.get("id") or o.get("orderID", "")
+                if oid:
+                    try:
+                        client.cancel(oid)
+                        log.info(f"  [LAST_HOUR] Cancelled SELL {label} order_id={oid}")
+                        st_sell_cancelled(oid)
+                    except Exception as e:
+                        log.error(f"  [LAST_HOUR] Cancel SELL failed ({label}/{oid}): {e}")
+                    count += 1
+        return count
+    except Exception as e:
+        log.warning(f"  [LAST_HOUR] cancel_all_open_sells failed for {label}: {e}")
+        return 0
+
+
+def last_hour_sell_monitor(
+    client: ClobClient,
+    token_id: str,
+    label: str,
+    condition_id: str,
+    cancel_at: float,
+) -> None:
+    """
+    At T-1h before market end:
+      1. Cancel ALL open sell orders (TP1/TP2/TP3/EXIT) for this position.
+      2. Re-read actual wallet balance.
+      3. Place a single SELL at best_ask.
+      4. Every POLL_SECS: if best_ask changes → cancel current, re-place at new price.
+    """
+    if DRY_RUN:
+        log.info(f"[DRY RUN] Skipping last-hour sell monitor for {label}.")
+        return
+
+    market_end   = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
+    last_hour_at = market_end - LAST_HOUR_SELL_HOURS * 3600
+
+    now = time.time()
+    if last_hour_at > now:
+        wait = last_hour_at - now
+        log.info(
+            f"  [LAST_HOUR] {label} — aggressive sell scheduled in {wait/60:.0f}m "
+            f"(T-{LAST_HOUR_SELL_HOURS}h before market end)"
+        )
+        time.sleep(wait)
+
+    if time.time() >= market_end:
+        log.info(f"  [LAST_HOUR] {label} — market already ended, skipping")
+        return
+
+    log.info(f"  [LAST_HOUR] {label} — entering last-hour aggressive sell phase")
+
+    # Step 1: Cancel all existing sell orders
+    n = cancel_all_open_sells(client, condition_id, token_id, label)
+    if n:
+        log.info(f"  [LAST_HOUR] {label} — cancelled {n} sell order(s)")
+
+    # Step 2: Re-read actual wallet balance
+    shares = get_token_position(client, token_id)
+    if shares <= 0:
+        log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
+        return
+
+    # Inner helper: place sell at current best_ask; returns (order_id, price) or (None, None)
+    def _place(qty: int) -> tuple[str | None, float | None]:
+        ask = get_best_ask(client, token_id)
+        if ask is None:
+            log.warning(f"  [LAST_HOUR] {label} — no asks in book")
+            return None, None
+        sell_price = min(round(ask, 4), 0.99)
+        oid = place_limit_order(client, token_id, f"{label}-LAST", sell_price, qty, SELL)
+        if oid:
+            st_sell_placed(label, oid, 1, qty, sell_price)
+        return oid, sell_price
+
+    # Step 3: Place initial sell
+    current_oid, current_price = _place(shares)
+
+    # Step 4: Rescan loop until filled or market closes
+    while time.time() < market_end:
+        time.sleep(POLL_SECS)
+        if time.time() >= market_end:
+            break
+
+        # If no active order (placement failed / no asks), retry
+        if current_oid is None:
+            shares = get_token_position(client, token_id)
+            if shares <= 0:
+                log.info(f"  [LAST_HOUR] {label} — no shares remaining")
+                return
+            current_oid, current_price = _place(shares)
+            continue
+
+        # Check if current order is still open
+        open_ids = get_open_order_ids(client, condition_id)
+        if current_oid not in open_ids:
+            filled = get_filled_shares(client, current_oid)
+            if filled > 0:
+                log.info(f"  [LAST_HOUR] FILLED ✓ {label} | {filled} shares")
+                st_sell_filled(current_oid)
+            else:
+                log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
+            return
+
+        # Check if best_ask has moved
+        ask = get_best_ask(client, token_id)
+        if ask is None:
+            continue
+        new_price = min(round(ask, 4), 0.99)
+        if new_price == current_price:
+            continue
+
+        # Re-price: cancel current and place at new best_ask
+        log.info(
+            f"  [LAST_HOUR] {label} — re-pricing ${current_price} → ${new_price}"
+        )
+        try:
+            client.cancel(current_oid)
+            st_sell_cancelled(current_oid)
+        except Exception as e:
+            log.error(f"  [LAST_HOUR] Re-price cancel failed ({label}): {e}")
+            continue
+
+        shares = get_token_position(client, token_id)
+        if shares <= 0:
+            log.info(f"  [LAST_HOUR] {label} — no shares remaining after re-price")
+            return
+
+        current_oid, current_price = _place(shares)
+
+    log.info(f"  [LAST_HOUR] {label} — market window ended.")
+
 
 # ── Monitor + Sell ────────────────────────────────────────────────────────────
 
@@ -871,11 +1253,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
-            placed_price = o["buy_price"]
-            if placed_price <= ORDER_PRICE:
+            placed_price   = o["buy_price"]
+            intended_price = o.get("intended_price", ORDER_PRICE)
+            if placed_price <= intended_price:
                 continue  # already at desired price, nothing to do
             new_tick = get_tick_size(client, o["token_id"], {})
-            ideal_price = snap_price(ORDER_PRICE, new_tick)
+            ideal_price = snap_price(intended_price, new_tick)
             if ideal_price < placed_price:
                 log.info(
                     f"  Tick upgrade detected for {o['label']}: "
@@ -924,9 +1307,24 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     # Check for partial fill before discarding
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
-                        log.info(f"  Partial fill on cancelled order: {partial} shares — placing sells")
+                        log.info(f"  Partial fill on cancelled order: {partial} shares — evaluating expiry strategy")
                         st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
-                        place_sell_tranches(client, o["token_id"], o["label"], partial, o["buy_price"])
+                        exp_orders = sell_at_expiry(
+                            client, o["token_id"], o["label"], partial, o["buy_price"],
+                            o["bracket"], o["side_label"], o["condition_id"],
+                        )
+                        if exp_orders:
+                            threading.Thread(
+                                target=monitor_tp_sells,
+                                args=(client, o["condition_id"], o["token_id"], exp_orders),
+                                daemon=True,
+                            ).start()
+                        threading.Thread(
+                            target=last_hour_sell_monitor,
+                            args=(client, o["token_id"], o["label"],
+                                  o["condition_id"], o["cancel_at"]),
+                            daemon=True,
+                        ).start()
                     else:
                         st_buy_cancelled(oid)
                     pending.pop(oid)
@@ -939,7 +1337,21 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
-                        place_sell_tranches(client, o["token_id"], o["label"], filled, o["buy_price"])
+                        tp_orders = place_sell_tranches(
+                            client, o["token_id"], o["label"], filled, o["buy_price"]
+                        )
+                        if tp_orders:
+                            threading.Thread(
+                                target=monitor_tp_sells,
+                                args=(client, o["condition_id"], o["token_id"], tp_orders),
+                                daemon=True,
+                            ).start()
+                        threading.Thread(
+                            target=last_hour_sell_monitor,
+                            args=(client, o["token_id"], o["label"],
+                                  o["condition_id"], o["cancel_at"]),
+                            daemon=True,
+                        ).start()
                     else:
                         log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
 
@@ -950,7 +1362,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # Status line — show closest cancel deadline
         earliest = min(o["cancel_at"] for o in pending.values())
         mins_left = (earliest - now) / 60
-        log.info(
+        log.debug(
             f"  Waiting on {len(pending)} order(s) | "
             f"next cancel in {mins_left:.0f}m"
         )
@@ -976,6 +1388,21 @@ def find_open_buy_order(client: ClobClient, condition_id: str, token_id: str) ->
     return None
 
 
+def count_open_sells(client: ClobClient, condition_id: str, token_id: str) -> int:
+    """Return number of open SELL orders for this token (used on startup to avoid re-placing TPs)."""
+    if DRY_RUN:
+        return 0
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+        return sum(
+            1 for o in (orders or [])
+            if o.get("asset_id") == token_id and o.get("side", "").upper() == "SELL"
+        )
+    except Exception as e:
+        log.warning(f"  [STARTUP] open sell check failed for {token_id[:12]}: {e}")
+        return 0
+
+
 def get_token_position(client: ClobClient, token_id: str) -> int:
     """
     Return number of shares currently held for this conditional token.
@@ -988,7 +1415,7 @@ def get_token_position(client: ClobClient, token_id: str) -> int:
             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         )
         raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", 0)
-        return int(float(raw or 0))
+        return int(float(raw or 0) / 1e6)  # contract returns raw units; 1 share = 1e6 raw
     except Exception as e:
         log.warning(f"  [STARTUP] position check failed for {token_id[:12]}: {e}")
     return 0
@@ -1000,27 +1427,31 @@ def place_for_date(
     client: ClobClient,
     target_date: date,
     upper: int,
+    upper2: int,
     lower: int,
+    lower2: int,
     skip_slugs: set[str] | None = None,
 ) -> list[dict]:
     """
-    For a given date, place BUY limit orders on the upper (YES) and lower (NO)
-    brackets. Returns a list of order dicts for the monitor loop.
+    For a given date, place BUY limit orders on all four brackets.
+    Returns a list of order dicts for the monitor loop.
     Silently skips any bracket whose market is not yet live.
 
     skip_slugs: if provided, slugs already placed are skipped and newly placed
                 slugs are added to the set (used for tomorrow retry logic).
     """
     date_label = target_date.strftime("%b %-d")
-    log.info(f"--- {date_label} | upper={upper} YES | lower={lower} NO ---")
+    log.info(f"--- {date_label} | upper={upper}/{upper2} YES | lower={lower}/{lower2} NO ---")
     placed = []
 
     brackets = [
-        (upper, "YES", 0),  # (bracket, side_label, token_index)
-        (lower, "NO",  1),
+        (upper,  "YES", 0, ORDER_PRICE),      # (bracket, side_label, token_index, order_price)
+        (upper2, "YES", 0, ORDER_PRICE_EXT),
+        (lower,  "NO",  1, ORDER_PRICE),
+        (lower2, "NO",  1, ORDER_PRICE_EXT),
     ]
 
-    for bracket, side_label, tok_idx in brackets:
+    for bracket, side_label, tok_idx, order_price in brackets:
         slug = build_slug(bracket, target_date)
 
         if skip_slugs is not None and slug in skip_slugs:
@@ -1042,9 +1473,9 @@ def place_for_date(
         label = f"{side_label} {slug}"
 
         tick  = get_tick_size(client, token_id, market)
-        price = snap_price(ORDER_PRICE, tick)
-        if price != ORDER_PRICE:
-            log.info(f"  Price snapped: ${ORDER_PRICE} → ${price} (tick=${tick})")
+        price = snap_price(order_price, tick)
+        if price != order_price:
+            log.info(f"  Price snapped: ${order_price} → ${price} (tick=${tick})")
 
         # ── Startup guard: don't re-place if already open or already filled ──
         market_end = datetime(
@@ -1059,7 +1490,7 @@ def place_for_date(
             placed.append({
                 "label": label, "order_id": existing_oid,
                 "condition_id": condition_id, "token_id": token_id,
-                "buy_price": price, "cancel_at": cancel_at,
+                "buy_price": price, "intended_price": order_price, "cancel_at": cancel_at,
                 "bracket": bracket, "side_label": side_label, "target_date": target_date,
             })
             st_buy_existing(label, existing_oid, bracket, side_label,
@@ -1070,13 +1501,46 @@ def place_for_date(
 
         existing_shares = get_token_position(client, token_id)
         if existing_shares > 0:
-            log.info(
-                f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
-                f" — placing sell tranches"
-            )
             st_buy_filled("startup-" + token_id[:8], existing_shares,
                           token_id, price, label)
-            place_sell_tranches(client, token_id, label, existing_shares, price)
+            open_sells = count_open_sells(client, condition_id, token_id)
+            if open_sells > 0:
+                log.info(
+                    f"  [STARTUP] {open_sells} open SELL order(s) already exist for {label}"
+                    f" — skipping sell placement"
+                )
+            elif time.time() >= cancel_at:
+                # Past the cancel window — re-evaluate with expiry strategy
+                # (handles restart after a HOLD decision where no sells were placed)
+                log.info(
+                    f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
+                    f" — within expiry window, re-evaluating"
+                )
+                exp_orders = sell_at_expiry(client, token_id, label, existing_shares, price,
+                                            bracket, side_label, condition_id)
+                if exp_orders:
+                    threading.Thread(
+                        target=monitor_tp_sells,
+                        args=(client, condition_id, token_id, exp_orders),
+                        daemon=True,
+                    ).start()
+            else:
+                log.info(
+                    f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
+                    f" — placing sell tranches"
+                )
+                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price)
+                if tp_orders:
+                    threading.Thread(
+                        target=monitor_tp_sells,
+                        args=(client, condition_id, token_id, tp_orders),
+                        daemon=True,
+                    ).start()
+            threading.Thread(
+                target=last_hour_sell_monitor,
+                args=(client, token_id, label, condition_id, cancel_at),
+                daemon=True,
+            ).start()
             if skip_slugs is not None:
                 skip_slugs.add(slug)
             continue
@@ -1088,15 +1552,16 @@ def place_for_date(
 
         if order_id:
             placed.append({
-                "label":        label,
-                "order_id":     order_id,
-                "condition_id": condition_id,
-                "token_id":     token_id,
-                "buy_price":    price,
-                "cancel_at":    cancel_at,
-                "bracket":      bracket,
-                "side_label":   side_label,
-                "target_date":  target_date,
+                "label":          label,
+                "order_id":       order_id,
+                "condition_id":   condition_id,
+                "token_id":       token_id,
+                "buy_price":      price,
+                "intended_price": order_price,
+                "cancel_at":      cancel_at,
+                "bracket":        bracket,
+                "side_label":     side_label,
+                "target_date":    target_date,
             })
             st_buy_placed(label, order_id, bracket, side_label,
                           target_date, price, ORDER_SIZE, cancel_at, token_id)
@@ -1111,7 +1576,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info("ETH Daily Bracket Limit Order Bot")
     log.info(f"Mode  : {'DRY RUN' if DRY_RUN else 'LIVE'}")
-    log.info(f"Order : {ORDER_SIZE} shares @ ${ORDER_PRICE} each side")
+    log.info(f"Order : {ORDER_SIZE} shares | inner=${ORDER_PRICE} | outer=${ORDER_PRICE_EXT}")
     log.info(f"TP1   : 50% @ 2x = ${ORDER_PRICE * 2:.4f}  (or best ask if higher)")
     log.info(f"TP2   : 25% @ 10x = ${ORDER_PRICE * 10:.4f}")
     log.info(f"TP3   : 25% @ 50x = ${ORDER_PRICE * 50:.4f}")
@@ -1135,8 +1600,8 @@ def main() -> None:
         if today not in placed_dates:
             try:
                 eth   = fetch_eth_spot()
-                upper, lower = get_brackets(eth)
-                st_set_eth(eth, upper, lower)
+                upper, upper2, lower, lower2 = get_brackets(eth)
+                st_set_eth(eth, upper, upper2, lower, lower2)
 
                 all_orders: list[dict] = []
 
@@ -1144,18 +1609,18 @@ def main() -> None:
                 market_end_utc = datetime(today.year, today.month, today.day,
                                           MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
                 hours_left = (market_end_utc - utc_now).total_seconds() / 3600
-                if hours_left <= 6:
+                if hours_left <= 3:
                     log.info(
                         f"[SKIP] {hours_left:.1f}h until market end — "
                         f"skipping today's BUY orders (threshold: 6h)"
                     )
                 else:
-                    all_orders += place_for_date(client, today, upper, lower)
+                    all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
 
                 placed_dates.add(today)
                 tmrw_placed.clear()  # new day — reset tomorrow tracking
 
-                tmrw_orders = place_for_date(client, tomorrow, upper, lower,
+                tmrw_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
                                              skip_slugs=tmrw_placed)
                 all_orders += tmrw_orders
 
@@ -1170,12 +1635,12 @@ def main() -> None:
 
         else:
             # Retry tomorrow brackets that weren't live yet when the day started
-            if len(tmrw_placed) < 2:
+            if len(tmrw_placed) < 4:
                 try:
                     eth = fetch_eth_spot()
-                    upper, lower = get_brackets(eth)
-                    st_set_eth(eth, upper, lower)
-                    retry_orders = place_for_date(client, tomorrow, upper, lower,
+                    upper, upper2, lower, lower2 = get_brackets(eth)
+                    st_set_eth(eth, upper, upper2, lower, lower2)
+                    retry_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
                                                   skip_slugs=tmrw_placed)
                     if retry_orders:
                         log.info(f"Tomorrow retry: placed {len(retry_orders)} new order(s).")
