@@ -22,6 +22,8 @@ Strategy:
   BUY orders are cancelled 2 hours before market resolution (14:00 UTC = midnight MYT-2h).
   SELL orders are placed-and-forget.
 
+  Skip today - line ~1600
+
 Requirements:
     pip install py-clob-client python-dotenv requests colorama
 
