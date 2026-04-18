@@ -300,6 +300,15 @@ def st_sell_cancelled(order_id: str) -> None:
                 break
         _state["updated"] = _now_str()
 
+def st_sell_filled(order_id: str) -> None:
+    with _slock:
+        for o in _state["sell_orders"]:
+            if o["order_id"] == order_id:
+                o["status"] = "FILLED"
+                break
+        _state["stats"]["pnl"] = round(_state["stats"].get("pnl", 0.0), 4)  # placeholder
+        _state["updated"] = _now_str()
+
 def st_sell_placed(label: str, order_id: str, tp: int,
                    shares: int, price: float) -> None:
     with _slock:
@@ -862,13 +871,15 @@ def place_sell_tranches(
     label: str,
     filled_shares: int,
     buy_price: float,
-) -> None:
+) -> list[dict]:
     """
     Place 3 tiered GTC limit SELL orders after a BUY fills.
 
     TP1  50% shares  at max(buy_price * 2, best_ask)
     TP2  25% shares  at buy_price * 10
     TP3  remaining   at buy_price * 50
+
+    Returns list of placed order dicts for monitoring.
     """
     # Re-verify actual wallet balance to avoid "not enough shares" errors
     if not DRY_RUN:
@@ -906,6 +917,7 @@ def place_sell_tranches(
         f"  Placing sell tranches for {label}"
         f" | filled={filled_shares} shares | buy_price=${buy_price}"
     )
+    placed = []
     for tp_num, (tp_shares, tp_price) in enumerate(
         [(tp1_shares, tp1_base), (tp2_shares, tp2_price), (tp3_shares, tp3_price)], 1
     ):
@@ -915,6 +927,8 @@ def place_sell_tranches(
         oid = place_limit_order(client, token_id, f"{label}-TP{tp_num}", tp_price, tp_shares, SELL)
         if oid:
             st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
+            placed.append({"order_id": oid, "label": label, "tp": tp_num, "token_id": token_id})
+    return placed
 
 
 def sell_at_expiry(
@@ -925,7 +939,8 @@ def sell_at_expiry(
     buy_price: float,
     bracket: int,
     side_label: str,
-) -> None:
+    condition_id: str = "",
+) -> list[dict]:
     """
     At cancel time (T-2h before market end), decide how to handle filled shares
     based on ETH spot distance from the bracket.
@@ -938,8 +953,7 @@ def sell_at_expiry(
         eth = fetch_eth_spot()
     except Exception as e:
         log.warning(f"  [EXPIRY] ETH fetch failed ({e}) — falling back to TP sells")
-        place_sell_tranches(client, token_id, label, shares, buy_price)
-        return
+        return place_sell_tranches(client, token_id, label, shares, buy_price)
 
     distance = (eth - bracket) if side_label == "YES" else (bracket - eth)
     log.info(
@@ -965,11 +979,13 @@ def sell_at_expiry(
         best_ask = get_best_ask(client, token_id)
         if best_ask is None:
             log.warning(f"  [EXPIRY] No asks in book for {label} — cannot exit")
-            return
+            return []
         sell_price = min(round(best_ask, 4), 0.99)
         oid = place_limit_order(client, token_id, f"{label}-EXIT", sell_price, shares, SELL)
         if oid:
             st_sell_placed(label, oid, 1, shares, sell_price)
+            return [{"order_id": oid, "label": label, "tp": 1, "token_id": token_id}]
+    return []
 
 
 def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
@@ -999,6 +1015,49 @@ def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
         st_buy_cancelled(order_id)
     except Exception as e:
         log.error(f"  Cancel failed ({label} / {order_id}): {e}")
+
+# ── Sell Fill Monitor ────────────────────────────────────────────────────────
+
+def monitor_tp_sells(
+    client: ClobClient,
+    condition_id: str,
+    token_id: str,
+    orders: list[dict],
+) -> None:
+    """
+    Daemon thread: poll open orders once per POLL_SECS until each placed SELL
+    order is either filled or goes away (cancelled/expired).
+
+    Each entry in orders: {order_id, label, tp, token_id}
+    """
+    if DRY_RUN or not orders:
+        return
+
+    pending = {o["order_id"]: o for o in orders if o.get("order_id")}
+    while pending:
+        time.sleep(POLL_SECS)
+        open_ids = get_open_order_ids(client, condition_id)
+        for oid in list(pending.keys()):
+            if oid in open_ids:
+                continue  # still open
+            o = pending.pop(oid)
+            filled = get_filled_shares(client, oid)
+            if filled > 0:
+                log.info(
+                    f"  SELL FILLED ✓ {o['label']}-TP{o['tp']}"
+                    f" | {filled} shares | order_id={oid}"
+                )
+                st_sell_filled(oid)
+            else:
+                # Silently drop if already marked cancelled (last_hour_sell cancelled it)
+                with _slock:
+                    st = next(
+                        (s["status"] for s in _state["sell_orders"] if s["order_id"] == oid),
+                        None,
+                    )
+                if st != "CANCELLED":
+                    log.info(f"  SELL gone (0 fill) {o['label']}-TP{o['tp']} | order_id={oid}")
+
 
 # ── Last-Hour Sell ───────────────────────────────────────────────────────────
 
@@ -1112,6 +1171,7 @@ def last_hour_sell_monitor(
             filled = get_filled_shares(client, current_oid)
             if filled > 0:
                 log.info(f"  [LAST_HOUR] FILLED ✓ {label} | {filled} shares")
+                st_sell_filled(current_oid)
             else:
                 log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
             return
@@ -1243,10 +1303,16 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if partial > 0:
                         log.info(f"  Partial fill on cancelled order: {partial} shares — evaluating expiry strategy")
                         st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
-                        sell_at_expiry(
+                        exp_orders = sell_at_expiry(
                             client, o["token_id"], o["label"], partial, o["buy_price"],
-                            o["bracket"], o["side_label"],
+                            o["bracket"], o["side_label"], o["condition_id"],
                         )
+                        if exp_orders:
+                            threading.Thread(
+                                target=monitor_tp_sells,
+                                args=(client, o["condition_id"], o["token_id"], exp_orders),
+                                daemon=True,
+                            ).start()
                         threading.Thread(
                             target=last_hour_sell_monitor,
                             args=(client, o["token_id"], o["label"],
@@ -1265,7 +1331,15 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
-                        place_sell_tranches(client, o["token_id"], o["label"], filled, o["buy_price"])
+                        tp_orders = place_sell_tranches(
+                            client, o["token_id"], o["label"], filled, o["buy_price"]
+                        )
+                        if tp_orders:
+                            threading.Thread(
+                                target=monitor_tp_sells,
+                                args=(client, o["condition_id"], o["token_id"], tp_orders),
+                                daemon=True,
+                            ).start()
                         threading.Thread(
                             target=last_hour_sell_monitor,
                             args=(client, o["token_id"], o["label"],
@@ -1436,14 +1510,26 @@ def place_for_date(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                     f" — within expiry window, re-evaluating"
                 )
-                sell_at_expiry(client, token_id, label, existing_shares, price,
-                               bracket, side_label)
+                exp_orders = sell_at_expiry(client, token_id, label, existing_shares, price,
+                                            bracket, side_label, condition_id)
+                if exp_orders:
+                    threading.Thread(
+                        target=monitor_tp_sells,
+                        args=(client, condition_id, token_id, exp_orders),
+                        daemon=True,
+                    ).start()
             else:
                 log.info(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                     f" — placing sell tranches"
                 )
-                place_sell_tranches(client, token_id, label, existing_shares, price)
+                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price)
+                if tp_orders:
+                    threading.Thread(
+                        target=monitor_tp_sells,
+                        args=(client, condition_id, token_id, tp_orders),
+                        daemon=True,
+                    ).start()
             threading.Thread(
                 target=last_hour_sell_monitor,
                 args=(client, token_id, label, condition_id, cancel_at),
