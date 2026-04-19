@@ -359,6 +359,12 @@ h2{font-size:14px;font-weight:600;margin:0 0 12px;color:#c8d0e0;text-transform:u
 .card .lbl{font-size:11px;color:#5a6a85;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .card .val{font-size:20px;font-weight:700;font-family:monospace}
 .section{background:#161b27;border:1px solid #2a3347;border-radius:10px;padding:16px;margin-bottom:14px}
+.sec-hdr{display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none;margin-bottom:0}
+.sec-hdr h2{margin:0}
+.sec-hdr:hover h2{color:#e8edf5}
+.chevron{color:#5a6a85;font-size:13px;transition:transform .2s;display:inline-block}
+.chevron.open{transform:rotate(180deg)}
+.sec-body{margin-top:14px}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#5a6a85;font-weight:500;padding:0 8px 8px 0;font-size:11px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
 td{padding:7px 8px 7px 0;border-top:1px solid #1e2535;font-family:monospace;font-size:12px;vertical-align:middle}
@@ -402,14 +408,21 @@ function statusBadge(s){
 }
 function tpBadge(tp){return badge(['','b-tp1','b-tp2','b-tp3'][tp]||'b-tp1','TP'+tp)}
 
+let _lastState=null;
+const _col={buys:false,pos:false,sells:false,closed:false};
+function toggle(k){_col[k]=!_col[k];if(_lastState)render(_lastState);}
+function secHdr(label,k){
+  return `<div class="sec-hdr" onclick="toggle('${k}')"><h2>${label}</h2><span class="chevron ${_col[k]?'':'open'}">▼</span></div>`;
+}
+
 function render(s){
   const st=s.stats||{};
   const pnl=parseFloat(st.pnl||0);
   const mode=s.mode==='DRY RUN'?badge('b-dry','DRY RUN'):badge('b-live','⚡ LIVE');
-  const buys=s.buy_orders||[];
-  const pos=s.positions||[];
-  const sells=s.sell_orders||[];
-  const closed=s.closed||[];
+  const buys=[...(s.buy_orders||[])].sort((a,b)=>(b.cancel_at||0)-(a.cancel_at||0));
+  const pos=[...(s.positions||[])].reverse();
+  const sells=[...(s.sell_orders||[])].reverse();
+  const closed=[...(s.closed||[])].reverse();
   const openBuys=buys.filter(o=>o.status==='OPEN'||o.status==='RESUMING').length;
   const totalCost=buys.filter(o=>o.status!=='CANCELLED').reduce((a,o)=>a+(o.cost||0),0);
   const filledCost=buys.filter(o=>o.status==='FILLED').reduce((a,o)=>a+(o.cost||0),0);
@@ -497,8 +510,8 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>BUY Orders (${buys.length})</h2>
-      <div style="overflow-x:auto">
+      ${secHdr(`BUY Orders (${buys.length})`, 'buys')}
+      ${_col.buys?'':` <div class="sec-body"><div style="overflow-x:auto">
       <table>
         <thead><tr>
           <th>Date</th><th>Bracket</th><th>Side</th><th>Price</th>
@@ -506,17 +519,17 @@ function render(s){
         </tr></thead>
         <tbody>${buyRows}</tbody>
       </table>
-      </div>
+      </div></div>`}
     </div>
 
     <div class="section">
-      <h2>Positions — Filled &amp; Awaiting Sell (${pos.length})</h2>
-      ${posCards}
+      ${secHdr(`Positions (${pos.length})`, 'pos')}
+      ${_col.pos?'':` <div class="sec-body">${posCards}</div>`}
     </div>
 
     <div class="section">
-      <h2>Sell Orders (${sells.length})</h2>
-      ${sells.length?`<div style="overflow-x:auto"><table>
+      ${secHdr(`Sell Orders (${sells.length})`, 'sells')}
+      ${_col.sells?'':` <div class="sec-body">${sells.length?`<div style="overflow-x:auto"><table>
         <thead><tr><th>Market</th><th>TP</th><th>Shares</th><th>Sell @</th><th>Status</th></tr></thead>
         <tbody>${sells.map(o=>`<tr>
           <td>${o.label||'—'}</td>
@@ -526,15 +539,15 @@ function render(s){
           <td>${statusBadge(o.status)}</td>
         </tr>`).join('')}</tbody>
       </table></div>`
-      :'<p class="dim" style="font-size:12px;padding:4px 0">No sell orders yet</p>'}
+      :'<p class="dim" style="font-size:12px;padding:4px 0">No sell orders yet</p>'}</div>`}
     </div>
 
     <div class="section">
-      <h2>Closed Trades (${closed.length})</h2>
-      <div style="overflow-x:auto"><table>
+      ${secHdr(`Closed Trades (${closed.length})`, 'closed')}
+      ${_col.closed?'':` <div class="sec-body"><div style="overflow-x:auto"><table>
         <thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Buy @</th><th>Exit</th><th>Exit @</th><th>PnL</th></tr></thead>
         <tbody>${closedRows}</tbody>
-      </table></div>
+      </table></div></div>`}
     </div>
 
     <div class="section">
@@ -560,6 +573,7 @@ async function poll(){
   try{
     const r=await fetch('/state');
     const d=await r.json();
+    _lastState=d;
     render(d);
   }catch(e){console.error('fetch error',e);}
 }
