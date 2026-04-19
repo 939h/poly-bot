@@ -364,7 +364,7 @@ h2{font-size:14px;font-weight:600;margin:0 0 12px;color:#c8d0e0;text-transform:u
 .sec-hdr:hover h2{color:#e8edf5}
 .chevron{color:#5a6a85;font-size:13px;transition:transform .2s;display:inline-block}
 .chevron.open{transform:rotate(180deg)}
-.sec-body{margin-top:14px}
+.sec-body{margin-top:14px;max-height:420px;overflow-y:auto}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#5a6a85;font-weight:500;padding:0 8px 8px 0;font-size:11px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
 td{padding:7px 8px 7px 0;border-top:1px solid #1e2535;font-family:monospace;font-size:12px;vertical-align:middle}
