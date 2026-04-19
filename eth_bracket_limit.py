@@ -1268,6 +1268,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
+            if now >= o["cancel_at"]:
+                continue  # about to be cancelled below; skip tick-upgrade
             placed_price   = o["buy_price"]
             intended_price = o.get("intended_price", ORDER_PRICE)
             if placed_price <= intended_price:
@@ -1312,11 +1314,11 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                 # Cancel if deadline passed and order still open
                 if now >= o["cancel_at"]:
                     if oid in open_ids:
-                        mins_to_end = (o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600 - now) / 60
+                        mins_past = (now - o["cancel_at"]) / 60
                         log.warning(
                             f"  Cancelling {o['label']} — "
                             f"{CANCEL_BEFORE_END_HOURS}h before market end"
-                            + (f" ({-mins_to_end:.0f}m past deadline)" if mins_to_end < 0 else "")
+                            + (f" ({mins_past:.0f}m past cancel deadline)" if mins_past > 0 else "")
                         )
                         cancel_order(client, oid, o["label"])
                     # Check for partial fill before discarding
