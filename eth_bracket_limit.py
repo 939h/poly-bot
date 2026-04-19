@@ -324,6 +324,13 @@ def st_sell_placed(label: str, order_id: str, tp: int,
         })
         _state["updated"] = _now_str()
 
+def st_market_closed(label: str) -> None:
+    """Remove position and sell orders for a resolved market from the dashboard."""
+    with _slock:
+        _state["positions"]   = [p for p in _state["positions"]   if p["label"] != label]
+        _state["sell_orders"] = [o for o in _state["sell_orders"] if o["label"] != label]
+        _state["updated"] = _now_str()
+
 def st_update_ask(token_id: str, ask: float | None) -> None:
     with _slock:
         for p in _state["positions"]:
@@ -1229,6 +1236,13 @@ def last_hour_sell_monitor(
         current_oid, current_price = _place(shares)
 
     log.info(f"  [LAST_HOUR] {label} — market window ended.")
+    # Cancel any sell orders still open at market close (never filled)
+    remaining = cancel_all_open_sells(client, condition_id, token_id, label)
+    if remaining:
+        log.info(f"  [LAST_HOUR] {label} — cancelled {remaining} sell order(s) at market close")
+    # Erase position and sell orders from dashboard
+    st_market_closed(label)
+    log.info(f"  [LAST_HOUR] {label} — cleared from dashboard")
 
 
 # ── Monitor + Sell ────────────────────────────────────────────────────────────
