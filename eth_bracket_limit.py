@@ -1569,6 +1569,15 @@ def place_for_date(
             continue
         # ─────────────────────────────────────────────────────────────────────
 
+        # Skip new BUYs when too close to market close; existing positions handled above.
+        hours_until_close = (market_end.timestamp() - time.time()) / 3600
+        if hours_until_close <= CANCEL_BEFORE_END_HOURS + 1:
+            log.info(
+                f"  [SKIP] {label} — {hours_until_close:.1f}h until close, "
+                f"not placing new BUY"
+            )
+            continue
+
         order_id = place_limit_order(
             client, token_id, label, price, ORDER_SIZE, BUY
         )
@@ -1628,17 +1637,9 @@ def main() -> None:
 
                 all_orders: list[dict] = []
 
-                # Skip today if < 6h remain before market resolution (midnight MYT = 16:00 UTC)
-                market_end_utc = datetime(today.year, today.month, today.day,
-                                          MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
-                hours_left = (market_end_utc - utc_now).total_seconds() / 3600
-                if hours_left <= 3:
-                    log.info(
-                        f"[SKIP] {hours_left:.1f}h until market end — "
-                        f"skipping today's BUY orders (threshold: 6h)"
-                    )
-                else:
-                    all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
+                # Always call place_for_date for today — it resumes existing positions
+                # even when too close to place new BUYs (guard is inside place_for_date).
+                all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
 
                 placed_dates.add(today)
                 tmrw_placed.clear()  # new day — reset tomorrow tracking
