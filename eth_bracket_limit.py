@@ -1009,8 +1009,9 @@ def sell_at_expiry(
     return []
 
 
-def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
-    """Return set of open order IDs for this market condition."""
+def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str] | None:
+    """Return set of open order IDs for this market condition, or None on API error.
+    Callers must treat None as 'unknown' (not 'no open orders')."""
     if DRY_RUN:
         return set()
     try:
@@ -1021,7 +1022,7 @@ def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
         return set()
     except Exception as e:
         log.warning(f"  Could not fetch open orders: {e}")
-        return set()
+        return None  # distinguish from genuinely-empty result
 
 
 def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
@@ -1058,6 +1059,8 @@ def monitor_tp_sells(
     while pending:
         time.sleep(POLL_SECS)
         open_ids = get_open_order_ids(client, condition_id)
+        if open_ids is None:
+            continue  # API error; assume all still open, retry next poll
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
@@ -1188,6 +1191,8 @@ def last_hour_sell_monitor(
 
         # Check if current order is still open
         open_ids = get_open_order_ids(client, condition_id)
+        if open_ids is None:
+            continue  # API error; assume still open, retry next poll
         if current_oid not in open_ids:
             filled = get_filled_shares(client, current_oid)
             if filled > 0:
@@ -1311,16 +1316,15 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     continue
                 o = pending[oid]
 
-                # Cancel if deadline passed and order still open
+                # Cancel if deadline passed — always attempt, cancel_order is idempotent
                 if now >= o["cancel_at"]:
-                    if oid in open_ids:
-                        mins_past = (now - o["cancel_at"]) / 60
-                        log.warning(
-                            f"  Cancelling {o['label']} — "
-                            f"{CANCEL_BEFORE_END_HOURS}h before market end"
-                            + (f" ({mins_past:.0f}m past cancel deadline)" if mins_past > 0 else "")
-                        )
-                        cancel_order(client, oid, o["label"])
+                    mins_past = (now - o["cancel_at"]) / 60
+                    log.warning(
+                        f"  Cancelling {o['label']} — "
+                        f"{CANCEL_BEFORE_END_HOURS}h before market end"
+                        + (f" ({mins_past:.0f}m past cancel deadline)" if mins_past > 0 else "")
+                    )
+                    cancel_order(client, oid, o["label"])
                     # Check for partial fill before discarding
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
@@ -1347,7 +1351,9 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     pending.pop(oid)
                     continue
 
-                # Detect fill (order no longer open)
+                # Detect fill (order no longer open) — skip if API errored
+                if open_ids is None:
+                    continue  # unknown state; assume still open, retry next poll
                 if oid not in open_ids:
                     pending.pop(oid)
                     filled = get_filled_shares(client, oid)
