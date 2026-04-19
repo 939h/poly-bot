@@ -397,6 +397,7 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:16px;padding-bo
 <script>
 function fmt2(v){return v!=null?'$'+parseFloat(v).toFixed(2):'—'}
 function fmt4(v){return v!=null?'$'+parseFloat(v).toFixed(4):'—'}
+function fmtC(v){if(v==null)return '—';const c=parseFloat(v)*100;return c.toFixed(2).replace(/\.?0+$/,'')+'¢';}
 function fmtPnl(v){
   const n=parseFloat(v)||0;
   return `<span class="${n>0?'green':n<0?'red':'dim'}">${n>=0?'+':''}$${Math.abs(n).toFixed(4)}</span>`;
@@ -436,7 +437,7 @@ function render(s){
       <td>${o.date_str}</td>
       <td>${o.bracket.toLocaleString()}</td>
       <td class="${o.side==='YES'?'green':'amber'}">${o.side}</td>
-      <td>${fmt4(o.price)}</td>
+      <td>${fmtC(o.price)}</td>
       <td>${(o.size||0).toLocaleString()}</td>
       <td>${fmt4(o.cost)}</td>
       <td>${statusBadge(o.status)}</td>
@@ -448,12 +449,12 @@ function render(s){
 
   // Position cards
   const posCards=pos.length?pos.map(p=>{
-    const ask=p.current_ask!=null?fmt4(p.current_ask):'<span class="dim">—</span>';
+    const ask=p.current_ask!=null?fmtC(p.current_ask):'<span class="dim">—</span>';
     const unreal=p.current_ask!=null?fmtPnl((p.current_ask-p.buy_price)*p.shares):'<span class="dim">—</span>';
     const sellsForPos=sells.filter(o=>o.label&&o.label.startsWith(p.label));
     const tpPills=sellsForPos.map(o=>`
       <div class="tp-pill ${['','b-tp1','b-tp2','b-tp3'][o.tp]||'b-tp1'}">
-        TP${o.tp} ${o.shares}sh @ ${fmt4(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
+        TP${o.tp} ${o.shares}sh @ ${fmtC(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
       </div>`).join('');
     return `<div class="pos-card">
       <div class="pos-hdr">
@@ -461,7 +462,7 @@ function render(s){
         <span class="green" style="font-size:12px">${p.shares} shares filled</span>
       </div>
       <div class="pos-meta">
-        <span>Buy @ ${fmt4(p.buy_price)}</span>
+        <span>Buy @ ${fmtC(p.buy_price)}</span>
         <span>Ask ${ask}</span>
         <span>Unrealised ${unreal}</span>
         <span>Cost ${fmt4(p.buy_price*p.shares)}</span>
@@ -476,9 +477,9 @@ function render(s){
     <td>${c.ts||'—'}</td>
     <td>${c.label||'—'}</td>
     <td class="${c.side==='YES'?'green':'amber'}">${c.side||'—'}</td>
-    <td>${fmt4(c.buy_price)}</td>
+    <td>${fmtC(c.buy_price)}</td>
     <td>${badge(c.exit_type==='CANCEL'?'b-cancel':c.exit_type==='TP1'?'b-tp1':c.exit_type==='TP2'?'b-tp2':'b-tp3',c.exit_type||'—')}</td>
-    <td>${c.exit_price!=null?fmt4(c.exit_price):'—'}</td>
+    <td>${c.exit_price!=null?fmtC(c.exit_price):'—'}</td>
     <td>${fmtPnl(c.pnl)}</td>
   </tr>`).join('')
   :'<tr><td colspan="7" class="dim" style="padding:12px 0">No closed trades yet</td></tr>';
@@ -535,7 +536,7 @@ function render(s){
           <td>${o.label||'—'}</td>
           <td>${tpBadge(o.tp)}</td>
           <td>${o.shares}</td>
-          <td>${fmt4(o.price)}</td>
+          <td>${fmtC(o.price)}</td>
           <td>${statusBadge(o.status)}</td>
         </tr>`).join('')}</tbody>
       </table></div>`
