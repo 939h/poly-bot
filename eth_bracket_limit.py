@@ -34,6 +34,11 @@ Requirements:
     DRY_RUN=true
     ORDER_PRICE=0.004
     ORDER_SIZE=300
+    XRP_ENABLED=false
+    XRP_ORDER_PRICE=0.004
+    XRP_ORDER_SIZE=300
+    XRP_BRACKET_STEP=0.10
+    XRP_EXPIRY_DISTANCE_THRESHOLD=0.25
 """
 
 import math
@@ -90,6 +95,13 @@ MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
 POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
+
+# ── XRP config ────────────────────────────────────────────────────────────────
+XRP_ENABLED                   = os.getenv("XRP_ENABLED", "false").lower() == "true"
+XRP_ORDER_PRICE               = float(os.getenv("XRP_ORDER_PRICE", "0.004"))
+XRP_ORDER_SIZE                = int(os.getenv("XRP_ORDER_SIZE", "300"))
+XRP_BRACKET_STEP              = float(os.getenv("XRP_BRACKET_STEP", "0.10"))
+XRP_EXPIRY_DISTANCE_THRESHOLD = float(os.getenv("XRP_EXPIRY_DISTANCE_THRESHOLD", "0.25"))
 
 GAMMA_API      = "https://gamma-api.polymarket.com"
 CLOB_API       = "https://clob.polymarket.com"
@@ -205,6 +217,9 @@ _state: dict = {
     "upper2":     0,
     "lower":      0,
     "lower2":     0,
+    "xrp_price":  0.0,
+    "xrp_upper":  0.0,
+    "xrp_lower":  0.0,
     "updated":    "",
     "buy_orders": [],   # {id, label, bracket, side, date_str, price, size, cancel_at, status}
     "positions":  [],   # {id, label, token_id, shares, buy_price, current_ask}
@@ -232,6 +247,13 @@ def st_set_eth(price: float, upper: int, upper2: int, lower: int, lower2: int) -
         _state["upper2"]    = upper2
         _state["lower"]     = lower
         _state["lower2"]    = lower2
+        _state["updated"]   = _now_str()
+
+def st_set_xrp(price: float, upper: float, lower: float) -> None:
+    with _slock:
+        _state["xrp_price"] = price
+        _state["xrp_upper"] = upper
+        _state["xrp_lower"] = lower
         _state["updated"]   = _now_str()
 
 def st_buy_placed(label: str, order_id: str, bracket: int, side: str,
@@ -509,6 +531,7 @@ function render(s){
       <div class="card"><div class="lbl">Upper 2</div><div class="val green">${s.upper2?'$'+s.upper2.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Lower Bracket</div><div class="val amber">${s.lower?'$'+s.lower.toLocaleString():'—'}</div></div>
       <div class="card"><div class="lbl">Lower 2</div><div class="val amber">${s.lower2?'$'+s.lower2.toLocaleString():'—'}</div></div>
+      ${s.xrp_price > 0 ? `<div class="card"><div class="lbl">XRP Price</div><div class="val white">$${s.xrp_price.toFixed(4)}</div></div><div class="card"><div class="lbl">XRP Upper</div><div class="val green">$${s.xrp_upper}</div></div><div class="card"><div class="lbl">XRP Lower</div><div class="val amber">$${s.xrp_lower}</div></div>` : ''}
       <div class="card"><div class="lbl">Open Orders</div><div class="val blue">${openBuys}</div></div>
       <div class="card"><div class="lbl">Filled</div><div class="val green">${st.fills||0}</div></div>
       <div class="card"><div class="lbl">Cancelled</div><div class="val ${(st.cancelled||0)>0?'red':'dim'}">${st.cancelled||0}</div></div>
@@ -647,6 +670,22 @@ def fetch_eth_spot() -> float:
     log.info(f"Binance ETH spot: ${price:,.2f}")
     return price
 
+
+def fetch_xrp_spot() -> float:
+    """Return current XRP/USDT spot price from Binance public REST API.
+    Override with XRP_PRICE env var for testing."""
+    override = os.getenv("XRP_PRICE")
+    if override:
+        price = float(override)
+        log.info(f"XRP price (override): ${price:.4f}")
+        return price
+    url = "https://api.binance.com/api/v3/ticker/price"
+    r = requests.get(url, params={"symbol": "XRPUSDT"}, timeout=10)
+    r.raise_for_status()
+    price = float(r.json()["price"])
+    log.info(f"Binance XRP spot: ${price:.4f}")
+    return price
+
 # ── Bracket ───────────────────────────────────────────────────────────────────
 
 def get_brackets(eth_price: float) -> tuple[int, int, int, int]:
@@ -666,6 +705,15 @@ def get_brackets(eth_price: float) -> tuple[int, int, int, int]:
     log.info(f"Brackets: upper={upper}/{upper2}, lower={lower}/{lower2} (ETH ${eth_price:,.2f})")
     return upper, upper2, lower, lower2
 
+
+def get_xrp_brackets(xrp_price: float) -> tuple[float, float]:
+    """Return (upper, lower) XRP bracket levels. Same floor-minus-step formula as ETH."""
+    step  = XRP_BRACKET_STEP
+    upper = round(math.ceil(xrp_price / step) * step, 4)
+    lower = round(math.floor(xrp_price / step) * step - step, 4)
+    log.info(f"XRP brackets: upper={upper:g}, lower={lower:g} (XRP ${xrp_price:.4f})")
+    return upper, lower
+
 # ── Slug / Market ─────────────────────────────────────────────────────────────
 
 def build_slug(bracket: int, target_date: date) -> str:
@@ -676,6 +724,13 @@ def build_slug(bracket: int, target_date: date) -> str:
     """
     date_str = target_date.strftime("%B-%-d").lower()
     return f"ethereum-above-{bracket}-on-{date_str}"
+
+
+def build_xrp_slug(bracket: float, target_date: date) -> str:
+    """Build Polymarket slug for an XRP daily bracket market.
+    Example: xrp-above-1.5-on-april-20"""
+    date_str = target_date.strftime("%B-%-d").lower()
+    return f"xrp-above-{bracket:g}-on-{date_str}"
 
 
 def get_tick_size(client, token_id: str, market: dict) -> float:
@@ -965,44 +1020,51 @@ def sell_at_expiry(
     label: str,
     shares: int,
     buy_price: float,
-    bracket: int,
+    bracket: int | float,
     side_label: str,
     condition_id: str = "",
+    price_fn=None,
+    expiry_threshold=None,
 ) -> list[dict]:
     """
     At cancel time (T-2h before market end), decide how to handle filled shares
-    based on ETH spot distance from the bracket.
+    based on spot price distance from the bracket.
 
-      distance > +EXPIRY_DISTANCE_THRESHOLD  → HOLD to resolution ($1.00 if wins)
-      distance < -EXPIRY_DISTANCE_THRESHOLD  → DO NOTHING (likely worthless)
-      within ±threshold                      → SELL ALL at best_ask
+      distance > +threshold  → HOLD to resolution ($1.00 if wins)
+      distance < -threshold  → DO NOTHING (likely worthless)
+      within ±threshold      → SELL ALL at best_ask
+
+    price_fn: callable() -> float, defaults to fetch_eth_spot (pass fetch_xrp_spot for XRP)
+    expiry_threshold: override for EXPIRY_DISTANCE_THRESHOLD (use smaller value for XRP)
     """
+    _price_fn  = price_fn or fetch_eth_spot
+    _threshold = expiry_threshold if expiry_threshold is not None else EXPIRY_DISTANCE_THRESHOLD
     try:
-        eth = fetch_eth_spot()
+        spot = _price_fn()
     except Exception as e:
-        log.warning(f"  [EXPIRY] ETH fetch failed ({e}) — falling back to TP sells")
+        log.warning(f"  [EXPIRY] spot fetch failed ({e}) — falling back to TP sells")
         return place_sell_tranches(client, token_id, label, shares, buy_price)
 
-    distance = (eth - bracket) if side_label == "YES" else (bracket - eth)
+    distance = (spot - bracket) if side_label == "YES" else (bracket - spot)
     log.info(
-        f"  [EXPIRY] {label} | ETH=${eth:,.2f} | bracket={bracket}"
-        f" | side={side_label} | distance={distance:+.0f}"
+        f"  [EXPIRY] {label} | spot=${spot:.4f} | bracket={bracket}"
+        f" | side={side_label} | distance={distance:+.4f}"
     )
 
-    if distance > EXPIRY_DISTANCE_THRESHOLD:
+    if distance > _threshold:
         log.info(
-            f"  [EXPIRY] distance={distance:+.0f} > +{EXPIRY_DISTANCE_THRESHOLD}"
+            f"  [EXPIRY] distance={distance:+.4f} > +{_threshold}"
             f" → HOLD to resolution"
         )
-    elif distance < -EXPIRY_DISTANCE_THRESHOLD:
+    elif distance < -_threshold:
         log.info(
-            f"  [EXPIRY] distance={distance:+.0f} < -{EXPIRY_DISTANCE_THRESHOLD}"
+            f"  [EXPIRY] distance={distance:+.4f} < -{_threshold}"
             f" → likely losing — skipping sells"
         )
     else:
         log.info(
-            f"  [EXPIRY] distance={distance:+.0f} within"
-            f" ±{EXPIRY_DISTANCE_THRESHOLD} → uncertain — selling all {shares} shares at best_ask"
+            f"  [EXPIRY] distance={distance:+.4f} within"
+            f" ±{_threshold} → uncertain — selling all {shares} shares at best_ask"
         )
         best_ask = get_best_ask(client, token_id)
         if best_ask is None:
@@ -1344,9 +1406,12 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if partial > 0:
                         log.info(f"  Partial fill on cancelled order: {partial} shares — evaluating expiry strategy")
                         st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
+                        _is_xrp = "xrp-above" in o["label"]
                         exp_orders = sell_at_expiry(
                             client, o["token_id"], o["label"], partial, o["buy_price"],
                             o["bracket"], o["side_label"], o["condition_id"],
+                            price_fn=fetch_xrp_spot if _is_xrp else None,
+                            expiry_threshold=XRP_EXPIRY_DISTANCE_THRESHOLD if _is_xrp else None,
                         )
                         if exp_orders:
                             threading.Thread(
@@ -1463,33 +1528,26 @@ def get_token_position(client: ClobClient, token_id: str) -> int:
 def place_for_date(
     client: ClobClient,
     target_date: date,
-    upper: int,
-    upper2: int,
-    lower: int,
-    lower2: int,
+    brackets_config: list[tuple],
+    slug_fn: callable,
     skip_slugs: set[str] | None = None,
 ) -> list[dict]:
     """
-    For a given date, place BUY limit orders on all four brackets.
+    For a given date, place BUY limit orders for each entry in brackets_config.
     Returns a list of order dicts for the monitor loop.
     Silently skips any bracket whose market is not yet live.
 
-    skip_slugs: if provided, slugs already placed are skipped and newly placed
-                slugs are added to the set (used for tomorrow retry logic).
+    brackets_config: [(bracket_value, side_label, tok_idx, order_price), ...]
+    slug_fn:         callable(bracket, date) -> slug string (build_slug or build_xrp_slug)
+    skip_slugs:      if provided, slugs already placed are skipped and newly placed
+                     slugs are added to the set (used for tomorrow retry logic).
     """
     date_label = target_date.strftime("%b %-d")
-    log.info(f"--- {date_label} | upper={upper}/{upper2} YES | lower={lower}/{lower2} NO ---")
+    log.info(f"--- {date_label} | {len(brackets_config)} bracket(s) ---")
     placed = []
 
-    brackets = [
-        (upper,  "YES", 0, ORDER_PRICE),      # (bracket, side_label, token_index, order_price)
-        (upper2, "YES", 0, ORDER_PRICE_EXT),
-        (lower,  "NO",  1, ORDER_PRICE),
-        (lower2, "NO",  1, ORDER_PRICE_EXT),
-    ]
-
-    for bracket, side_label, tok_idx, order_price in brackets:
-        slug = build_slug(bracket, target_date)
+    for bracket, side_label, tok_idx, order_price, order_size in brackets_config:
+        slug = slug_fn(bracket, target_date)
 
         if skip_slugs is not None and slug in skip_slugs:
             log.info(f"  Already placed: {slug} — skipping")
@@ -1531,7 +1589,7 @@ def place_for_date(
                 "bracket": bracket, "side_label": side_label, "target_date": target_date,
             })
             st_buy_existing(label, existing_oid, bracket, side_label,
-                            target_date, price, ORDER_SIZE, cancel_at, token_id)
+                            target_date, price, order_size, cancel_at, token_id)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
             continue
@@ -1553,8 +1611,11 @@ def place_for_date(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                     f" — within expiry window, re-evaluating"
                 )
+                _is_xrp = "xrp-above" in label
                 exp_orders = sell_at_expiry(client, token_id, label, existing_shares, price,
-                                            bracket, side_label, condition_id)
+                                            bracket, side_label, condition_id,
+                                            price_fn=fetch_xrp_spot if _is_xrp else None,
+                                            expiry_threshold=XRP_EXPIRY_DISTANCE_THRESHOLD if _is_xrp else None)
                 if exp_orders:
                     threading.Thread(
                         target=monitor_tp_sells,
@@ -1593,7 +1654,7 @@ def place_for_date(
             continue
 
         order_id = place_limit_order(
-            client, token_id, label, price, ORDER_SIZE, BUY
+            client, token_id, label, price, order_size, BUY
         )
 
         if order_id:
@@ -1610,7 +1671,7 @@ def place_for_date(
                 "target_date":    target_date,
             })
             st_buy_placed(label, order_id, bracket, side_label,
-                          target_date, price, ORDER_SIZE, cancel_at, token_id)
+                          target_date, price, order_size, cancel_at, token_id)
             if skip_slugs is not None:
                 skip_slugs.add(slug)
 
@@ -1626,12 +1687,14 @@ def main() -> None:
     log.info(f"TP1   : 50% @ 2x = ${ORDER_PRICE * 2:.4f}  (or best ask if higher)")
     log.info(f"TP2   : 25% @ 10x = ${ORDER_PRICE * 10:.4f}")
     log.info(f"TP3   : 25% @ 50x = ${ORDER_PRICE * 50:.4f}")
+    log.info(f"XRP   : {'ENABLED' if XRP_ENABLED else 'disabled'}")
     log.info("=" * 60)
 
     start_dashboard()
     client = build_client()
-    placed_dates:     set[date] = set()  # today dates fully placed
-    tmrw_placed:      set[str]  = set()  # tomorrow slugs already placed (for retry)
+    placed_dates:    set[date] = set()  # today dates fully placed
+    tmrw_placed:     set[str]  = set()  # ETH tomorrow slugs placed (for retry)
+    xrp_tmrw_placed: set[str]  = set()  # XRP tomorrow slugs placed (for retry)
 
     while True:
         utc_now  = datetime.now(timezone.utc)
@@ -1645,22 +1708,41 @@ def main() -> None:
 
         if today not in placed_dates:
             try:
-                eth   = fetch_eth_spot()
+                eth = fetch_eth_spot()
                 upper, upper2, lower, lower2 = get_brackets(eth)
                 st_set_eth(eth, upper, upper2, lower, lower2)
+
+                eth_brackets = [
+                    (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
+                    (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
+                    (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
+                    (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
+                ]
 
                 all_orders: list[dict] = []
 
                 # Always call place_for_date for today — it resumes existing positions
                 # even when too close to place new BUYs (guard is inside place_for_date).
-                all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
+                all_orders += place_for_date(client, today, eth_brackets, build_slug)
 
                 placed_dates.add(today)
-                tmrw_placed.clear()  # new day — reset tomorrow tracking
+                tmrw_placed.clear()
+                xrp_tmrw_placed.clear()
 
-                tmrw_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
+                all_orders += place_for_date(client, tomorrow, eth_brackets, build_slug,
                                              skip_slugs=tmrw_placed)
-                all_orders += tmrw_orders
+
+                if XRP_ENABLED:
+                    xrp = fetch_xrp_spot()
+                    xrp_upper, xrp_lower = get_xrp_brackets(xrp)
+                    st_set_xrp(xrp, xrp_upper, xrp_lower)
+                    xrp_brackets = [
+                        (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                        (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                    ]
+                    all_orders += place_for_date(client, today, xrp_brackets, build_xrp_slug)
+                    all_orders += place_for_date(client, tomorrow, xrp_brackets, build_xrp_slug,
+                                                 skip_slugs=xrp_tmrw_placed)
 
                 threading.Thread(
                     target=monitor_and_sell,
@@ -1672,23 +1754,51 @@ def main() -> None:
                 log.error(f"Placement cycle failed: {e}")
 
         else:
-            # Retry tomorrow brackets that weren't live yet when the day started
+            # ETH retry: < 4 slugs placed for tomorrow
             if len(tmrw_placed) < 4:
                 try:
                     eth = fetch_eth_spot()
                     upper, upper2, lower, lower2 = get_brackets(eth)
                     st_set_eth(eth, upper, upper2, lower, lower2)
-                    retry_orders = place_for_date(client, tomorrow, upper, upper2, lower, lower2,
+                    eth_brackets = [
+                        (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
+                        (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
+                        (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
+                        (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
+                    ]
+                    retry_orders = place_for_date(client, tomorrow, eth_brackets, build_slug,
                                                   skip_slugs=tmrw_placed)
                     if retry_orders:
-                        log.info(f"Tomorrow retry: placed {len(retry_orders)} new order(s).")
+                        log.info(f"Tomorrow ETH retry: placed {len(retry_orders)} new order(s).")
                         threading.Thread(
                             target=monitor_and_sell,
                             args=(client, retry_orders),
                             daemon=True,
                         ).start()
                 except Exception as e:
-                    log.error(f"Tomorrow retry failed: {e}")
+                    log.error(f"Tomorrow ETH retry failed: {e}")
+
+            # XRP retry: < 2 slugs placed for tomorrow
+            if XRP_ENABLED and len(xrp_tmrw_placed) < 2:
+                try:
+                    xrp = fetch_xrp_spot()
+                    xrp_upper, xrp_lower = get_xrp_brackets(xrp)
+                    st_set_xrp(xrp, xrp_upper, xrp_lower)
+                    xrp_brackets = [
+                        (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                        (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                    ]
+                    retry_orders = place_for_date(client, tomorrow, xrp_brackets, build_xrp_slug,
+                                                  skip_slugs=xrp_tmrw_placed)
+                    if retry_orders:
+                        log.info(f"Tomorrow XRP retry: placed {len(retry_orders)} new order(s).")
+                        threading.Thread(
+                            target=monitor_and_sell,
+                            args=(client, retry_orders),
+                            daemon=True,
+                        ).start()
+                except Exception as e:
+                    log.error(f"Tomorrow XRP retry failed: {e}")
 
         time.sleep(LOOP_SLEEP)
 
