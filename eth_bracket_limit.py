@@ -728,9 +728,10 @@ def build_slug(bracket: int, target_date: date) -> str:
 
 def build_xrp_slug(bracket: float, target_date: date) -> str:
     """Build Polymarket slug for an XRP daily bracket market.
-    Example: xrp-above-1.5-on-april-20"""
+    Decimal point → 'pt': $1.30 → xrp-above-1pt3-on-april-20"""
     date_str = target_date.strftime("%B-%-d").lower()
-    return f"xrp-above-{bracket:g}-on-{date_str}"
+    price_str = f"{bracket:g}".replace(".", "pt")
+    return f"xrp-above-{price_str}-on-{date_str}"
 
 
 def get_tick_size(client, token_id: str, market: dict) -> float:
@@ -1548,9 +1549,11 @@ def place_for_date(
 
     for bracket, side_label, tok_idx, order_price, order_size in brackets_config:
         slug = slug_fn(bracket, target_date)
+        # Use side-qualified key so YES and NO of the same slug (e.g. XRP) track independently
+        skip_key = f"{side_label}:{slug}"
 
-        if skip_slugs is not None and slug in skip_slugs:
-            log.info(f"  Already placed: {slug} — skipping")
+        if skip_slugs is not None and skip_key in skip_slugs:
+            log.info(f"  Already placed: {side_label} {slug} — skipping")
             continue
 
         market = fetch_market(slug)
@@ -1591,7 +1594,7 @@ def place_for_date(
             st_buy_existing(label, existing_oid, bracket, side_label,
                             target_date, price, order_size, cancel_at, token_id)
             if skip_slugs is not None:
-                skip_slugs.add(slug)
+                skip_slugs.add(skip_key)
             continue
 
         existing_shares = get_token_position(client, token_id)
@@ -1640,7 +1643,7 @@ def place_for_date(
                 daemon=True,
             ).start()
             if skip_slugs is not None:
-                skip_slugs.add(slug)
+                skip_slugs.add(skip_key)
             continue
         # ─────────────────────────────────────────────────────────────────────
 
@@ -1673,7 +1676,7 @@ def place_for_date(
             st_buy_placed(label, order_id, bracket, side_label,
                           target_date, price, order_size, cancel_at, token_id)
             if skip_slugs is not None:
-                skip_slugs.add(slug)
+                skip_slugs.add(skip_key)
 
     return placed
 
