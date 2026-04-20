@@ -1356,8 +1356,9 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
-            if now >= o["cancel_at"]:
-                continue  # about to be cancelled below; skip tick-upgrade
+            buy_cutoff = o["cancel_at"] - 3600  # same T-3h cut-off as place_for_date
+            if now >= buy_cutoff:
+                continue  # past new-BUY deadline; skip tick-upgrade
             placed_price   = o["buy_price"]
             intended_price = o.get("intended_price", ORDER_PRICE)
             if placed_price <= intended_price:
