@@ -98,8 +98,8 @@ LOOP_SLEEP         = 30      # main-loop tick (seconds)
 
 # ── XRP config ────────────────────────────────────────────────────────────────
 XRP_ENABLED                   = os.getenv("XRP_ENABLED", "true").lower() == "true"
-XRP_ORDER_PRICE               = float(os.getenv("XRP_ORDER_PRICE", "0.004"))
-XRP_ORDER_SIZE                = int(os.getenv("XRP_ORDER_SIZE", "20"))
+XRP_ORDER_PRICE               = float(os.getenv("XRP_ORDER_PRICE", "0.003"))
+XRP_ORDER_SIZE                = int(os.getenv("XRP_ORDER_SIZE", "300"))
 XRP_BRACKET_STEP              = float(os.getenv("XRP_BRACKET_STEP", "0.10"))
 XRP_EXPIRY_DISTANCE_THRESHOLD = float(os.getenv("XRP_EXPIRY_DISTANCE_THRESHOLD", "0.25"))
 
