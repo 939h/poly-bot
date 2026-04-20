@@ -326,6 +326,13 @@ def st_sell_placed(label: str, order_id: str, tp: int,
         })
         _state["updated"] = _now_str()
 
+def st_market_closed(label: str) -> None:
+    """Remove position and sell orders for a resolved market from the dashboard."""
+    with _slock:
+        _state["positions"]   = [p for p in _state["positions"]   if p["label"] != label]
+        _state["sell_orders"] = [o for o in _state["sell_orders"] if o["label"] != label]
+        _state["updated"] = _now_str()
+
 def st_update_ask(token_id: str, ask: float | None) -> None:
     with _slock:
         for p in _state["positions"]:
@@ -399,6 +406,7 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:16px;padding-bo
 <script>
 function fmt2(v){return v!=null?'$'+parseFloat(v).toFixed(2):'—'}
 function fmt4(v){return v!=null?'$'+parseFloat(v).toFixed(4):'—'}
+function fmtC(v){if(v==null)return '—';const c=parseFloat(v)*100;return c.toFixed(2).replace(/\.?0+$/,'')+'¢';}
 function fmtPnl(v){
   const n=parseFloat(v)||0;
   return `<span class="${n>0?'green':n<0?'red':'dim'}">${n>=0?'+':''}$${Math.abs(n).toFixed(4)}</span>`;
@@ -438,7 +446,7 @@ function render(s){
       <td>${o.date_str}</td>
       <td>${o.bracket.toLocaleString()}</td>
       <td class="${o.side==='YES'?'green':'amber'}">${o.side}</td>
-      <td>${fmt4(o.price)}</td>
+      <td>${fmtC(o.price)}</td>
       <td>${(o.size||0).toLocaleString()}</td>
       <td>${fmt4(o.cost)}</td>
       <td>${statusBadge(o.status)}</td>
@@ -450,12 +458,12 @@ function render(s){
 
   // Position cards
   const posCards=pos.length?pos.map(p=>{
-    const ask=p.current_ask!=null?fmt4(p.current_ask):'<span class="dim">—</span>';
+    const ask=p.current_ask!=null?fmtC(p.current_ask):'<span class="dim">—</span>';
     const unreal=p.current_ask!=null?fmtPnl((p.current_ask-p.buy_price)*p.shares):'<span class="dim">—</span>';
     const sellsForPos=sells.filter(o=>o.label&&o.label.startsWith(p.label));
     const tpPills=sellsForPos.map(o=>`
       <div class="tp-pill ${['','b-tp1','b-tp2','b-tp3'][o.tp]||'b-tp1'}">
-        TP${o.tp} ${o.shares}sh @ ${fmt4(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
+        TP${o.tp} ${o.shares}sh @ ${fmtC(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
       </div>`).join('');
     return `<div class="pos-card">
       <div class="pos-hdr">
@@ -463,7 +471,7 @@ function render(s){
         <span class="green" style="font-size:12px">${p.shares} shares filled</span>
       </div>
       <div class="pos-meta">
-        <span>Buy @ ${fmt4(p.buy_price)}</span>
+        <span>Buy @ ${fmtC(p.buy_price)}</span>
         <span>Ask ${ask}</span>
         <span>Unrealised ${unreal}</span>
         <span>Cost ${fmt4(p.buy_price*p.shares)}</span>
@@ -478,9 +486,9 @@ function render(s){
     <td>${c.ts||'—'}</td>
     <td>${c.label||'—'}</td>
     <td class="${c.side==='YES'?'green':'amber'}">${c.side||'—'}</td>
-    <td>${fmt4(c.buy_price)}</td>
+    <td>${fmtC(c.buy_price)}</td>
     <td>${badge(c.exit_type==='CANCEL'?'b-cancel':c.exit_type==='TP1'?'b-tp1':c.exit_type==='TP2'?'b-tp2':'b-tp3',c.exit_type||'—')}</td>
-    <td>${c.exit_price!=null?fmt4(c.exit_price):'—'}</td>
+    <td>${c.exit_price!=null?fmtC(c.exit_price):'—'}</td>
     <td>${fmtPnl(c.pnl)}</td>
   </tr>`).join('')
   :'<tr><td colspan="7" class="dim" style="padding:12px 0">No closed trades yet</td></tr>';
@@ -537,7 +545,7 @@ function render(s){
           <td>${o.label||'—'}</td>
           <td>${tpBadge(o.tp)}</td>
           <td>${o.shares}</td>
-          <td>${fmt4(o.price)}</td>
+          <td>${fmtC(o.price)}</td>
           <td>${statusBadge(o.status)}</td>
         </tr>`).join('')}</tbody>
       </table></div>`
@@ -1010,8 +1018,9 @@ def sell_at_expiry(
     return []
 
 
-def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
-    """Return set of open order IDs for this market condition."""
+def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str] | None:
+    """Return set of open order IDs for this market condition, or None on API error.
+    Callers must treat None as 'unknown' (not 'no open orders')."""
     if DRY_RUN:
         return set()
     try:
@@ -1022,7 +1031,7 @@ def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str]:
         return set()
     except Exception as e:
         log.warning(f"  Could not fetch open orders: {e}")
-        return set()
+        return None  # distinguish from genuinely-empty result
 
 
 def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
@@ -1059,6 +1068,8 @@ def monitor_tp_sells(
     while pending:
         time.sleep(POLL_SECS)
         open_ids = get_open_order_ids(client, condition_id)
+        if open_ids is None:
+            continue  # API error; assume all still open, retry next poll
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
@@ -1189,6 +1200,8 @@ def last_hour_sell_monitor(
 
         # Check if current order is still open
         open_ids = get_open_order_ids(client, condition_id)
+        if open_ids is None:
+            continue  # API error; assume still open, retry next poll
         if current_oid not in open_ids:
             filled = get_filled_shares(client, current_oid)
             if filled > 0:
@@ -1225,6 +1238,13 @@ def last_hour_sell_monitor(
         current_oid, current_price = _place(shares)
 
     log.info(f"  [LAST_HOUR] {label} — market window ended.")
+    # Cancel any sell orders still open at market close (never filled)
+    remaining = cancel_all_open_sells(client, condition_id, token_id, label)
+    if remaining:
+        log.info(f"  [LAST_HOUR] {label} — cancelled {remaining} sell order(s) at market close")
+    # Erase position and sell orders from dashboard
+    st_market_closed(label)
+    log.info(f"  [LAST_HOUR] {label} — cleared from dashboard")
 
 
 # ── Monitor + Sell ────────────────────────────────────────────────────────────
@@ -1269,6 +1289,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
+            if now >= o["cancel_at"]:
+                continue  # about to be cancelled below; skip tick-upgrade
             placed_price   = o["buy_price"]
             intended_price = o.get("intended_price", ORDER_PRICE)
             if placed_price <= intended_price:
@@ -1310,16 +1332,15 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     continue
                 o = pending[oid]
 
-                # Cancel if deadline passed and order still open
+                # Cancel if deadline passed — always attempt, cancel_order is idempotent
                 if now >= o["cancel_at"]:
-                    if oid in open_ids:
-                        mins_to_end = (o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600 - now) / 60
-                        log.warning(
-                            f"  Cancelling {o['label']} — "
-                            f"{CANCEL_BEFORE_END_HOURS}h before market end"
-                            + (f" ({-mins_to_end:.0f}m past deadline)" if mins_to_end < 0 else "")
-                        )
-                        cancel_order(client, oid, o["label"])
+                    mins_past = (now - o["cancel_at"]) / 60
+                    log.warning(
+                        f"  Cancelling {o['label']} — "
+                        f"{CANCEL_BEFORE_END_HOURS}h before market end"
+                        + (f" ({mins_past:.0f}m past cancel deadline)" if mins_past > 0 else "")
+                    )
+                    cancel_order(client, oid, o["label"])
                     # Check for partial fill before discarding
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
@@ -1346,7 +1367,9 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     pending.pop(oid)
                     continue
 
-                # Detect fill (order no longer open)
+                # Detect fill (order no longer open) — skip if API errored
+                if open_ids is None:
+                    continue  # unknown state; assume still open, retry next poll
                 if oid not in open_ids:
                     pending.pop(oid)
                     filled = get_filled_shares(client, oid)
@@ -1562,6 +1585,15 @@ def place_for_date(
             continue
         # ─────────────────────────────────────────────────────────────────────
 
+        # Skip new BUYs when too close to market close; existing positions handled above.
+        hours_until_close = (market_end.timestamp() - time.time()) / 3600
+        if hours_until_close <= CANCEL_BEFORE_END_HOURS + 1:
+            log.info(
+                f"  [SKIP] {label} — {hours_until_close:.1f}h until close, "
+                f"not placing new BUY"
+            )
+            continue
+
         order_id = place_limit_order(
             client, token_id, label, price, ORDER_SIZE, BUY
         )
@@ -1621,17 +1653,9 @@ def main() -> None:
 
                 all_orders: list[dict] = []
 
-                # Skip today if < 6h remain before market resolution (midnight MYT = 16:00 UTC)
-                market_end_utc = datetime(today.year, today.month, today.day,
-                                          MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
-                hours_left = (market_end_utc - utc_now).total_seconds() / 3600
-                if hours_left <= 3:
-                    log.info(
-                        f"[SKIP] {hours_left:.1f}h until market end — "
-                        f"skipping today's BUY orders (threshold: 6h)"
-                    )
-                else:
-                    all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
+                # Always call place_for_date for today — it resumes existing positions
+                # even when too close to place new BUYs (guard is inside place_for_date).
+                all_orders += place_for_date(client, today, upper, upper2, lower, lower2)
 
                 placed_dates.add(today)
                 tmrw_placed.clear()  # new day — reset tomorrow tracking
