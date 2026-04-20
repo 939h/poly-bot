@@ -1349,7 +1349,15 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         )
 
     while pending:
-        time.sleep(POLL_SECS)
+        # Sleep in short increments so cancel deadlines fire promptly.
+        # Each POLL_SECS block is broken into 5s slices; we exit early when
+        # any pending order hits its cancel_at, limiting overshoot to ≤5s.
+        deadline = min(o["cancel_at"] for o in pending.values())
+        sleep_end = time.time() + POLL_SECS
+        while time.time() < sleep_end:
+            time.sleep(min(5, max(0, deadline - time.time()), sleep_end - time.time()))
+            if time.time() >= deadline:
+                break
         now = time.time()
 
         # ── Tick-size upgrade check ───────────────────────────────────────────
