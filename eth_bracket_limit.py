@@ -34,6 +34,7 @@ Requirements:
     DRY_RUN=true
     ORDER_PRICE=0.004
     ORDER_SIZE=300
+    CANCEL_BEFORE_END_HOURS=3
     XRP_ENABLED=false
     XRP_ORDER_PRICE=0.004
     XRP_ORDER_SIZE=300
@@ -88,7 +89,7 @@ DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brackets (upper/lower)
 ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
-CANCEL_BEFORE_END_HOURS   = 2   # cancel unfilled BUY orders N hours before market resolves
+CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "3"))  # cancel unfilled BUY orders N hours before market resolves
 LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
@@ -1356,9 +1357,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
         # (e.g. 0.004) because the market switched to a finer tick, cancel and re-place.
         for oid in list(pending.keys()):
             o = pending[oid]
-            buy_cutoff = o["cancel_at"] - 3600  # same T-3h cut-off as place_for_date
-            if now >= buy_cutoff:
-                continue  # past new-BUY deadline; skip tick-upgrade
+            if now >= o["cancel_at"]:
+                continue  # past T-3h deadline; skip tick-upgrade
             placed_price   = o["buy_price"]
             intended_price = o.get("intended_price", ORDER_PRICE)
             if placed_price <= intended_price:
@@ -1656,7 +1656,7 @@ def place_for_date(
 
         # Skip new BUYs when too close to market close; existing positions handled above.
         hours_until_close = (market_end.timestamp() - time.time()) / 3600
-        if hours_until_close <= CANCEL_BEFORE_END_HOURS + 1:
+        if hours_until_close <= CANCEL_BEFORE_END_HOURS:
             log.info(
                 f"  [SKIP] {label} — {hours_until_close:.1f}h until close, "
                 f"not placing new BUY"
