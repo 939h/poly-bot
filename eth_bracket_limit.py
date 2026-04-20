@@ -449,6 +449,8 @@ function render(s){
   const st=s.stats||{};
   const pnl=parseFloat(st.pnl||0);
   const mode=s.mode==='DRY RUN'?badge('b-dry','DRY RUN'):badge('b-live','⚡ LIVE');
+  function assetOf(lbl){return lbl&&lbl.includes('xrp')?'XRP':'ETH';}
+  function assetSide(lbl,side){return `${assetOf(lbl)}_${side||''}`;}
   const buys=[...(s.buy_orders||[])].sort((a,b)=>(b.cancel_at||0)-(a.cancel_at||0));
   const pos=[...(s.positions||[])].reverse();
   const sells=[...(s.sell_orders||[])].reverse();
@@ -465,7 +467,7 @@ function render(s){
     return `<tr>
       <td>${o.date_str}</td>
       <td>${o.bracket.toLocaleString()}</td>
-      <td class="${o.side==='YES'?'green':'amber'}">${o.side}</td>
+      <td class="${o.side==='YES'?'green':'amber'}">${assetSide(o.label,o.side)}</td>
       <td>${fmtC(o.price)}</td>
       <td>${(o.size||0).toLocaleString()}</td>
       <td>${fmt4(o.cost)}</td>
@@ -485,9 +487,13 @@ function render(s){
       <div class="tp-pill ${['','b-tp1','b-tp2','b-tp3'][o.tp]||'b-tp1'}">
         TP${o.tp} ${o.shares}sh @ ${fmtC(o.price)} <span class="${o.status==='FILLED'?'green':'dim'}">${o.status}</span>
       </div>`).join('');
+    const pSide=p.label&&p.label.startsWith('YES')?'YES':'NO';
     return `<div class="pos-card">
       <div class="pos-hdr">
-        <strong style="font-size:13px">${p.label}</strong>
+        <div style="display:flex;align-items:center;gap:8px">
+          <strong class="${pSide==='YES'?'green':'amber'}" style="font-size:14px">${assetSide(p.label,pSide)}</strong>
+          <span style="font-size:11px;color:#5a6a85">${p.label}</span>
+        </div>
         <span class="green" style="font-size:12px">${p.shares} shares filled</span>
       </div>
       <div class="pos-meta">
@@ -505,7 +511,7 @@ function render(s){
   const closedRows=closed.length?closed.map(c=>`<tr>
     <td>${c.ts||'—'}</td>
     <td>${c.label||'—'}</td>
-    <td class="${c.side==='YES'?'green':'amber'}">${c.side||'—'}</td>
+    <td class="${c.side==='YES'?'green':'amber'}">${assetSide(c.label,c.side)}</td>
     <td>${fmtC(c.buy_price)}</td>
     <td>${badge(c.exit_type==='CANCEL'?'b-cancel':c.exit_type==='TP1'?'b-tp1':c.exit_type==='TP2'?'b-tp2':'b-tp3',c.exit_type||'—')}</td>
     <td>${c.exit_price!=null?fmtC(c.exit_price):'—'}</td>
@@ -545,7 +551,7 @@ function render(s){
       ${_col.buys?'':` <div class="sec-body"><div style="overflow-x:auto">
       <table>
         <thead><tr>
-          <th>Date</th><th>Bracket</th><th>Side</th><th>Price</th>
+          <th>Date</th><th>Bracket</th><th>Asset</th><th>Price</th>
           <th>Shares</th><th>Cost</th><th>Status</th><th>Cancel At</th><th>Time Left</th>
         </tr></thead>
         <tbody>${buyRows}</tbody>
@@ -576,7 +582,7 @@ function render(s){
     <div class="section">
       ${secHdr(`Closed Trades (${closed.length})`, 'closed')}
       ${_col.closed?'':` <div class="sec-body"><div style="overflow-x:auto"><table>
-        <thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Buy @</th><th>Exit</th><th>Exit @</th><th>PnL</th></tr></thead>
+        <thead><tr><th>Time</th><th>Market</th><th>Asset</th><th>Buy @</th><th>Exit</th><th>Exit @</th><th>PnL</th></tr></thead>
         <tbody>${closedRows}</tbody>
       </table></div></div>`}
     </div>
