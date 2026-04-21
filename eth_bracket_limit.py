@@ -214,6 +214,7 @@ log = logging.getLogger(__name__)
 # ── Global dashboard state ────────────────────────────────────────────────────
 
 _slock = threading.Lock()
+_logged_order_errors: set[str] = set()  # suppress repeat permanent errors
 _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
@@ -552,7 +553,7 @@ function render(s){
 
     <div class="section">
       ${secHdr(`BUY Orders (${buys.length})`, 'buys')}
-      ${_col.buys?'':` <div class="sec-body"><div style="overflow-x:auto">
+      ${_col.buys?'':` <div class="sec-body" style="max-height:480px"><div style="overflow-x:auto">
       <table>
         <thead><tr>
           <th>Date</th><th>Bracket</th><th>Asset</th><th>Price</th>
@@ -918,7 +919,14 @@ def place_limit_order(
         )
         return order_id
     except Exception as e:
-        log.error(f"  Limit {side_str} failed ({label}): {e}")
+        err_str = str(e)
+        if "lower than the minimum" in err_str:
+            key = f"{side_str}:{label}:min_size"
+            if key not in _logged_order_errors:
+                _logged_order_errors.add(key)
+                log.error(f"  Limit {side_str} failed ({label}): {e}")
+        else:
+            log.error(f"  Limit {side_str} failed ({label}): {e}")
         return None
 
 
@@ -954,23 +962,23 @@ def get_filled_shares(client: ClobClient, order_id: str) -> int:
             ):
                 val = details.get(field)
                 if val is not None:
-                    n = int(float(val))
+                    n = math.ceil(float(val))
                     if n > 0:
                         return n
             # If status indicates fully matched, fall back to original size
             if details.get("status", "").upper() in ("MATCHED", "MINED", "FILLED"):
                 size = details.get("size") or details.get("original_size") or 0
-                return int(float(size))
+                return math.ceil(float(size))
         else:
             for attr in ("size_matched", "sizeMatched", "size_filled", "sizeFilled"):
                 val = getattr(details, attr, None)
                 if val is not None:
-                    n = int(float(val))
+                    n = math.ceil(float(val))
                     if n > 0:
                         return n
             if getattr(details, "status", "").upper() in ("MATCHED", "MINED", "FILLED"):
                 size = getattr(details, "size", 0) or getattr(details, "original_size", 0)
-                return int(float(size or 0))
+                return math.ceil(float(size or 0))
         return 0
     except Exception as e:
         log.warning(f"  get_filled_shares failed for {order_id}: {e}")
@@ -1039,7 +1047,12 @@ def place_sell_tranches(
         oid = place_limit_order(client, token_id, f"{label}-TP{tp_num}", tp_price, tp_shares, SELL)
         if oid:
             st_sell_placed(label, oid, tp_num, tp_shares, tp_price)
-            placed.append({"order_id": oid, "label": label, "tp": tp_num, "token_id": token_id})
+            entry = {"order_id": oid, "label": label, "tp": tp_num, "token_id": token_id}
+            if tp_num == 1:
+                entry["buy_price"]     = buy_price
+                entry["shares"]        = tp_shares
+                entry["current_price"] = tp_price
+            placed.append(entry)
     return placed
 
 
@@ -1161,6 +1174,47 @@ def monitor_tp_sells(
         open_ids = get_open_order_ids(client, condition_id)
         if open_ids is None:
             continue  # API error; assume all still open, retry next poll
+
+        # ── TP1 best-ask tracking ────────────────────────────────────────────
+        for oid in list(pending.keys()):
+            o = pending[oid]
+            if o.get("tp") != 1 or oid not in open_ids:
+                continue
+            buy_price = o.get("buy_price", 0)
+            tp1_floor = min(round(buy_price * 2, 4), 0.99)
+            best_ask  = get_best_ask(client, o["token_id"])
+            if best_ask is None:
+                continue
+            target = min(max(round(best_ask, 4), tp1_floor), 0.99)
+            if abs(target - o["current_price"]) < 1e-9:
+                continue
+            filled_so_far = get_filled_shares(client, oid)
+            remaining = o["shares"] - filled_so_far
+            if remaining <= 0:
+                continue
+            log.info(
+                f"  TP1 price update: {o['label']} "
+                f"{o['current_price']:.4f} → {target:.4f} "
+                f"| {remaining} shares remaining"
+            )
+            try:
+                client.cancel(oid)
+                st_sell_cancelled(oid)
+            except Exception as e:
+                log.error(f"  TP1 cancel failed ({o['label']}/{oid}): {e}")
+                continue
+            new_oid = place_limit_order(client, o["token_id"], f"{o['label']}-TP1",
+                                        target, remaining, SELL)
+            pending.pop(oid)
+            open_ids.discard(oid)
+            if new_oid:
+                st_sell_placed(o["label"], new_oid, 1, remaining, target)
+                new_entry = dict(o)
+                new_entry["order_id"]     = new_oid
+                new_entry["current_price"] = target
+                new_entry["shares"]        = remaining
+                pending[new_oid] = new_entry
+
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
@@ -1172,6 +1226,29 @@ def monitor_tp_sells(
                     f" | {filled} shares | order_id={oid}"
                 )
                 st_sell_filled(oid)
+                # TP1: re-place remaining shares if only partially filled
+                if o.get("tp") == 1:
+                    remaining = o.get("shares", 0) - filled
+                    if remaining > 0:
+                        buy_price = o.get("buy_price", 0)
+                        tp1_floor = min(round(buy_price * 2, 4), 0.99)
+                        best_ask  = get_best_ask(client, o["token_id"])
+                        target    = tp1_floor
+                        if best_ask is not None:
+                            target = min(max(round(best_ask, 4), tp1_floor), 0.99)
+                        log.info(
+                            f"  TP1 partial fill: {filled} sold, "
+                            f"re-placing {remaining} shares @ {target:.4f}"
+                        )
+                        new_oid = place_limit_order(client, o["token_id"],
+                                                    f"{o['label']}-TP1", target, remaining, SELL)
+                        if new_oid:
+                            st_sell_placed(o["label"], new_oid, 1, remaining, target)
+                            new_entry = dict(o)
+                            new_entry["order_id"]     = new_oid
+                            new_entry["current_price"] = target
+                            new_entry["shares"]        = remaining
+                            pending[new_oid] = new_entry
             else:
                 # Silently drop if already marked cancelled (last_hour_sell cancelled it)
                 with _slock:
