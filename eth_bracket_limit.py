@@ -1123,18 +1123,20 @@ def get_open_order_ids(client: ClobClient, condition_id: str) -> set[str] | None
         return None  # distinguish from genuinely-empty result
 
 
-def cancel_order(client: ClobClient, order_id: str, label: str) -> None:
-    """Cancel a single order by ID."""
+def cancel_order(client: ClobClient, order_id: str, label: str) -> bool:
+    """Cancel a single order by ID. Returns True on success."""
     if DRY_RUN:
         log.info(f"  [DRY RUN] CANCEL {label} order_id={order_id}")
         st_buy_cancelled(order_id)
-        return
+        return True
     try:
         client.cancel(order_id)
         log.info(f"  CANCELLED {label} order_id={order_id}")
         st_buy_cancelled(order_id)
+        return True
     except Exception as e:
         log.error(f"  Cancel failed ({label} / {order_id}): {e}")
+        return False
 
 # ── Sell Fill Monitor ────────────────────────────────────────────────────────
 
@@ -1437,7 +1439,11 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                         f"{CANCEL_BEFORE_END_HOURS}h before market end"
                         + (f" ({mins_past:.0f}m past cancel deadline)" if mins_past > 0 else "")
                     )
-                    cancel_order(client, oid, o["label"])
+                    cancelled = cancel_order(client, oid, o["label"])
+                    if not cancelled and (open_ids is None or oid in (open_ids or set())):
+                        # Cancel API failed and order still appears open — retry next poll
+                        log.warning(f"  Cancel failed for {o['label']} — will retry next poll")
+                        continue
                     # Check for partial fill before discarding
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
