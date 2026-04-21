@@ -214,6 +214,7 @@ log = logging.getLogger(__name__)
 # ── Global dashboard state ────────────────────────────────────────────────────
 
 _slock = threading.Lock()
+_logged_order_errors: set[str] = set()  # suppress repeat permanent errors
 _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
@@ -918,7 +919,14 @@ def place_limit_order(
         )
         return order_id
     except Exception as e:
-        log.error(f"  Limit {side_str} failed ({label}): {e}")
+        err_str = str(e)
+        if "lower than the minimum" in err_str:
+            key = f"{side_str}:{label}:min_size"
+            if key not in _logged_order_errors:
+                _logged_order_errors.add(key)
+                log.error(f"  Limit {side_str} failed ({label}): {e}")
+        else:
+            log.error(f"  Limit {side_str} failed ({label}): {e}")
         return None
 
 
