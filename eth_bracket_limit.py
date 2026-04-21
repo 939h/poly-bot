@@ -46,6 +46,7 @@ Requirements:
 
 import math
 import os
+import re
 import sys
 import json
 import time
@@ -725,6 +726,10 @@ def get_xrp_brackets(xrp_price: float) -> tuple[float, float]:
 
 # ── Slug / Market ─────────────────────────────────────────────────────────────
 
+_ETH_SLUG_RE = re.compile(r'^ethereum-above-(\d+)-on-\w+-\d+$')
+_XRP_SLUG_RE = re.compile(r'^xrp-above-[\dpt]+-on-\w+-\d+$')
+
+
 def build_slug(bracket: int, target_date: date) -> str:
     """
     Build Polymarket slug for an 'Ethereum above X on [date]' market.
@@ -811,6 +816,20 @@ def fetch_market(slug: str) -> dict | None:
         return None
     except Exception as e:
         log.error(f"Gamma API error ({slug}): {e}")
+        return None
+
+
+def fetch_market_by_condition_id(condition_id: str) -> dict | None:
+    """Fetch market data from Gamma API by condition ID (used for orphan resync)."""
+    try:
+        r = requests.get(f"{GAMMA_API}/markets",
+                         params={"conditionId": condition_id}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        markets = data if isinstance(data, list) else data.get("markets", [])
+        return markets[0] if markets else None
+    except Exception as e:
+        log.error(f"Gamma API error (conditionId={condition_id[:12]}): {e}")
         return None
 
 
@@ -1508,6 +1527,96 @@ def find_open_buy_order(client: ClobClient, condition_id: str, token_id: str) ->
     return None
 
 
+def resync_orphan_buys(client: ClobClient, known_order_ids: set[str]) -> list[dict]:
+    """
+    Fetch ALL open BUY orders from the CLOB and return order dicts for any
+    ETH/XRP bracket orders not already tracked by place_for_date().
+    Fixes the case where ETH price shifted between runs, making the old bracket
+    orders invisible to the startup guard that only checks current-price brackets.
+    """
+    if DRY_RUN:
+        return []
+    try:
+        all_open = client.get_orders(OpenOrderParams()) or []
+    except Exception as e:
+        log.warning(f"[STARTUP] Failed to fetch all open orders for orphan resync: {e}")
+        return []
+
+    orphans = []
+    for raw in all_open:
+        oid = raw.get("id") or raw.get("orderID", "")
+        if not oid or oid in known_order_ids:
+            continue
+        if raw.get("side", "").upper() != "BUY":
+            continue
+
+        condition_id = raw.get("market") or raw.get("condition_id", "")
+        token_id     = raw.get("asset_id", "")
+        if not condition_id or not token_id:
+            continue
+
+        market = fetch_market_by_condition_id(condition_id)
+        if not market:
+            continue
+
+        slug   = market.get("slug", "")
+        is_eth = bool(_ETH_SLUG_RE.match(slug))
+        is_xrp = XRP_ENABLED and bool(_XRP_SLUG_RE.match(slug))
+        if not is_eth and not is_xrp:
+            continue
+
+        end_iso = market.get("endDateIso") or market.get("end_date_iso", "")
+        if not end_iso:
+            log.warning(f"[STARTUP] No end date for {slug} — skipping orphan")
+            continue
+        end_ts    = datetime.fromisoformat(end_iso.replace("Z", "+00:00")).timestamp()
+        cancel_at = end_ts - CANCEL_BEFORE_END_HOURS * 3600
+
+        if time.time() >= end_ts:
+            log.info(f"[STARTUP] Orphan {oid[:12]} in expired market {slug} — skipping")
+            continue
+
+        yes_tok, no_tok = extract_tokens(market)
+        if token_id == yes_tok:
+            side_label = "YES"
+        elif token_id == no_tok:
+            side_label = "NO"
+        else:
+            log.warning(f"[STARTUP] token_id not in market tokens for {slug} — skipping")
+            continue
+
+        if is_eth:
+            bracket: int | float = int(_ETH_SLUG_RE.match(slug).group(1))
+        else:
+            price_str = re.search(r'xrp-above-([\dpt]+)-', slug).group(1)
+            bracket   = float(price_str.replace("pt", "."))
+
+        buy_price   = float(raw.get("price", 0))
+        size        = int(float(raw.get("size") or raw.get("original_size") or ORDER_SIZE))
+        label       = f"{side_label} {slug}"
+        target_date = datetime.fromtimestamp(end_ts, tz=timezone.utc).date()
+
+        log.info(f"[STARTUP] Orphan BUY resynced: {label} | {oid[:12]} | price={buy_price}")
+        st_buy_existing(label, oid, bracket, side_label, target_date,
+                        buy_price, size, cancel_at, token_id)
+        orphans.append({
+            "label":          label,
+            "order_id":       oid,
+            "condition_id":   condition_id,
+            "token_id":       token_id,
+            "buy_price":      buy_price,
+            "intended_price": buy_price,
+            "cancel_at":      cancel_at,
+            "bracket":        bracket,
+            "side_label":     side_label,
+            "target_date":    target_date,
+        })
+
+    if orphans:
+        log.info(f"[STARTUP] {len(orphans)} orphan BUY order(s) added to monitor")
+    return orphans
+
+
 def count_open_sells(client: ClobClient, condition_id: str, token_id: str) -> int:
     """Return number of open SELL orders for this token (used on startup to avoid re-placing TPs)."""
     if DRY_RUN:
@@ -1763,6 +1872,9 @@ def main() -> None:
                     all_orders += place_for_date(client, today, xrp_brackets, build_xrp_slug)
                     all_orders += place_for_date(client, tomorrow, xrp_brackets, build_xrp_slug,
                                                  skip_slugs=xrp_tmrw_placed)
+
+                orphans = resync_orphan_buys(client, {o["order_id"] for o in all_orders})
+                all_orders += orphans
 
                 threading.Thread(
                     target=monitor_and_sell,
