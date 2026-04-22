@@ -215,6 +215,7 @@ log = logging.getLogger(__name__)
 
 _slock = threading.Lock()
 _logged_order_errors: set[str] = set()  # suppress repeat permanent errors
+_tick_upgraded: set[str] = set()        # prevent double tick-upgrade across threads
 _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
@@ -1471,6 +1472,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
             intended_price = o.get("intended_price", ORDER_PRICE)
             if placed_price <= intended_price:
                 continue  # already at desired price, nothing to do
+            if oid in _tick_upgraded:
+                continue  # already upgraded by another thread; skip
             new_tick = get_tick_size(client, o["token_id"], {})
             ideal_price = snap_price(intended_price, new_tick)
             if ideal_price < placed_price:
@@ -1478,6 +1481,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     f"  Tick upgrade detected for {o['label']}: "
                     f"tick={new_tick}, re-placing at ${ideal_price} (was ${placed_price})"
                 )
+                _tick_upgraded.add(oid)
                 cancel_order(client, oid, o["label"])
                 new_oid = place_limit_order(
                     client, o["token_id"], o["label"], ideal_price, ORDER_SIZE, BUY
