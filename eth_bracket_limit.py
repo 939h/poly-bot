@@ -587,7 +587,7 @@ function render(s){
 
     <div class="section">
       ${secHdr(`BUY Orders (${buys.length})`, 'buys')}
-      ${_col.buys?'':` <div class="sec-body" style="max-height:480px"><div style="overflow-x:auto">
+      ${_col.buys?'':` <div class="sec-body" style="max-height:580px"><div style="overflow-x:auto">
       <table>
         <thead><tr>
           <th>Date</th><th>Bracket</th><th>Asset</th><th>Price</th>
