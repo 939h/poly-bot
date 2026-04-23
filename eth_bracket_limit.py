@@ -371,12 +371,43 @@ def st_update_ask(token_id: str, ask: float | None) -> None:
 def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
+
     now = time.time()
+
+    # Dashboard cleanup rules:
+    # 1) BUY orders: hide cancelled entries and any order past its cancel window.
+    # 2) Positions/Sell orders: hide markets whose window has ended.
+    label_end_ts: dict[str, float] = {}
+    buy_orders: list[dict] = []
+
     for o in snap["buy_orders"]:
-        secs = o["cancel_at"] - now
+        cancel_at = float(o.get("cancel_at", 0) or 0)
+        label = (o.get("label") or "").strip()
+        if label and cancel_at > 0:
+            end_ts = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
+            prev_end = label_end_ts.get(label, 0)
+            if end_ts > prev_end:
+                label_end_ts[label] = end_ts
+
+        status = (o.get("status") or "").upper()
+        if status == "CANCELLED" or cancel_at <= now:
+            continue
+
+        secs = cancel_at - now
         o["cancel_dt"] = datetime.fromtimestamp(
-            o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+            cancel_at, tz=timezone.utc).strftime("%b %-d %H:%M UTC")
         o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
+        buy_orders.append(o)
+
+    snap["buy_orders"] = buy_orders
+
+    def _window_active(label: str) -> bool:
+        end_ts = label_end_ts.get((label or "").strip())
+        return True if end_ts is None else end_ts > now
+
+    snap["positions"] = [p for p in snap["positions"] if _window_active(p.get("label", ""))]
+    snap["sell_orders"] = [o for o in snap["sell_orders"] if _window_active(o.get("label", ""))]
+
     return snap
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
