@@ -155,7 +155,7 @@ class _ColorFormatter(logging.Formatter):
         # ── Sell / TP orders placed ───────────────────────────────────────────
         if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
                                    "Partial fill", "sell tranches")):
-            return Fore.GREEN + msg + Style.RESET_ALL
+            return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
 
         # ── Buy orders placed ─────────────────────────────────────────────────
         if "Limit BUY placed" in msg:
@@ -368,15 +368,51 @@ def st_update_ask(token_id: str, ask: float | None) -> None:
                 p["current_ask"] = ask
         _state["updated"] = _now_str()
 
+def st_position_shares_for_token(token_id: str) -> int:
+    """Current dashboard-tracked position shares for a token_id."""
+    with _slock:
+        return sum(int(p.get("shares", 0) or 0) for p in _state["positions"] if p.get("token_id") == token_id)
+
 def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
+
     now = time.time()
+
+    # Dashboard cleanup rules:
+    # 1) BUY orders: hide cancelled entries and any order past its cancel window.
+    # 2) Positions/Sell orders: hide markets whose window has ended.
+    label_end_ts: dict[str, float] = {}
+    buy_orders: list[dict] = []
+
     for o in snap["buy_orders"]:
-        secs = o["cancel_at"] - now
+        cancel_at = float(o.get("cancel_at", 0) or 0)
+        label = (o.get("label") or "").strip()
+        if label and cancel_at > 0:
+            end_ts = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
+            prev_end = label_end_ts.get(label, 0)
+            if end_ts > prev_end:
+                label_end_ts[label] = end_ts
+
+        status = (o.get("status") or "").upper()
+        if status == "CANCELLED" or cancel_at <= now:
+            continue
+
+        secs = cancel_at - now
         o["cancel_dt"] = datetime.fromtimestamp(
-            o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+            cancel_at, tz=timezone.utc).strftime("%b %-d %H:%M UTC")
         o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
+        buy_orders.append(o)
+
+    snap["buy_orders"] = buy_orders
+
+    def _window_active(label: str) -> bool:
+        end_ts = label_end_ts.get((label or "").strip())
+        return True if end_ts is None else end_ts > now
+
+    snap["positions"] = [p for p in snap["positions"] if _window_active(p.get("label", ""))]
+    snap["sell_orders"] = [o for o in snap["sell_orders"] if _window_active(o.get("label", ""))]
+
     return snap
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -1645,9 +1681,19 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
-                        tp_orders = place_sell_tranches(
-                            client, o["token_id"], o["label"], filled, o["buy_price"]
-                        )
+                        tp_orders: list[dict] = []
+                        for attempt in range(3):
+                            tp_orders = place_sell_tranches(
+                                client, o["token_id"], o["label"], filled, o["buy_price"]
+                            )
+                            if tp_orders:
+                                break
+                            if attempt < 2:
+                                log.warning(
+                                    f"  No SELL tranches placed for {o['label']} yet; retrying in 2s "
+                                    f"(attempt {attempt + 2}/3)"
+                                )
+                                time.sleep(2)
                         if tp_orders:
                             threading.Thread(
                                 target=monitor_tp_sells,
@@ -1661,7 +1707,44 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                             daemon=True,
                         ).start()
                     else:
-                        log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
+                        # Fallback: some API responses report 0 filled for closed orders,
+                        # while wallet balance already reflects the bought shares.
+                        wallet = get_token_position(client, o["token_id"])
+                        tracked = st_position_shares_for_token(o["token_id"])
+                        inferred = max(0, wallet - tracked)
+                        if inferred > 0:
+                            log.info(
+                                f"  FILLED ✓ {o['label']} | inferred {inferred} shares from wallet balance"
+                                f" (order_id={oid})"
+                            )
+                            st_buy_filled(oid, inferred, o["token_id"], o["buy_price"], o["label"])
+                            tp_orders: list[dict] = []
+                            for attempt in range(3):
+                                tp_orders = place_sell_tranches(
+                                    client, o["token_id"], o["label"], inferred, o["buy_price"]
+                                )
+                                if tp_orders:
+                                    break
+                                if attempt < 2:
+                                    log.warning(
+                                        f"  No SELL tranches placed for {o['label']} yet; retrying in 2s "
+                                        f"(attempt {attempt + 2}/3)"
+                                    )
+                                    time.sleep(2)
+                            if tp_orders:
+                                threading.Thread(
+                                    target=monitor_tp_sells,
+                                    args=(client, o["condition_id"], o["token_id"], tp_orders),
+                                    daemon=True,
+                                ).start()
+                            threading.Thread(
+                                target=last_hour_sell_monitor,
+                                args=(client, o["token_id"], o["label"],
+                                      o["condition_id"], o["cancel_at"]),
+                                daemon=True,
+                            ).start()
+                        else:
+                            log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
 
         if not pending:
             log.info("All orders filled or gone.")
@@ -1827,6 +1910,7 @@ def place_for_date(
     brackets_config: list[tuple],
     slug_fn: callable,
     skip_slugs: set[str] | None = None,
+    allow_place: bool = True,
 ) -> list[dict]:
     """
     For a given date, place BUY limit orders for each entry in brackets_config.
@@ -1837,6 +1921,7 @@ def place_for_date(
     slug_fn:         callable(bracket, date) -> slug string (build_slug or build_xrp_slug)
     skip_slugs:      if provided, slugs already placed are skipped and newly placed
                      slugs are added to the set (used for tomorrow retry logic).
+    allow_place:     if False, only resume existing orders/positions; do not place new BUYs.
     """
     date_label = target_date.strftime("%b %-d")
     log.info(f"--- {date_label} | {len(brackets_config)} bracket(s) ---")
@@ -1951,6 +2036,10 @@ def place_for_date(
             )
             continue
 
+        if not allow_place:
+            log.debug(f"  [RESYNC] {label} — skipping new BUY placement")
+            continue
+
         order_id = place_limit_order(
             client, token_id, label, price, order_size, BUY
         )
@@ -1993,6 +2082,7 @@ def main() -> None:
     placed_dates:    set[date] = set()  # today dates fully placed
     tmrw_placed:     set[str]  = set()  # ETH tomorrow slugs placed (for retry)
     xrp_tmrw_placed: set[str]  = set()  # XRP tomorrow slugs placed (for retry)
+    last_resync_ts = 0.0
 
     while True:
         utc_now  = datetime.now(timezone.utc)
@@ -2100,6 +2190,35 @@ def main() -> None:
                         ).start()
                 except Exception as e:
                     log.error(f"Tomorrow XRP retry failed: {e}")
+
+            # Periodic current-window resync: catch manual fills / missed fill-webhook cases
+            if time.time() - last_resync_ts >= 120:
+                try:
+                    eth = fetch_eth_spot()
+                    upper, upper2, lower, lower2 = get_brackets(eth)
+                    st_set_eth(eth, upper, upper2, lower, lower2)
+                    eth_brackets = [
+                        (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
+                        (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
+                        (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
+                        (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
+                    ]
+                    # Resync only (no new BUYs)
+                    place_for_date(client, today, eth_brackets, build_slug, allow_place=False)
+
+                    if XRP_ENABLED:
+                        xrp = fetch_xrp_spot()
+                        xrp_upper, xrp_lower = get_xrp_brackets(xrp)
+                        st_set_xrp(xrp, xrp_upper, xrp_lower)
+                        xrp_brackets = [
+                            (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                            (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                        ]
+                        place_for_date(client, today, xrp_brackets, build_xrp_slug, allow_place=False)
+                except Exception as e:
+                    log.warning(f"Current-window resync failed: {e}")
+                finally:
+                    last_resync_ts = time.time()
 
         time.sleep(LOOP_SLEEP)
 
