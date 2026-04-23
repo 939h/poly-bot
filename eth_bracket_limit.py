@@ -155,7 +155,7 @@ class _ColorFormatter(logging.Formatter):
         # ── Sell / TP orders placed ───────────────────────────────────────────
         if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
                                    "Partial fill", "sell tranches")):
-            return Fore.GREEN + msg + Style.RESET_ALL
+            return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
 
         # ── Buy orders placed ─────────────────────────────────────────────────
         if "Limit BUY placed" in msg:
