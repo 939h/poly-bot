@@ -1031,7 +1031,7 @@ def place_sell_tranches(
 
     TP1  50% shares  at max(buy_price * 2, best_ask)
     TP2  25% shares  at buy_price * 10
-    TP3  remaining   at buy_price * 50
+    TP3  remaining   at buy_price * 100
 
     Returns list of placed order dicts for monitoring.
     """
