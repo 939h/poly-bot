@@ -216,6 +216,7 @@ log = logging.getLogger(__name__)
 _slock = threading.Lock()
 _logged_order_errors: set[str] = set()  # suppress repeat permanent errors
 _tick_upgraded: set[str] = set()        # prevent double tick-upgrade across threads
+_last_hour_no_free_logged: dict[str, float] = {}  # throttle repeated "no free shares" logs
 _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
@@ -1290,6 +1291,62 @@ def cancel_all_open_sells(
         return 0
 
 
+def get_reserved_open_sell_shares(
+    client: ClobClient, condition_id: str, token_id: str
+) -> int:
+    """
+    Estimate shares currently reserved by OPEN SELL orders for this token.
+    """
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+    except Exception as e:
+        log.warning(f"  [LAST_HOUR] reserved-share check failed for {token_id[:12]}: {e}")
+        return 0
+
+    reserved = 0
+    for o in (orders or []):
+        if o.get("asset_id") != token_id or o.get("side", "").upper() != "SELL":
+            continue
+        try:
+            # Prefer explicit remaining size if present.
+            rem = (
+                o.get("remaining_size")
+                or o.get("remainingSize")
+                or o.get("size_remaining")
+            )
+            if rem is not None:
+                reserved += math.ceil(float(rem))
+                continue
+
+            size = float(o.get("size") or o.get("original_size") or 0)
+            matched = float(
+                o.get("size_matched")
+                or o.get("sizeMatched")
+                or o.get("size_filled")
+                or o.get("sizeFilled")
+                or 0
+            )
+            reserved += max(0, math.ceil(size - matched))
+        except Exception:
+            # Ignore malformed rows.
+            continue
+    return reserved
+
+
+def get_free_sellable_shares(
+    client: ClobClient, condition_id: str, token_id: str
+) -> int:
+    """
+    Shares free to place in NEW SELL orders = wallet shares - shares already
+    reserved by open SELL orders.
+    """
+    wallet = get_token_position(client, token_id)
+    if wallet <= 0:
+        return 0
+    reserved = get_reserved_open_sell_shares(client, condition_id, token_id)
+    return max(0, wallet - reserved)
+
+
 def last_hour_sell_monitor(
     client: ClobClient,
     token_id: str,
@@ -1331,8 +1388,13 @@ def last_hour_sell_monitor(
     if n:
         log.info(f"  [LAST_HOUR] {label} — cancelled {n} sell order(s)")
 
-    # Step 2: Re-read actual wallet balance
-    shares = get_token_position(client, token_id)
+    # Step 2: Re-read free shares after cancellation settles
+    for _ in range(3):
+        shares = get_free_sellable_shares(client, condition_id, token_id)
+        if shares > 0:
+            break
+        time.sleep(1)
+
     if shares <= 0:
         log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
         return
@@ -1360,9 +1422,13 @@ def last_hour_sell_monitor(
 
         # If no active order (placement failed / no asks), retry
         if current_oid is None:
-            shares = get_token_position(client, token_id)
+            shares = get_free_sellable_shares(client, condition_id, token_id)
             if shares <= 0:
-                log.info(f"  [LAST_HOUR] {label} — no shares remaining")
+                now = time.time()
+                prev = _last_hour_no_free_logged.get(label, 0)
+                if now - prev >= 300:  # once per 5 minutes max
+                    _last_hour_no_free_logged[label] = now
+                    log.info(f"  [LAST_HOUR] {label} — no free shares remaining")
                 return
             current_oid, current_price = _place(shares)
             continue
@@ -1399,9 +1465,9 @@ def last_hour_sell_monitor(
             log.error(f"  [LAST_HOUR] Re-price cancel failed ({label}): {e}")
             continue
 
-        shares = get_token_position(client, token_id)
+        shares = get_free_sellable_shares(client, condition_id, token_id)
         if shares <= 0:
-            log.info(f"  [LAST_HOUR] {label} — no shares remaining after re-price")
+            log.info(f"  [LAST_HOUR] {label} — no free shares remaining after re-price")
             return
 
         current_oid, current_price = _place(shares)
