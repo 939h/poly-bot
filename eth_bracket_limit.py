@@ -94,6 +94,7 @@ ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brack
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "3"))  # cancel unfilled BUY orders N hours before market resolves
 LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
+LAST_HOUR_DISCARD_PRICE   = float(os.getenv("LAST_HOUR_DISCARD_PRICE", "0.001"))
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
@@ -1399,20 +1400,29 @@ def last_hour_sell_monitor(
         log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
         return
 
-    # Inner helper: place sell at current best_ask; returns (order_id, price) or (None, None)
-    def _place(qty: int) -> tuple[str | None, float | None]:
+    # Inner helper: place sell at current best_ask.
+    # Returns (order_id, price, discarded).
+    def _place(qty: int) -> tuple[str | None, float | None, bool]:
         ask = get_best_ask(client, token_id)
         if ask is None:
             log.warning(f"  [LAST_HOUR] {label} — no asks in book")
-            return None, None
+            return None, None, False
+        if ask <= LAST_HOUR_DISCARD_PRICE:
+            log.info(
+                f"  [LAST_HOUR] {label} — best_ask ${ask:.4f} <= ${LAST_HOUR_DISCARD_PRICE:.4f}; "
+                "discarding last-hour TP1 (no sell placed)"
+            )
+            return None, ask, True
         sell_price = min(round(ask, 4), 0.99)
         oid = place_limit_order(client, token_id, f"{label}-LAST", sell_price, qty, SELL)
         if oid:
             st_sell_placed(label, oid, 1, qty, sell_price)
-        return oid, sell_price
+        return oid, sell_price, False
 
     # Step 3: Place initial sell
-    current_oid, current_price = _place(shares)
+    current_oid, current_price, discarded = _place(shares)
+    if discarded:
+        return
 
     # Step 4: Rescan loop until filled or market closes
     while time.time() < market_end:
@@ -1430,7 +1440,11 @@ def last_hour_sell_monitor(
                     _last_hour_no_free_logged[label] = now
                     log.info(f"  [LAST_HOUR] {label} — no free shares remaining")
                 return
-            current_oid, current_price = _place(shares)
+            # Conflict resolution choice: keep codex branch behavior
+            # (retry place, and if discarded due tiny ask, exit monitor).
+            current_oid, current_price, discarded = _place(shares)
+            if discarded:
+                return
             continue
 
         # Check if current order is still open
@@ -1470,7 +1484,9 @@ def last_hour_sell_monitor(
             log.info(f"  [LAST_HOUR] {label} — no free shares remaining after re-price")
             return
 
-        current_oid, current_price = _place(shares)
+        current_oid, current_price, discarded = _place(shares)
+        if discarded:
+            return
 
     log.info(f"  [LAST_HOUR] {label} — market window ended.")
     # Cancel any sell orders still open at market close (never filled)
