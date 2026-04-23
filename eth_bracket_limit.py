@@ -1440,6 +1440,8 @@ def last_hour_sell_monitor(
                     _last_hour_no_free_logged[label] = now
                     log.info(f"  [LAST_HOUR] {label} — no free shares remaining")
                 return
+            # Conflict resolution choice: keep codex branch behavior
+            # (retry place, and if discarded due tiny ask, exit monitor).
             current_oid, current_price, discarded = _place(shares)
             if discarded:
                 return
