@@ -1910,6 +1910,7 @@ def place_for_date(
     brackets_config: list[tuple],
     slug_fn: callable,
     skip_slugs: set[str] | None = None,
+    allow_place: bool = True,
 ) -> list[dict]:
     """
     For a given date, place BUY limit orders for each entry in brackets_config.
@@ -1920,6 +1921,7 @@ def place_for_date(
     slug_fn:         callable(bracket, date) -> slug string (build_slug or build_xrp_slug)
     skip_slugs:      if provided, slugs already placed are skipped and newly placed
                      slugs are added to the set (used for tomorrow retry logic).
+    allow_place:     if False, only resume existing orders/positions; do not place new BUYs.
     """
     date_label = target_date.strftime("%b %-d")
     log.info(f"--- {date_label} | {len(brackets_config)} bracket(s) ---")
@@ -2034,6 +2036,10 @@ def place_for_date(
             )
             continue
 
+        if not allow_place:
+            log.debug(f"  [RESYNC] {label} — skipping new BUY placement")
+            continue
+
         order_id = place_limit_order(
             client, token_id, label, price, order_size, BUY
         )
@@ -2076,6 +2082,7 @@ def main() -> None:
     placed_dates:    set[date] = set()  # today dates fully placed
     tmrw_placed:     set[str]  = set()  # ETH tomorrow slugs placed (for retry)
     xrp_tmrw_placed: set[str]  = set()  # XRP tomorrow slugs placed (for retry)
+    last_resync_ts = 0.0
 
     while True:
         utc_now  = datetime.now(timezone.utc)
@@ -2183,6 +2190,35 @@ def main() -> None:
                         ).start()
                 except Exception as e:
                     log.error(f"Tomorrow XRP retry failed: {e}")
+
+            # Periodic current-window resync: catch manual fills / missed fill-webhook cases
+            if time.time() - last_resync_ts >= 120:
+                try:
+                    eth = fetch_eth_spot()
+                    upper, upper2, lower, lower2 = get_brackets(eth)
+                    st_set_eth(eth, upper, upper2, lower, lower2)
+                    eth_brackets = [
+                        (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
+                        (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
+                        (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
+                        (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
+                    ]
+                    # Resync only (no new BUYs)
+                    place_for_date(client, today, eth_brackets, build_slug, allow_place=False)
+
+                    if XRP_ENABLED:
+                        xrp = fetch_xrp_spot()
+                        xrp_upper, xrp_lower = get_xrp_brackets(xrp)
+                        st_set_xrp(xrp, xrp_upper, xrp_lower)
+                        xrp_brackets = [
+                            (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                            (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                        ]
+                        place_for_date(client, today, xrp_brackets, build_xrp_slug, allow_place=False)
+                except Exception as e:
+                    log.warning(f"Current-window resync failed: {e}")
+                finally:
+                    last_resync_ts = time.time()
 
         time.sleep(LOOP_SLEEP)
 
