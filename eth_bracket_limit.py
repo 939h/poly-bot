@@ -94,6 +94,7 @@ ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brack
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "3"))  # cancel unfilled BUY orders N hours before market resolves
 LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
+LAST_HOUR_DISCARD_PRICE   = float(os.getenv("LAST_HOUR_DISCARD_PRICE", "0.001"))
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
 MARKET_END_UTC_HOUR = (24 - MARKET_TZ_OFFSET) % 24              # midnight MYT = 16:00 UTC
@@ -216,6 +217,7 @@ log = logging.getLogger(__name__)
 _slock = threading.Lock()
 _logged_order_errors: set[str] = set()  # suppress repeat permanent errors
 _tick_upgraded: set[str] = set()        # prevent double tick-upgrade across threads
+_last_hour_no_free_logged: dict[str, float] = {}  # throttle repeated "no free shares" logs
 _state: dict = {
     "mode":       "DRY RUN" if DRY_RUN else "LIVE",
     "eth_price":  0.0,
@@ -366,10 +368,64 @@ def st_update_ask(token_id: str, ask: float | None) -> None:
                 p["current_ask"] = ask
         _state["updated"] = _now_str()
 
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+def _label_window_ended(label: str, now_ts: float) -> bool:
+    """
+    Best-effort parse for labels/slugs like `...-on-april-23` and determine if
+    that market window has ended (past MARKET_END_UTC_HOUR on that date).
+    """
+    m = re.search(r"-on-([a-z]+)-(\d{1,2})\\b", (label or "").lower())
+    if not m:
+        return False
+    month_name, day_s = m.group(1), m.group(2)
+    month = _MONTHS.get(month_name)
+    if month is None:
+        return False
+    day = int(day_s)
+
+    now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+    year = now_dt.year
+    # Keep this robust around year boundary (Dec/Jan).
+    if month == 12 and now_dt.month == 1:
+        year -= 1
+    elif month == 1 and now_dt.month == 12:
+        year += 1
+    try:
+        end_dt = datetime(year, month, day, MARKET_END_UTC_HOUR, 0, 0, tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return now_dt >= end_dt
+
 def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
     now = time.time()
+    def _safe_ts(v) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+    # Clean dashboard lists:
+    # 1) Buy orders: drop CANCELLED and past-cancel-window entries.
+    snap["buy_orders"] = [
+        o for o in snap["buy_orders"]
+        if o.get("status") != "CANCELLED" and _safe_ts(o.get("cancel_at", 0)) > now
+    ]
+    # 2/3) Positions and sell orders: drop markets whose windows have ended.
+    snap["positions"] = [
+        p for p in snap["positions"]
+        if not _label_window_ended(p.get("label", ""), now)
+    ]
+    snap["sell_orders"] = [
+        s for s in snap["sell_orders"]
+        if not _label_window_ended(s.get("label", ""), now)
+    ]
+
     for o in snap["buy_orders"]:
         secs = o["cancel_at"] - now
         o["cancel_dt"] = datetime.fromtimestamp(
@@ -1290,6 +1346,63 @@ def cancel_all_open_sells(
         return 0
 
 
+def get_reserved_open_sell_shares(
+    client: ClobClient, condition_id: str, token_id: str
+) -> int:
+    """
+    Estimate shares currently reserved by OPEN SELL orders for this token.
+    """
+    try:
+        orders = client.get_orders(OpenOrderParams(market=condition_id))
+    except Exception as e:
+        log.warning(f"  [LAST_HOUR] reserved-share check failed for {token_id[:12]}: {e}")
+        return 0
+
+    reserved = 0
+    for o in (orders or []):
+        getv = o.get if isinstance(o, dict) else lambda k, d=None: getattr(o, k, d)
+        if getv("asset_id") != token_id or str(getv("side", "")).upper() != "SELL":
+            continue
+        try:
+            # Prefer explicit remaining size if present.
+            rem = (
+                getv("remaining_size")
+                or getv("remainingSize")
+                or getv("size_remaining")
+            )
+            if rem is not None:
+                reserved += math.ceil(float(rem))
+                continue
+
+            size = float(getv("size") or getv("original_size") or 0)
+            matched = float(
+                getv("size_matched")
+                or getv("sizeMatched")
+                or getv("size_filled")
+                or getv("sizeFilled")
+                or 0
+            )
+            reserved += max(0, math.ceil(size - matched))
+        except Exception:
+            # Ignore malformed rows.
+            continue
+    return reserved
+
+
+def get_free_sellable_shares(
+    client: ClobClient, condition_id: str, token_id: str
+) -> int:
+    """
+    Shares free to place in NEW SELL orders = wallet shares - shares already
+    reserved by open SELL orders.
+    """
+    wallet = get_token_position(client, token_id)
+    if wallet <= 0:
+        return 0
+    reserved = get_reserved_open_sell_shares(client, condition_id, token_id)
+    return max(0, wallet - reserved)
+
+
 def last_hour_sell_monitor(
     client: ClobClient,
     token_id: str,
@@ -1331,26 +1444,40 @@ def last_hour_sell_monitor(
     if n:
         log.info(f"  [LAST_HOUR] {label} — cancelled {n} sell order(s)")
 
-    # Step 2: Re-read actual wallet balance
-    shares = get_token_position(client, token_id)
+    # Step 2: Re-read free shares after cancellation settles
+    for _ in range(3):
+        shares = get_free_sellable_shares(client, condition_id, token_id)
+        if shares > 0:
+            break
+        time.sleep(1)
+
     if shares <= 0:
         log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
         return
 
-    # Inner helper: place sell at current best_ask; returns (order_id, price) or (None, None)
-    def _place(qty: int) -> tuple[str | None, float | None]:
+    # Inner helper: place sell at current best_ask.
+    # Returns (order_id, price, discarded).
+    def _place(qty: int) -> tuple[str | None, float | None, bool]:
         ask = get_best_ask(client, token_id)
         if ask is None:
             log.warning(f"  [LAST_HOUR] {label} — no asks in book")
-            return None, None
+            return None, None, False
+        if ask <= LAST_HOUR_DISCARD_PRICE:
+            log.info(
+                f"  [LAST_HOUR] {label} — best_ask ${ask:.4f} <= ${LAST_HOUR_DISCARD_PRICE:.4f}; "
+                "discarding last-hour TP1 (no sell placed)"
+            )
+            return None, ask, True
         sell_price = min(round(ask, 4), 0.99)
         oid = place_limit_order(client, token_id, f"{label}-LAST", sell_price, qty, SELL)
         if oid:
             st_sell_placed(label, oid, 1, qty, sell_price)
-        return oid, sell_price
+        return oid, sell_price, False
 
     # Step 3: Place initial sell
-    current_oid, current_price = _place(shares)
+    current_oid, current_price, discarded = _place(shares)
+    if discarded:
+        return
 
     # Step 4: Rescan loop until filled or market closes
     while time.time() < market_end:
@@ -1360,11 +1487,19 @@ def last_hour_sell_monitor(
 
         # If no active order (placement failed / no asks), retry
         if current_oid is None:
-            shares = get_token_position(client, token_id)
+            shares = get_free_sellable_shares(client, condition_id, token_id)
             if shares <= 0:
-                log.info(f"  [LAST_HOUR] {label} — no shares remaining")
+                now = time.time()
+                prev = _last_hour_no_free_logged.get(label, 0)
+                if now - prev >= 300:  # once per 5 minutes max
+                    _last_hour_no_free_logged[label] = now
+                    log.info(f"  [LAST_HOUR] {label} — no free shares remaining")
                 return
-            current_oid, current_price = _place(shares)
+            # Conflict resolution choice: keep codex branch behavior
+            # (retry place, and if discarded due tiny ask, exit monitor).
+            current_oid, current_price, discarded = _place(shares)
+            if discarded:
+                return
             continue
 
         # Check if current order is still open
@@ -1399,12 +1534,14 @@ def last_hour_sell_monitor(
             log.error(f"  [LAST_HOUR] Re-price cancel failed ({label}): {e}")
             continue
 
-        shares = get_token_position(client, token_id)
+        shares = get_free_sellable_shares(client, condition_id, token_id)
         if shares <= 0:
-            log.info(f"  [LAST_HOUR] {label} — no shares remaining after re-price")
+            log.info(f"  [LAST_HOUR] {label} — no free shares remaining after re-price")
             return
 
-        current_oid, current_price = _place(shares)
+        current_oid, current_price, discarded = _place(shares)
+        if discarded:
+            return
 
     log.info(f"  [LAST_HOUR] {label} — market window ended.")
     # Cancel any sell orders still open at market close (never filled)
