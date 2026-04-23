@@ -102,7 +102,7 @@ POLL_SECS          = 60      # fill-check interval
 LOOP_SLEEP         = 30      # main-loop tick (seconds)
 
 # ── XRP config ────────────────────────────────────────────────────────────────
-XRP_ENABLED                   = os.getenv("XRP_ENABLED", "true").lower() == "true"
+XRP_ENABLED                   = os.getenv("XRP_ENABLED", "false").lower() == "true"
 XRP_ORDER_PRICE               = float(os.getenv("XRP_ORDER_PRICE", "0.003"))
 XRP_ORDER_SIZE                = int(os.getenv("XRP_ORDER_SIZE", "300"))
 XRP_BRACKET_STEP              = float(os.getenv("XRP_BRACKET_STEP", "0.10"))
@@ -190,7 +190,7 @@ class _ColorFormatter(logging.Formatter):
             return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
 
         # ── Bracket placement header ──────────────────────────────────────────
-        if msg.startswith(msg[:10]) and "| upper=" in msg:
+        if "| upper=" in msg:
             return Style.BRIGHT + Fore.WHITE + msg + Style.RESET_ALL
 
         # ── Dashboard / connected ─────────────────────────────────────────────
