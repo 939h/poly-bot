@@ -155,7 +155,7 @@ class _ColorFormatter(logging.Formatter):
         # ── Sell / TP orders placed ───────────────────────────────────────────
         if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
                                    "Partial fill", "sell tranches")):
-            return Fore.GREEN + msg + Style.RESET_ALL
+            return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
 
         # ── Buy orders placed ─────────────────────────────────────────────────
         if "Limit BUY placed" in msg:
@@ -368,15 +368,51 @@ def st_update_ask(token_id: str, ask: float | None) -> None:
                 p["current_ask"] = ask
         _state["updated"] = _now_str()
 
+def st_position_shares_for_token(token_id: str) -> int:
+    """Current dashboard-tracked position shares for a token_id."""
+    with _slock:
+        return sum(int(p.get("shares", 0) or 0) for p in _state["positions"] if p.get("token_id") == token_id)
+
 def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
+
     now = time.time()
+
+    # Dashboard cleanup rules:
+    # 1) BUY orders: hide cancelled entries and any order past its cancel window.
+    # 2) Positions/Sell orders: hide markets whose window has ended.
+    label_end_ts: dict[str, float] = {}
+    buy_orders: list[dict] = []
+
     for o in snap["buy_orders"]:
-        secs = o["cancel_at"] - now
+        cancel_at = float(o.get("cancel_at", 0) or 0)
+        label = (o.get("label") or "").strip()
+        if label and cancel_at > 0:
+            end_ts = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
+            prev_end = label_end_ts.get(label, 0)
+            if end_ts > prev_end:
+                label_end_ts[label] = end_ts
+
+        status = (o.get("status") or "").upper()
+        if status == "CANCELLED" or cancel_at <= now:
+            continue
+
+        secs = cancel_at - now
         o["cancel_dt"] = datetime.fromtimestamp(
-            o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+            cancel_at, tz=timezone.utc).strftime("%b %-d %H:%M UTC")
         o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
+        buy_orders.append(o)
+
+    snap["buy_orders"] = buy_orders
+
+    def _window_active(label: str) -> bool:
+        end_ts = label_end_ts.get((label or "").strip())
+        return True if end_ts is None else end_ts > now
+
+    snap["positions"] = [p for p in snap["positions"] if _window_active(p.get("label", ""))]
+    snap["sell_orders"] = [o for o in snap["sell_orders"] if _window_active(o.get("label", ""))]
+
     return snap
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -1645,9 +1681,19 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
-                        tp_orders = place_sell_tranches(
-                            client, o["token_id"], o["label"], filled, o["buy_price"]
-                        )
+                        tp_orders: list[dict] = []
+                        for attempt in range(3):
+                            tp_orders = place_sell_tranches(
+                                client, o["token_id"], o["label"], filled, o["buy_price"]
+                            )
+                            if tp_orders:
+                                break
+                            if attempt < 2:
+                                log.warning(
+                                    f"  No SELL tranches placed for {o['label']} yet; retrying in 2s "
+                                    f"(attempt {attempt + 2}/3)"
+                                )
+                                time.sleep(2)
                         if tp_orders:
                             threading.Thread(
                                 target=monitor_tp_sells,
@@ -1661,7 +1707,44 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                             daemon=True,
                         ).start()
                     else:
-                        log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
+                        # Fallback: some API responses report 0 filled for closed orders,
+                        # while wallet balance already reflects the bought shares.
+                        wallet = get_token_position(client, o["token_id"])
+                        tracked = st_position_shares_for_token(o["token_id"])
+                        inferred = max(0, wallet - tracked)
+                        if inferred > 0:
+                            log.info(
+                                f"  FILLED ✓ {o['label']} | inferred {inferred} shares from wallet balance"
+                                f" (order_id={oid})"
+                            )
+                            st_buy_filled(oid, inferred, o["token_id"], o["buy_price"], o["label"])
+                            tp_orders: list[dict] = []
+                            for attempt in range(3):
+                                tp_orders = place_sell_tranches(
+                                    client, o["token_id"], o["label"], inferred, o["buy_price"]
+                                )
+                                if tp_orders:
+                                    break
+                                if attempt < 2:
+                                    log.warning(
+                                        f"  No SELL tranches placed for {o['label']} yet; retrying in 2s "
+                                        f"(attempt {attempt + 2}/3)"
+                                    )
+                                    time.sleep(2)
+                            if tp_orders:
+                                threading.Thread(
+                                    target=monitor_tp_sells,
+                                    args=(client, o["condition_id"], o["token_id"], tp_orders),
+                                    daemon=True,
+                                ).start()
+                            threading.Thread(
+                                target=last_hour_sell_monitor,
+                                args=(client, o["token_id"], o["label"],
+                                      o["condition_id"], o["cancel_at"]),
+                                daemon=True,
+                            ).start()
+                        else:
+                            log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
 
         if not pending:
             log.info("All orders filled or gone.")
