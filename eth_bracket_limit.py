@@ -136,26 +136,23 @@ class _ColorFormatter(logging.Formatter):
         if "[EXPIRY]" in msg:
             if "HOLD to resolution" in msg:
                 return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
-            if "uncertain" in msg or "selling all" in msg:
-                return Fore.YELLOW + msg + Style.RESET_ALL
             if "likely losing" in msg:
                 return Style.DIM + Fore.RED + msg + Style.RESET_ALL
-            return Fore.MAGENTA + msg + Style.RESET_ALL     # [EXPIRY] info line
+            return Fore.MAGENTA + msg + Style.RESET_ALL
 
-        # ── Last-hour aggressive sell ─────────────────────────────────────────
+        # ── Last-hour aggressive sell — all purple ────────────────────────────
         if "[LAST_HOUR]" in msg:
             if "FILLED" in msg:
-                return Style.BRIGHT + Fore.GREEN + msg + Style.RESET_ALL
-            if "re-pricing" in msg or "Re-pricing" in msg:
-                return Fore.YELLOW + msg + Style.RESET_ALL
-            if "no shares" in msg or "already sold" in msg or "market window ended" in msg:
-                return Style.DIM + Fore.WHITE + msg + Style.RESET_ALL
-            return Fore.CYAN + msg + Style.RESET_ALL
+                return Style.BRIGHT + Fore.MAGENTA + msg + Style.RESET_ALL
+            return Fore.MAGENTA + msg + Style.RESET_ALL
 
-        # ── Sell / TP orders placed ───────────────────────────────────────────
+        # ── Sell / TP orders placed — purple ─────────────────────────────────
         if any(t in msg for t in ("Limit SELL placed", "Placing sell tranches",
-                                   "Partial fill", "sell tranches")):
-            return Fore.GREEN + msg + Style.RESET_ALL
+                                   "Partial fill", "sell tranches",
+                                   "TP1", "TP2", "TP3",
+                                   "sell tranch", "SELL FILLED",
+                                   "[SKIP-SELL]")):
+            return Fore.MAGENTA + msg + Style.RESET_ALL
 
         # ── Buy orders placed ─────────────────────────────────────────────────
         if "Limit BUY placed" in msg:
@@ -297,7 +294,7 @@ def st_buy_existing(label: str, order_id: str, bracket: int, side: str,
     return rec_id
 
 def st_buy_filled(order_id: str, filled_shares: int, token_id: str,
-                  buy_price: float, label: str) -> int:
+                  buy_price: float, label: str, market_end: float = 0.0) -> int:
     pos_id = _new_id()
     with _slock:
         for o in _state["buy_orders"]:
@@ -307,7 +304,7 @@ def st_buy_filled(order_id: str, filled_shares: int, token_id: str,
         _state["positions"].append({
             "id": pos_id, "label": label, "token_id": token_id,
             "shares": filled_shares, "buy_price": buy_price,
-            "current_ask": None,
+            "current_ask": None, "market_end": market_end,
         })
         _state["stats"]["fills"] += 1
         _state["updated"] = _now_str()
@@ -372,11 +369,33 @@ def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
     now = time.time()
+    # Annotate buy_orders with time fields, then strip cancelled and past entries
+    active_labels: set[str] = set()
+    filtered_buys = []
     for o in snap["buy_orders"]:
         secs = o["cancel_at"] - now
         o["cancel_dt"] = datetime.fromtimestamp(
             o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
         o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
+        # Drop cancelled entries and entries whose cancel window has fully passed
+        if o["status"] == "CANCELLED":
+            continue
+        if o["mins_left"] <= 0 and o["status"] not in ("FILLED", "RESUMING"):
+            continue
+        filtered_buys.append(o)
+        active_labels.add(o["label"])
+    snap["buy_orders"] = filtered_buys
+    # Drop positions whose market has ended
+    snap["positions"] = [
+        p for p in snap["positions"]
+        if p.get("market_end", 0) == 0 or p.get("market_end", 0) > now
+    ]
+    # Drop sell orders whose market has ended (no live position label)
+    live_pos_labels = {p["label"] for p in snap["positions"]}
+    snap["sell_orders"] = [
+        o for o in snap["sell_orders"]
+        if o.get("label") in live_pos_labels
+    ]
     return snap
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -895,6 +914,14 @@ def place_limit_order(
     side_str = "BUY" if side == BUY else "SELL"
     cost = round(price * size, 4)
 
+    # Never sell at or below $0.001 — worthless price, discard silently
+    if side == SELL and price <= 0.001:
+        log.info(
+            f"  [SKIP-SELL] {label} — price ${price:.4f} <= $0.001 minimum; "
+            "sell discarded (not worth placing)"
+        )
+        return None
+
     if DRY_RUN:
         log.info(
             f"[DRY RUN] LIMIT {side_str} {label}"
@@ -1389,12 +1416,24 @@ def last_hour_sell_monitor(
     if n:
         log.info(f"  [LAST_HOUR] {label} — cancelled {n} sell order(s)")
 
-    # Step 2: Re-read free shares after cancellation settles
-    for _ in range(3):
-        shares = get_free_sellable_shares(client, condition_id, token_id)
-        if shares > 0:
+    # Step 2: Wait for the CLOB to release the reserved allowance from cancelled orders.
+    # Poll get_reserved_open_sell_shares() until it reaches 0 (max 15s).
+    # This prevents the "not enough balance / allowance" 400 error caused by placing
+    # a new SELL before the previous orders' reservations have propagated off-chain.
+    shares = 0
+    for attempt in range(6):
+        reserved = get_reserved_open_sell_shares(client, condition_id, token_id)
+        wallet   = get_token_position(client, token_id)
+        if reserved == 0 and wallet > 0:
+            shares = wallet
             break
-        time.sleep(1)
+        if wallet == 0:
+            break  # nothing held at all
+        log.info(
+            f"  [LAST_HOUR] {label} — waiting for allowance to clear "
+            f"(reserved={reserved}, wallet={wallet}, attempt {attempt+1}/6)"
+        )
+        time.sleep(2.5)
 
     if shares <= 0:
         log.info(f"  [LAST_HOUR] {label} — no shares in wallet (already sold), skipping")
@@ -1410,10 +1449,17 @@ def last_hour_sell_monitor(
         if ask <= LAST_HOUR_DISCARD_PRICE:
             log.info(
                 f"  [LAST_HOUR] {label} — best_ask ${ask:.4f} <= ${LAST_HOUR_DISCARD_PRICE:.4f}; "
-                "discarding last-hour TP1 (no sell placed)"
+                "discarding last-hour sell (no sell placed)"
             )
             return None, ask, True
         sell_price = min(round(ask, 4), 0.99)
+        # Refresh allowance cache before placing to avoid stale reservation errors
+        try:
+            client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+        except Exception as _e:
+            log.warning(f"  [LAST_HOUR] {label} — allowance refresh failed: {_e}")
         oid = place_limit_order(client, token_id, f"{label}-LAST", sell_price, qty, SELL)
         if oid:
             st_sell_placed(label, oid, 1, qty, sell_price)
@@ -1611,7 +1657,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     partial = get_filled_shares(client, oid)
                     if partial > 0:
                         log.info(f"  Partial fill on cancelled order: {partial} shares — evaluating expiry strategy")
-                        st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"])
+                        st_buy_filled(oid, partial, o["token_id"], o["buy_price"], o["label"],
+                                     market_end=o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600)
                         _is_xrp = "xrp-above" in o["label"]
                         exp_orders = sell_at_expiry(
                             client, o["token_id"], o["label"], partial, o["buy_price"],
@@ -1644,7 +1691,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                     filled = get_filled_shares(client, oid)
                     if filled > 0:
                         log.info(f"  FILLED ✓ {o['label']} | {filled} shares | order_id={oid}")
-                        st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"])
+                        st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"],
+                                     market_end=o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600)
                         tp_orders = place_sell_tranches(
                             client, o["token_id"], o["label"], filled, o["buy_price"]
                         )
@@ -1895,7 +1943,8 @@ def place_for_date(
         existing_shares = get_token_position(client, token_id)
         if existing_shares > 0:
             st_buy_filled("startup-" + token_id[:8], existing_shares,
-                          token_id, price, label)
+                          token_id, price, label,
+                          market_end=cancel_at + CANCEL_BEFORE_END_HOURS * 3600)
             open_sells = count_open_sells(client, condition_id, token_id)
             if open_sells > 0:
                 log.info(
