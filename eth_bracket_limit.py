@@ -960,8 +960,14 @@ def place_limit_order(
         return None
 
 
-def get_best_ask(client: ClobClient, token_id: str) -> float | None:
-    """Fetch the best (lowest) ask price from the orderbook."""
+def get_best_ask(client: ClobClient, token_id: str,
+                 exclude_price: float | None = None) -> float | None:
+    """Fetch the best (lowest) ask price from the orderbook.
+
+    exclude_price: if set, skip any ask level at exactly this price.
+    Used to avoid the bot reading its own open SELL order as the best ask,
+    which would cause the reprice loop to stall (target == current_price forever).
+    """
     try:
         book = client.get_order_book(token_id)
         asks = (
@@ -974,7 +980,9 @@ def get_best_ask(client: ClobClient, token_id: str) -> float | None:
         for entry in asks:
             p = entry.get("price") if isinstance(entry, dict) else getattr(entry, "price", None)
             if p is not None:
-                prices.append(float(p))
+                fp = float(p)
+                if exclude_price is None or abs(fp - exclude_price) > 1e-9:
+                    prices.append(fp)
         return min(prices) if prices else None
     except Exception as e:
         log.warning(f"  get_best_ask failed for {token_id[:12]}: {e}")
@@ -1212,7 +1220,9 @@ def monitor_tp_sells(
                 continue
             buy_price = o.get("buy_price", 0)
             tp1_floor = min(round(buy_price * 2, 4), 0.99)
-            best_ask  = get_best_ask(client, o["token_id"])
+            # Exclude our own order's price so we see the true market ask, not ourselves
+            best_ask  = get_best_ask(client, o["token_id"],
+                                     exclude_price=o["current_price"])
             if best_ask is None:
                 continue
             target = min(max(round(best_ask, 4), tp1_floor), 0.99)
@@ -1235,15 +1245,23 @@ def monitor_tp_sells(
                 continue
             new_oid = place_limit_order(client, o["token_id"], f"{o['label']}-TP1",
                                         target, remaining, SELL)
-            pending.pop(oid)
-            open_ids.discard(oid)
+            # Only pop after confirmed — if placement fails, log and clean up explicitly
             if new_oid:
+                pending.pop(oid)
+                open_ids.discard(oid)
                 st_sell_placed(o["label"], new_oid, 1, remaining, target)
                 new_entry = dict(o)
-                new_entry["order_id"]     = new_oid
+                new_entry["order_id"]      = new_oid
                 new_entry["current_price"] = target
                 new_entry["shares"]        = remaining
                 pending[new_oid] = new_entry
+            else:
+                pending.pop(oid)
+                open_ids.discard(oid)
+                log.warning(
+                    f"  TP1 re-place failed for {o['label']} after cancel — "
+                    "position no longer monitored"
+                )
 
         for oid in list(pending.keys()):
             if oid in open_ids:
@@ -1280,7 +1298,7 @@ def monitor_tp_sells(
                             new_entry["shares"]        = remaining
                             pending[new_oid] = new_entry
             else:
-                # Check if already marked cancelled (last_hour_sell cancelled it)
+                # Silently drop if already marked cancelled (last_hour_sell cancelled it)
                 with _slock:
                     st = next(
                         (s["status"] for s in _state["sell_orders"] if s["order_id"] == oid),
@@ -1290,35 +1308,75 @@ def monitor_tp_sells(
                     pass  # last_hour intentionally cancelled it — don't re-place
                 elif o.get("tp") == 1:
                     # TP1 silently rejected/cancelled by CLOB with 0 fill — shares
-                    # still in wallet. Re-place immediately at current best ask.
+                    # still in wallet. Wait for allowance to clear then re-place.
                     log.warning(
                         f"  TP1 gone (0 fill) {o['label']} — order silently rejected, "
-                        "re-placing at current best ask"
+                        "waiting for allowance then re-placing"
                     )
                     buy_price = o.get("buy_price", 0)
                     tp1_floor = min(round(buy_price * 2, 4), 0.99)
-                    best_ask  = get_best_ask(client, o["token_id"])
-                    target    = tp1_floor
-                    if best_ask is not None:
-                        target = min(max(round(best_ask, 4), tp1_floor), 0.99)
-                    new_oid = place_limit_order(
-                        client, o["token_id"], f"{o['label']}-TP1", target, o["shares"], SELL
+                    # Retrieve condition_id from any surviving pending entry with same label
+                    condition_id_local = next(
+                        (v.get("condition_id", "") for v in pending.values()
+                         if v.get("label") == o.get("label")), ""
                     )
-                    if new_oid:
-                        st_sell_placed(o["label"], new_oid, 1, o["shares"], target)
-                        new_entry = dict(o)
-                        new_entry["order_id"]      = new_oid
-                        new_entry["current_price"] = target
-                        pending[new_oid] = new_entry
+                    # Wait for CLOB to release reservation from the just-cancelled order
+                    recheck_shares = o.get("shares", 0)
+                    for _attempt in range(6):
+                        reserved = get_reserved_open_sell_shares(
+                            client, condition_id_local, o["token_id"]
+                        ) if condition_id_local else 0
+                        wallet = get_token_position(client, o["token_id"])
+                        if reserved == 0 and wallet > 0:
+                            recheck_shares = wallet
+                            break
+                        if wallet == 0:
+                            recheck_shares = 0
+                            break
                         log.info(
-                            f"  TP1 re-placed after silent cancel: {o['label']} "
-                            f"@ ${target:.4f} | {o['shares']} shares"
+                            f"  TP1 re-place wait: {o['label']} "
+                            f"reserved={reserved} wallet={wallet} attempt {_attempt+1}/6"
+                        )
+                        time.sleep(2.5)
+                    if recheck_shares <= 0:
+                        log.warning(
+                            f"  TP1 re-place skipped for {o['label']} — no shares in wallet"
                         )
                     else:
-                        log.error(
-                            f"  TP1 re-place also failed for {o['label']} — "
-                            "shares may be stranded, check wallet"
+                        try:
+                            client.update_balance_allowance(
+                                BalanceAllowanceParams(
+                                    asset_type=AssetType.CONDITIONAL, token_id=o["token_id"]
+                                )
+                            )
+                        except Exception as _be:
+                            log.warning(
+                                f"  TP1 allowance refresh failed for {o['label']}: {_be}"
+                            )
+                        best_ask = get_best_ask(client, o["token_id"])
+                        target   = tp1_floor
+                        if best_ask is not None:
+                            target = min(max(round(best_ask, 4), tp1_floor), 0.99)
+                        new_oid = place_limit_order(
+                            client, o["token_id"], f"{o['label']}-TP1",
+                            target, recheck_shares, SELL
                         )
+                        if new_oid:
+                            st_sell_placed(o["label"], new_oid, 1, recheck_shares, target)
+                            new_entry = dict(o)
+                            new_entry["order_id"]      = new_oid
+                            new_entry["current_price"] = target
+                            new_entry["shares"]        = recheck_shares
+                            pending[new_oid] = new_entry
+                            log.info(
+                                f"  TP1 re-placed after silent cancel: {o['label']} "
+                                f"@ ${target:.4f} | {recheck_shares} shares"
+                            )
+                        else:
+                            log.error(
+                                f"  TP1 re-place also failed for {o['label']} — "
+                                "shares may be stranded, check wallet"
+                            )
                 else:
                     log.info(f"  SELL gone (0 fill) {o['label']}-TP{o['tp']} | order_id={oid}")
 
@@ -1539,8 +1597,8 @@ def last_hour_sell_monitor(
                 log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
             return
 
-        # Check if best_ask has moved
-        ask = get_best_ask(client, token_id)
+        # Check if best_ask has moved — exclude our own order so we don't stall
+        ask = get_best_ask(client, token_id, exclude_price=current_price)
         if ask is None:
             continue
         new_price = min(round(ask, 4), 0.99)
