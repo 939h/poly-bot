@@ -960,8 +960,14 @@ def place_limit_order(
         return None
 
 
-def get_best_ask(client: ClobClient, token_id: str) -> float | None:
-    """Fetch the best (lowest) ask price from the orderbook."""
+def get_best_ask(client: ClobClient, token_id: str,
+                 exclude_price: float | None = None) -> float | None:
+    """Fetch the best (lowest) ask price from the orderbook.
+
+    exclude_price: if set, skip any ask level at exactly this price.
+    Used to avoid the bot reading its own open SELL order as the best ask,
+    which would cause the reprice loop to stall (target == current_price forever).
+    """
     try:
         book = client.get_order_book(token_id)
         asks = (
@@ -974,7 +980,9 @@ def get_best_ask(client: ClobClient, token_id: str) -> float | None:
         for entry in asks:
             p = entry.get("price") if isinstance(entry, dict) else getattr(entry, "price", None)
             if p is not None:
-                prices.append(float(p))
+                fp = float(p)
+                if exclude_price is None or abs(fp - exclude_price) > 1e-9:
+                    prices.append(fp)
         return min(prices) if prices else None
     except Exception as e:
         log.warning(f"  get_best_ask failed for {token_id[:12]}: {e}")
@@ -1212,7 +1220,9 @@ def monitor_tp_sells(
                 continue
             buy_price = o.get("buy_price", 0)
             tp1_floor = min(round(buy_price * 2, 4), 0.99)
-            best_ask  = get_best_ask(client, o["token_id"])
+            # Exclude our own order's price so we see the true market ask, not ourselves
+            best_ask  = get_best_ask(client, o["token_id"],
+                                     exclude_price=o["current_price"])
             if best_ask is None:
                 continue
             target = min(max(round(best_ask, 4), tp1_floor), 0.99)
@@ -1235,15 +1245,26 @@ def monitor_tp_sells(
                 continue
             new_oid = place_limit_order(client, o["token_id"], f"{o['label']}-TP1",
                                         target, remaining, SELL)
-            pending.pop(oid)
-            open_ids.discard(oid)
+            # Only remove old entry once new order is confirmed — if placement fails,
+            # log a warning rather than silently losing the position from monitoring.
             if new_oid:
+                pending.pop(oid)
+                open_ids.discard(oid)
                 st_sell_placed(o["label"], new_oid, 1, remaining, target)
                 new_entry = dict(o)
-                new_entry["order_id"]     = new_oid
+                new_entry["order_id"]      = new_oid
                 new_entry["current_price"] = target
                 new_entry["shares"]        = remaining
                 pending[new_oid] = new_entry
+            else:
+                # Placement failed — old order already cancelled. Remove from pending
+                # so fill-check loop logs it as gone rather than retrying forever.
+                pending.pop(oid)
+                open_ids.discard(oid)
+                log.warning(
+                    f"  TP1 re-place failed for {o['label']} after cancel — "
+                    "position no longer monitored"
+                )
 
         for oid in list(pending.keys()):
             if oid in open_ids:
@@ -1262,6 +1283,8 @@ def monitor_tp_sells(
                     if remaining > 0:
                         buy_price = o.get("buy_price", 0)
                         tp1_floor = min(round(buy_price * 2, 4), 0.99)
+                        # No exclude_price here — the old TP1 order just filled,
+                        # so it's no longer in the book. Fresh ask is the true market.
                         best_ask  = get_best_ask(client, o["token_id"])
                         target    = tp1_floor
                         if best_ask is not None:
@@ -1506,8 +1529,9 @@ def last_hour_sell_monitor(
                 log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
             return
 
-        # Check if best_ask has moved
-        ask = get_best_ask(client, token_id)
+        # Check if best_ask has moved — exclude our own order's price so we
+        # don't stall reading ourselves as the best ask in the book.
+        ask = get_best_ask(client, token_id, exclude_price=current_price)
         if ask is None:
             continue
         new_price = min(round(ask, 4), 0.99)
