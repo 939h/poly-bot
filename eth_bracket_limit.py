@@ -1312,39 +1312,51 @@ def monitor_tp_sells(
                 if st == "CANCELLED":
                     pass  # last_hour intentionally cancelled it — don't re-place
                 elif o.get("tp") == 1:
-                    # TP1 silently rejected/cancelled by CLOB with 0 fill — shares
-                    # still in wallet. Wait for allowance to clear then re-place.
+                    # TP1 silently rejected/cancelled by CLOB with 0 fill.
+                    # TP2+TP3 are still open and reserving shares — we must cancel
+                    # ALL open sells first so reserved reaches 0, then re-place all
+                    # three tranches fresh from the full wallet balance.
                     log.warning(
-                        f"  TP1 gone (0 fill) {o['label']} — order silently rejected, "
-                        "waiting for allowance then re-placing"
+                        f"  TP1 gone (0 fill) {o['label']} — order silently rejected; "
+                        "cancelling all open sells and re-placing all tranches"
                     )
-                    buy_price = o.get("buy_price", 0)
-                    tp1_floor = min(round(buy_price * 2, 4), 0.99)
-                    # condition_id stored on TP1 entry at placement time
                     condition_id_local = o.get("condition_id", "")
-                    # Wait for CLOB to release reservation from the just-cancelled order
-                    recheck_shares = o.get("shares", 0)
+                    buy_price = o.get("buy_price", 0)
+
+                    # Step 1: Cancel ALL open sell orders (TP1+TP2+TP3) for this token
+                    n_cancelled = cancel_all_open_sells(
+                        client, condition_id_local, o["token_id"], o["label"]
+                    )
+                    if n_cancelled:
+                        log.info(
+                            f"  TP1 recovery: cancelled {n_cancelled} open sell(s) "
+                            f"for {o['label']}"
+                        )
+
+                    # Step 2: Wait for CLOB to release ALL reservations (now includes
+                    # TP2+TP3), so reserved reaches 0 and wallet is fully free.
+                    wallet = 0
                     for _attempt in range(6):
                         reserved = get_reserved_open_sell_shares(
                             client, condition_id_local, o["token_id"]
                         ) if condition_id_local else 0
                         wallet = get_token_position(client, o["token_id"])
                         if reserved == 0 and wallet > 0:
-                            recheck_shares = wallet
                             break
                         if wallet == 0:
-                            recheck_shares = 0
                             break
                         log.info(
-                            f"  TP1 re-place wait: {o['label']} "
+                            f"  TP1 recovery wait: {o['label']} "
                             f"reserved={reserved} wallet={wallet} attempt {_attempt+1}/6"
                         )
                         time.sleep(2.5)
-                    if recheck_shares <= 0:
+
+                    if wallet <= 0:
                         log.warning(
-                            f"  TP1 re-place skipped for {o['label']} — no shares in wallet"
+                            f"  TP1 recovery skipped for {o['label']} — no shares in wallet"
                         )
                     else:
+                        # Step 3: Refresh allowance cache
                         try:
                             client.update_balance_allowance(
                                 BalanceAllowanceParams(
@@ -1355,30 +1367,26 @@ def monitor_tp_sells(
                             log.warning(
                                 f"  TP1 allowance refresh failed for {o['label']}: {_be}"
                             )
-                        best_ask = get_best_ask(client, o["token_id"])
-                        target   = tp1_floor
-                        if best_ask is not None:
-                            target = min(max(round(best_ask, 4), tp1_floor), 0.99)
-                        new_oid = place_limit_order(
-                            client, o["token_id"], f"{o['label']}-TP1",
-                            target, recheck_shares, SELL
+
+                        # Step 4: Re-place all three tranches from full wallet balance.
+                        # Remove any surviving TP2/TP3 entries from pending so we don't
+                        # double-monitor orders that were just cancelled.
+                        for _oid in list(pending.keys()):
+                            if (pending[_oid].get("label") == o["label"]
+                                    and pending[_oid].get("tp") in (2, 3)):
+                                pending.pop(_oid)
+
+                        new_orders = place_sell_tranches(
+                            client, o["token_id"], o["label"],
+                            wallet, buy_price,
+                            condition_id=condition_id_local,
                         )
-                        if new_oid:
-                            st_sell_placed(o["label"], new_oid, 1, recheck_shares, target)
-                            new_entry = dict(o)
-                            new_entry["order_id"]      = new_oid
-                            new_entry["current_price"] = target
-                            new_entry["shares"]        = recheck_shares
-                            pending[new_oid] = new_entry
-                            log.info(
-                                f"  TP1 re-placed after silent cancel: {o['label']} "
-                                f"@ ${target:.4f} | {recheck_shares} shares"
-                            )
-                        else:
-                            log.error(
-                                f"  TP1 re-place also failed for {o['label']} — "
-                                "shares may be stranded, check wallet"
-                            )
+                        for entry in new_orders:
+                            pending[entry["order_id"]] = entry
+                        log.info(
+                            f"  TP1 recovery: re-placed {len(new_orders)} sell tranche(s) "
+                            f"for {o['label']} | wallet={wallet} shares"
+                        )
                 else:
                     log.info(f"  SELL gone (0 fill) {o['label']}-TP{o['tp']} | order_id={oid}")
 
