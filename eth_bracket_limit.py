@@ -1029,6 +1029,7 @@ def place_sell_tranches(
     label: str,
     filled_shares: int,
     buy_price: float,
+    condition_id: str = "",
 ) -> list[dict]:
     """
     Place 3 tiered GTC limit SELL orders after a BUY fills.
@@ -1036,6 +1037,9 @@ def place_sell_tranches(
     TP1  50% shares  at max(buy_price * 2, best_ask)
     TP2  25% shares  at buy_price * 10
     TP3  remaining   at buy_price * 50
+
+    condition_id: stored on the TP1 entry so the 0-fill re-place handler
+    can call get_reserved_open_sell_shares() without a pending lookup.
 
     Returns list of placed order dicts for monitoring.
     """
@@ -1090,6 +1094,7 @@ def place_sell_tranches(
                 entry["buy_price"]     = buy_price
                 entry["shares"]        = tp_shares
                 entry["current_price"] = tp_price
+                entry["condition_id"]  = condition_id  # needed by 0-fill re-place handler
             placed.append(entry)
     return placed
 
@@ -1123,7 +1128,7 @@ def sell_at_expiry(
         spot = _price_fn()
     except Exception as e:
         log.warning(f"  [EXPIRY] spot fetch failed ({e}) — falling back to TP sells")
-        return place_sell_tranches(client, token_id, label, shares, buy_price)
+        return place_sell_tranches(client, token_id, label, shares, buy_price, condition_id=condition_id)
 
     distance = (spot - bracket) if side_label == "YES" else (bracket - spot)
     log.info(
@@ -1315,11 +1320,8 @@ def monitor_tp_sells(
                     )
                     buy_price = o.get("buy_price", 0)
                     tp1_floor = min(round(buy_price * 2, 4), 0.99)
-                    # Retrieve condition_id from any surviving pending entry with same label
-                    condition_id_local = next(
-                        (v.get("condition_id", "") for v in pending.values()
-                         if v.get("label") == o.get("label")), ""
-                    )
+                    # condition_id stored on TP1 entry at placement time
+                    condition_id_local = o.get("condition_id", "")
                     # Wait for CLOB to release reservation from the just-cancelled order
                     recheck_shares = o.get("shares", 0)
                     for _attempt in range(6):
@@ -1785,7 +1787,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"],
                                      market_end=o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600)
                         tp_orders = place_sell_tranches(
-                            client, o["token_id"], o["label"], filled, o["buy_price"]
+                            client, o["token_id"], o["label"], filled, o["buy_price"],
+                            condition_id=o["condition_id"],
                         )
                         if tp_orders:
                             threading.Thread(
@@ -2065,7 +2068,8 @@ def place_for_date(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                     f" — placing sell tranches"
                 )
-                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price)
+                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price,
+                                                    condition_id=condition_id)
                 if tp_orders:
                     threading.Thread(
                         target=monitor_tp_sells,
