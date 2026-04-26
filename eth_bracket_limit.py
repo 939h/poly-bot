@@ -1230,6 +1230,9 @@ def monitor_tp_sells(
                                      exclude_price=o["current_price"])
             if best_ask is None:
                 continue
+            # Gap too small — not worth repricing, stay at current price
+            if best_ask - o["current_price"] < 0.004:
+                continue
             target = min(max(round(best_ask, 4), tp1_floor), 0.99)
             if abs(target - o["current_price"]) < 1e-9:
                 continue
@@ -1610,6 +1613,9 @@ def last_hour_sell_monitor(
         # Check if best_ask has moved — exclude our own order so we don't stall
         ask = get_best_ask(client, token_id, exclude_price=current_price)
         if ask is None:
+            continue
+        # Gap too small — not worth repricing, stay at current price
+        if ask - current_price < 0.004:
             continue
         new_price = min(round(ask, 4), 0.99)
         if new_price == current_price:
