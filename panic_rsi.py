@@ -190,10 +190,10 @@ GAP_MAGNITUDE = {
 }
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
-FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
+TP1_MULT         = 2.0    # take profit 1 — sell 50% of shares at entry x this
+TP2_MULT         = 4.0   # take profit 2 — sell remaining 50% of shares at entry x this
+TRAILING_STOP    = 0.35   # sell remaining shares if price drops 20% from peak after TP1
+FORCE_STOP_LOSS  = 0.55   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
 # --- Force stop cooldown (wait period AFTER cut loss triggers) ---------------
