@@ -1274,7 +1274,10 @@ def monitor_tp_sells(
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
-            o = pending.pop(oid)
+            o = pending.pop(oid, None)
+            if o is None:
+                # Already removed by the reprice block earlier this poll — skip
+                continue
             filled = get_filled_shares(client, oid)
             if filled > 0:
                 log.info(
