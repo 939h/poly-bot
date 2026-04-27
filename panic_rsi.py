@@ -166,7 +166,7 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
+ENTRY_PRICE_CAP  = 0.20   # condition 1: price must be below this (lottery zone)
 DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
 SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
@@ -192,7 +192,7 @@ GAP_MAGNITUDE = {
 # --- Exit strategy -----------------------------------------------------------
 TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
 TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+TRAILING_STOP    = 0.50   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -205,14 +205,14 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 0.3      # seconds between each price scan
+POLL_SECS        = 1.0      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.50  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.30  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.4  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -220,7 +220,7 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = True
+TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
 TRADING_WINDOWS         = [(4, 27, 5, 15), (8, 27, 9, 30), (12, 27, 12, 45), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
