@@ -27,7 +27,7 @@ Infrastructure from fresh_bot10:
   - token_cache          avoids re-fetching same market every poll
 
 Requirements:
-    pip install py-clob-client requests numpy python-dotenv
+    pip install py-clob-client-v2 requests numpy python-dotenv
 
 .env keys:
     POLY_PRIVATE_KEY=0x...
@@ -67,15 +67,20 @@ except ImportError:
     COLORS = False
 
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import (
-        MarketOrderArgs, OrderType, ApiCreds,
-        BalanceAllowanceParams, AssetType,
+    from py_clob_client_v2 import (
+        ClobClient,
+        MarketOrderArgs,
+        OrderType,
+        ApiCreds,
+        BalanceAllowanceParams,
+        AssetType,
+        Side,
     )
-    from py_clob_client.order_builder.constants import BUY, SELL
-    from py_clob_client.constants import POLYGON
+    from py_clob_client_v2.constants import POLYGON
+    BUY  = Side.BUY
+    SELL = Side.SELL
 except ImportError:
-    print("Run: pip install py-clob-client requests numpy python-dotenv")
+    print("Run: pip install py-clob-client-v2 requests numpy python-dotenv")
     sys.exit(1)
 
 load_dotenv()
@@ -567,10 +572,10 @@ def market_buy(client, token_id, label, price_hint=None):
             "filled_price": float(entry_est) if entry_est > 0 else float(price_hint or 0),
         }
     try:
-        order = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount, side=BUY, order_type=OrderType.FOK) 
+        resp = client.create_and_post_market_order(
+            order_args=MarketOrderArgs(token_id=token_id, amount=amount, side=BUY),
+            order_type=OrderType.FOK,
         )
-        resp = client.post_order(order, OrderType.FOK)
         log.info("[BUY] Executed %s | %s", label, resp)
         # BUY responses expose received shares in takingAmount.
         raw_taking = float(resp.get("takingAmount") or 0)  # shares received
@@ -629,10 +634,10 @@ def market_sell(client, token_id, shares, price, label):
     attempt_shares = sell_shares
     for attempt in range(2):
         try:
-            order = client.create_market_order(
-                MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL, order_type=OrderType.FAK)
+            resp = client.create_and_post_market_order(
+                order_args=MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL),
+                order_type=OrderType.FAK,
             )
-            resp = client.post_order(order, OrderType.FAK)
             log.info("[SELL] Executed %s | %s", label, resp)
             try:
                 client.update_balance_allowance(
