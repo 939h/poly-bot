@@ -119,15 +119,15 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
-ASSETS         = ["btc", "eth", "sol"]
+ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.75   # buy if price >= this
-BUY_PRICE_MAX  = 0.85   # buy if price <= this
-ENTRY_AFTER    = 540    # seconds into window before buying allowed (10 min)
+BUY_PRICE_MIN  = 0.82   # buy if price >= this
+BUY_PRICE_MAX  = 0.86   # buy if price <= this
+ENTRY_AFTER    = 600    # seconds into window before buying allowed (10 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -135,19 +135,19 @@ STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
-    "eth": 0.001,   # 0.15% of ETH open
+    "eth": 0.0015,   # 0.15% of ETH open
     "sol": 0.001,    # 0.1% of SOL open
-    "xrp": 0.001,    # 0.2% of XRP open
+    "xrp": 0.002,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   0.6,   # 5–10 min
-    "late":  0.6,   # 10–15 min
+    "mid":   2.5,   # 5–10 min
+    "late":  1.5,   # 10–15 min
 }
-GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.98   # sell all at this price
+SELL_PRICE     = 0.99   # sell all at this price
 CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
@@ -163,7 +163,7 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 1.0
+POLL_SECS              = 2.0
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
@@ -175,8 +175,8 @@ TRADING_WINDOWS         = [(8, 30, 9, 30), (16, 17), (21, 22)]
 EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
-MIN_SELL_SHARES          = 1
-FEE_BUFFER               = 1.00
+MIN_SELL_SHARES          = 0.001
+FEE_BUFFER               = 0.98
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -192,6 +192,7 @@ token_cache        = {}   # window_start -> {asset: (yes_tok, no_tok)}
 live_prices        = {}   # "eth_yes" / "eth_no" -> float
 traded_this_window = set()
 gap_wait           = {}   # asset -> {triggered_at, key, token, price}
+peak_gap           = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 
 pnl_history        = []
@@ -199,7 +200,7 @@ asset_history      = {}
 trade_log          = []
 last_pnl_snapshot  = 0
 
-_skip_first_window = False
+_skip_first_window = True
 _startup_window_ts = None
 
 stats = {
@@ -470,8 +471,8 @@ def market_buy(client, token_id, label, price_hint=None):
     amount = round(BUY_AMOUNT, 4)
     if DRY_RUN:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-        est_shares = int(max(math.floor((amount / entry_est) * FEE_BUFFER), 0)) if entry_est > 0 else 0
-        log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %d shares @ %.4f",
+        est_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
+        log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
                  label, amount, est_shares, entry_est)
         return {
             "ok": True, "resp": {"dry_run": True},
@@ -486,14 +487,14 @@ def market_buy(client, token_id, label, price_hint=None):
         log.info("[BUY] Executed %s | %s", label, resp)
         raw_taking = float(resp.get("takingAmount") or 0)
         raw_making = float(resp.get("makingAmount") or 0)
-        filled_shares = int(max(math.floor(raw_taking), 0))
+        filled_shares = round(raw_taking, 3)
         filled_price  = (raw_making / raw_taking) if raw_taking > 0 and raw_making > 0 else 0.0
         if raw_taking == 0 and raw_making == 0:
             log.warning("[BUY] %s FOK zero fill — order not executed", label)
-            return {"ok": False, "resp": resp, "filled_shares": 0, "filled_price": 0.0}
+            return {"ok": False, "resp": resp, "filled_shares": 0.0, "filled_price": 0.0}
         if filled_shares <= 0:
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-            filled_shares = int(max(math.floor((amount / entry_est) * FEE_BUFFER), 0)) if entry_est > 0 else 0
+            filled_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
             filled_price  = float(entry_est)
         elif filled_price <= 0:
             filled_price = float(price_hint or 0) or get_midpoint(client, token_id)
@@ -510,12 +511,12 @@ def market_buy(client, token_id, label, price_hint=None):
 
 
 def market_sell(client, token_id, shares, price, label):
-    sell_shares = int(max(math.floor(shares), 0))
+    sell_shares = round(shares, 3)
     if sell_shares < MIN_SELL_SHARES:
-        return {"ok": False, "resp": None, "filled_shares": 0, "filled_quote": 0.0}
+        return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_quote": 0.0}
     if DRY_RUN:
         est = round(sell_shares * price, 4)
-        log.info("[DRY-RUN] MARKET SELL %s %d sh @ %.4f (est $%.4f)", label, sell_shares, price, est)
+        log.info("[DRY-RUN] MARKET SELL %s %.3f sh @ %.4f (est $%.4f)", label, sell_shares, price, est)
         return {"ok": True, "resp": {"dry_run": True}, "filled_shares": sell_shares, "filled_quote": est}
     try:
         client.update_balance_allowance(
@@ -538,7 +539,7 @@ def market_sell(client, token_id, shares, price, label):
             except Exception:
                 pass
             raw_making  = float(resp.get("makingAmount") or 0)
-            filled_sh   = int(max(math.floor(raw_making), 0))
+            filled_sh   = round(raw_making, 3)
             filled_quote = float(resp.get("takingAmount") or 0)
             return {"ok": True, "resp": resp, "filled_shares": filled_sh, "filled_quote": filled_quote}
         except Exception as e:
@@ -551,9 +552,9 @@ def market_sell(client, token_id, shares, price, label):
                     amt_raw = int(amt_m.group(1))
                     if 0 < bal_raw < amt_raw:
                         ratio = bal_raw / amt_raw
-                        retry = int(max(math.floor((attempt_shares * ratio) * 0.999), 0))
+                        retry = round(attempt_shares * ratio * 0.999, 3)
                         if retry >= MIN_SELL_SHARES:
-                            log.warning("[SELL] %s size %d → %d to match balance", label, attempt_shares, retry)
+                            log.warning("[SELL] %s size %.3f → %.3f to match balance", label, attempt_shares, retry)
                             attempt_shares = retry
                             continue
             log.error("[SELL] Failed %s: %s", label, e)
@@ -619,9 +620,9 @@ def check_gap_guard(asset, secs_into):
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False):
     if filled_shares is not None and filled_shares > 0:
-        net_shares = int(max(math.floor(float(filled_shares)), 0))
+        net_shares = round(float(filled_shares), 3)
     else:
-        net_shares = int(max(math.floor((BUY_AMOUNT / entry_price) * FEE_BUFFER), 0))
+        net_shares = round((BUY_AMOUNT / entry_price) * FEE_BUFFER, 3)
 
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
@@ -644,7 +645,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     stats["buys"] += 1
     tag = "FLIP " if is_flip else ""
     log.info(
-        "[OPEN] %s%s  entry=%.4f  shares=%d  sell=%.4f  cut-loss=%.4f",
+        "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f",
         tag, key, entry_price, net_shares, SELL_PRICE, cut_loss_price,
     )
 
@@ -703,7 +704,7 @@ def manage_positions(client, server_ts=None):
                 continue
 
             # Confirmed cut-loss — sell all
-            log.info("[CUT-LOSS] %s  price=%.4f  selling %d shares", key, current_price, shares)
+            log.info("[CUT-LOSS] %s  price=%.4f  selling %.3f shares", key, current_price, shares)
             sell = market_sell(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
@@ -813,6 +814,38 @@ def _update_prices(result):
     no_price = round(1.0 - yes_price, 4)
     live_prices[f"{asset}_yes"] = yes_price
     live_prices[f"{asset}_no"]  = no_price
+    # Update peak gap for volatility check
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    if c_open > 0 and c_live is not None:
+        current_gap = abs(c_live - c_open)
+        if current_gap > peak_gap.get(asset, 0.0):
+            peak_gap[asset] = current_gap
+
+
+def _volatility_check(asset, secs_into):
+    """
+    Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
+    Returns False → gap healthy, allow buy.
+    If no peak data yet → allow (safe fallback).
+    """
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    if c_open <= 0 or c_live is None:
+        return False   # no data → allow
+    current_gap = abs(c_live - c_open)
+    peak        = peak_gap.get(asset, 0.0)
+    if peak <= 0:
+        return False   # no peak recorded yet → allow
+    if current_gap <= peak * 0.40:
+        log.info(
+            "[VOL-BLOCK] %s  current_gap=%.4f  peak_gap=%.4f  drop=%.1f%%"
+            " — gap collapsed, blacklisting",
+            asset.upper(), current_gap, peak,
+            (1 - current_gap / peak) * 100,
+        )
+        return True   # blocked
+    return False
 
 
 def scan_markets(client, window_start, secs_into, server_ts, executor):
@@ -863,7 +896,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         elapsed = time.time() - gw["triggered_at"]
 
         if check_gap_guard(asset, secs_into):
-            # Gap is now large enough — proceed to buy
+            # Gap is now large enough — volatility check first
+            if _volatility_check(asset, secs_into):
+                traded_this_window.add(asset)
+                del gap_wait[asset]
+                continue
+            # Proceed to buy
             log.info("[GAP-CLEARED] %s  gap widened after %.1fs — proceeding to buy",
                      asset.upper(), elapsed)
             key   = gw["key"]
@@ -936,7 +974,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             continue
 
         stats["triggers"] += 1
-        log.info("[TRIGGER] %s  price=%.4f  checking gap guard", triggered_key, triggered_price)
+        log.info("[TRIGGER] %s  price=%.4f  checking volatility + gap guard", triggered_key, triggered_price)
+
+        # ── Volatility check — gap collapsed from peak → blacklist ────────────
+        if _volatility_check(asset, secs_into):
+            traded_this_window.add(asset)
+            continue
 
         if check_gap_guard(asset, secs_into):
             # Gap large enough — check spread then buy immediately
@@ -1412,6 +1455,7 @@ def main():
                 live_prices.clear()
                 traded_this_window.clear()
                 gap_wait.clear()
+                peak_gap.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
