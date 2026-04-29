@@ -26,7 +26,7 @@ Requirements:
     POLY_FUNDER_ADDRESS=0x...
     DRY_RUN=true
     BUY_AMOUNT=2
-RETRacement_THRESHOLD = 0.70  # Skip if price drops more than 70% from peak
+RETRacement_THRESHOLD = 0.50  # Skip if price drops more than 70% from peak
 
 """
 
@@ -149,7 +149,7 @@ GAP_MAGNITUDE = {
 GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.98   # sell all at this price
+SELL_PRICE     = 0.96   # sell all at this price
 CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
@@ -157,7 +157,7 @@ HOLD_LATE_SECS  = 15    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.50   # flip only if opposite >= this
-FLIP_MAX       = 0.75   # flip only if opposite <= this
+FLIP_MAX       = 0.80   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
