@@ -142,7 +142,7 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
     "mid":   2.5,   # 5–10 min
-    "late":  0.5,   # 10–15 min
+    "late":  1.0,   # 10–15 min
 }
 GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
 
@@ -470,7 +470,7 @@ def market_buy(client, token_id, label, price_hint=None):
     amount = round(BUY_AMOUNT, 4)
     if DRY_RUN:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-        est_shares = int(max(math.floor((amount / entry_est) * FEE_BUFFER), 1)) if entry_est > 0 else 0
+        est_shares = int(max(math.floor((amount / entry_est) * FEE_BUFFER), 0)) if entry_est > 0 else 0
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %d shares @ %.4f",
                  label, amount, est_shares, entry_est)
         return {
