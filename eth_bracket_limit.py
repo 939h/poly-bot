@@ -93,7 +93,7 @@ ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brack
 ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
 CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "3"))  # cancel unfilled BUY orders N hours before market resolves
-LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "1"))  # aggressive sell window before end
+LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "2"))  # aggressive sell window before end
 LAST_HOUR_DISCARD_PRICE   = float(os.getenv("LAST_HOUR_DISCARD_PRICE", "0.001"))
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
 MARKET_TZ_OFFSET    = int(os.getenv("MARKET_TZ_OFFSET", "8"))   # UTC+8 = MYT
@@ -365,35 +365,17 @@ def st_update_ask(token_id: str, ask: float | None) -> None:
                 p["current_ask"] = ask
         _state["updated"] = _now_str()
 
-def st_position_shares_for_token(token_id: str) -> int:
-    """Current dashboard-tracked position shares for a token_id."""
-    with _slock:
-        return sum(int(p.get("shares", 0) or 0) for p in _state["positions"] if p.get("token_id") == token_id)
-
 def _state_snapshot() -> dict:
     with _slock:
         snap = json.loads(json.dumps(_state))   # deep copy via JSON
-
     now = time.time()
     # Annotate buy_orders with time fields, then strip cancelled and past entries
     active_labels: set[str] = set()
     filtered_buys = []
     for o in snap["buy_orders"]:
-        cancel_at = float(o.get("cancel_at", 0) or 0)
-        label = (o.get("label") or "").strip()
-        if label and cancel_at > 0:
-            end_ts = cancel_at + CANCEL_BEFORE_END_HOURS * 3600
-            prev_end = label_end_ts.get(label, 0)
-            if end_ts > prev_end:
-                label_end_ts[label] = end_ts
-
-        status = (o.get("status") or "").upper()
-        if status == "CANCELLED" or cancel_at <= now:
-            continue
-
-        secs = cancel_at - now
+        secs = o["cancel_at"] - now
         o["cancel_dt"] = datetime.fromtimestamp(
-            cancel_at, tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+            o["cancel_at"], tz=timezone.utc).strftime("%b %-d %H:%M UTC")
         o["mins_left"] = round(secs / 60, 1) if secs > 0 else 0
         # Drop cancelled entries and entries whose cancel window has fully passed
         if o["status"] == "CANCELLED":
@@ -593,7 +575,7 @@ function render(s){
 
     <div class="section">
       ${secHdr(`BUY Orders (${buys.length})`, 'buys')}
-      ${_col.buys?'':` <div class="sec-body" style="max-height:580px"><div style="overflow-x:auto">
+      ${_col.buys?'':` <div class="sec-body" style="max-height:480px"><div style="overflow-x:auto">
       <table>
         <thead><tr>
           <th>Date</th><th>Bracket</th><th>Asset</th><th>Price</th>
@@ -978,8 +960,14 @@ def place_limit_order(
         return None
 
 
-def get_best_ask(client: ClobClient, token_id: str) -> float | None:
-    """Fetch the best (lowest) ask price from the orderbook."""
+def get_best_ask(client: ClobClient, token_id: str,
+                 exclude_price: float | None = None) -> float | None:
+    """Fetch the best (lowest) ask price from the orderbook.
+
+    exclude_price: if set, skip any ask level at exactly this price.
+    Used to avoid the bot reading its own open SELL order as the best ask,
+    which would cause the reprice loop to stall (target == current_price forever).
+    """
     try:
         book = client.get_order_book(token_id)
         asks = (
@@ -992,7 +980,9 @@ def get_best_ask(client: ClobClient, token_id: str) -> float | None:
         for entry in asks:
             p = entry.get("price") if isinstance(entry, dict) else getattr(entry, "price", None)
             if p is not None:
-                prices.append(float(p))
+                fp = float(p)
+                if exclude_price is None or abs(fp - exclude_price) > 1e-9:
+                    prices.append(fp)
         return min(prices) if prices else None
     except Exception as e:
         log.warning(f"  get_best_ask failed for {token_id[:12]}: {e}")
@@ -1039,13 +1029,17 @@ def place_sell_tranches(
     label: str,
     filled_shares: int,
     buy_price: float,
+    condition_id: str = "",
 ) -> list[dict]:
     """
     Place 3 tiered GTC limit SELL orders after a BUY fills.
 
     TP1  50% shares  at max(buy_price * 2, best_ask)
     TP2  25% shares  at buy_price * 10
-    TP3  remaining   at buy_price * 100
+    TP3  remaining   at buy_price * 50
+
+    condition_id: stored on the TP1 entry so the 0-fill re-place handler
+    can call get_reserved_open_sell_shares() without a pending lookup.
 
     Returns list of placed order dicts for monitoring.
     """
@@ -1100,6 +1094,7 @@ def place_sell_tranches(
                 entry["buy_price"]     = buy_price
                 entry["shares"]        = tp_shares
                 entry["current_price"] = tp_price
+                entry["condition_id"]  = condition_id  # needed by 0-fill re-place handler
             placed.append(entry)
     return placed
 
@@ -1133,7 +1128,7 @@ def sell_at_expiry(
         spot = _price_fn()
     except Exception as e:
         log.warning(f"  [EXPIRY] spot fetch failed ({e}) — falling back to TP sells")
-        return place_sell_tranches(client, token_id, label, shares, buy_price)
+        return place_sell_tranches(client, token_id, label, shares, buy_price, condition_id=condition_id)
 
     distance = (spot - bracket) if side_label == "YES" else (bracket - spot)
     log.info(
@@ -1230,8 +1225,13 @@ def monitor_tp_sells(
                 continue
             buy_price = o.get("buy_price", 0)
             tp1_floor = min(round(buy_price * 2, 4), 0.99)
-            best_ask  = get_best_ask(client, o["token_id"])
+            # Exclude our own order's price so we see the true market ask, not ourselves
+            best_ask  = get_best_ask(client, o["token_id"],
+                                     exclude_price=o["current_price"])
             if best_ask is None:
+                continue
+            # Gap too small — not worth repricing, stay at current price
+            if best_ask - o["current_price"] < 0.004:
                 continue
             target = min(max(round(best_ask, 4), tp1_floor), 0.99)
             if abs(target - o["current_price"]) < 1e-9:
@@ -1253,20 +1253,31 @@ def monitor_tp_sells(
                 continue
             new_oid = place_limit_order(client, o["token_id"], f"{o['label']}-TP1",
                                         target, remaining, SELL)
-            pending.pop(oid)
-            open_ids.discard(oid)
+            # Only pop after confirmed — if placement fails, log and clean up explicitly
             if new_oid:
+                pending.pop(oid)
+                open_ids.discard(oid)
                 st_sell_placed(o["label"], new_oid, 1, remaining, target)
                 new_entry = dict(o)
-                new_entry["order_id"]     = new_oid
+                new_entry["order_id"]      = new_oid
                 new_entry["current_price"] = target
                 new_entry["shares"]        = remaining
                 pending[new_oid] = new_entry
+            else:
+                pending.pop(oid)
+                open_ids.discard(oid)
+                log.warning(
+                    f"  TP1 re-place failed for {o['label']} after cancel — "
+                    "position no longer monitored"
+                )
 
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
-            o = pending.pop(oid)
+            o = pending.pop(oid, None)
+            if o is None:
+                # Already removed by the reprice block earlier this poll — skip
+                continue
             filled = get_filled_shares(client, oid)
             if filled > 0:
                 log.info(
@@ -1304,7 +1315,85 @@ def monitor_tp_sells(
                         (s["status"] for s in _state["sell_orders"] if s["order_id"] == oid),
                         None,
                     )
-                if st != "CANCELLED":
+                if st == "CANCELLED":
+                    pass  # last_hour intentionally cancelled it — don't re-place
+                elif o.get("tp") == 1:
+                    # TP1 silently rejected/cancelled by CLOB with 0 fill.
+                    # TP2+TP3 are still open and reserving shares — we must cancel
+                    # ALL open sells first so reserved reaches 0, then re-place all
+                    # three tranches fresh from the full wallet balance.
+                    log.warning(
+                        f"  TP1 gone (0 fill) {o['label']} — order silently rejected; "
+                        "cancelling all open sells and re-placing all tranches"
+                    )
+                    condition_id_local = o.get("condition_id", "")
+                    buy_price = o.get("buy_price", 0)
+
+                    # Step 1: Cancel ALL open sell orders (TP1+TP2+TP3) for this token
+                    n_cancelled = cancel_all_open_sells(
+                        client, condition_id_local, o["token_id"], o["label"]
+                    )
+                    if n_cancelled:
+                        log.info(
+                            f"  TP1 recovery: cancelled {n_cancelled} open sell(s) "
+                            f"for {o['label']}"
+                        )
+
+                    # Step 2: Wait for CLOB to release ALL reservations (now includes
+                    # TP2+TP3), so reserved reaches 0 and wallet is fully free.
+                    wallet = 0
+                    for _attempt in range(6):
+                        reserved = get_reserved_open_sell_shares(
+                            client, condition_id_local, o["token_id"]
+                        ) if condition_id_local else 0
+                        wallet = get_token_position(client, o["token_id"])
+                        if reserved == 0 and wallet > 0:
+                            break
+                        if wallet == 0:
+                            break
+                        log.info(
+                            f"  TP1 recovery wait: {o['label']} "
+                            f"reserved={reserved} wallet={wallet} attempt {_attempt+1}/6"
+                        )
+                        time.sleep(2.5)
+
+                    if wallet <= 0:
+                        log.warning(
+                            f"  TP1 recovery skipped for {o['label']} — no shares in wallet"
+                        )
+                    else:
+                        # Step 3: Refresh allowance cache
+                        try:
+                            client.update_balance_allowance(
+                                BalanceAllowanceParams(
+                                    asset_type=AssetType.CONDITIONAL, token_id=o["token_id"]
+                                )
+                            )
+                        except Exception as _be:
+                            log.warning(
+                                f"  TP1 allowance refresh failed for {o['label']}: {_be}"
+                            )
+
+                        # Step 4: Re-place all three tranches from full wallet balance.
+                        # Remove any surviving TP2/TP3 entries from pending so we don't
+                        # double-monitor orders that were just cancelled.
+                        for _oid in list(pending.keys()):
+                            if (pending[_oid].get("label") == o["label"]
+                                    and pending[_oid].get("tp") in (2, 3)):
+                                pending.pop(_oid)
+
+                        new_orders = place_sell_tranches(
+                            client, o["token_id"], o["label"],
+                            wallet, buy_price,
+                            condition_id=condition_id_local,
+                        )
+                        for entry in new_orders:
+                            pending[entry["order_id"]] = entry
+                        log.info(
+                            f"  TP1 recovery: re-placed {len(new_orders)} sell tranche(s) "
+                            f"for {o['label']} | wallet={wallet} shares"
+                        )
+                else:
                     log.info(f"  SELL gone (0 fill) {o['label']}-TP{o['tp']} | order_id={oid}")
 
 
@@ -1524,9 +1613,12 @@ def last_hour_sell_monitor(
                 log.info(f"  [LAST_HOUR] {label} — sell order gone (0 fill)")
             return
 
-        # Check if best_ask has moved
-        ask = get_best_ask(client, token_id)
+        # Check if best_ask has moved — exclude our own order so we don't stall
+        ask = get_best_ask(client, token_id, exclude_price=current_price)
         if ask is None:
+            continue
+        # Gap too small — not worth repricing, stay at current price
+        if ask - current_price < 0.004:
             continue
         new_price = min(round(ask, 4), 0.99)
         if new_price == current_price:
@@ -1712,7 +1804,8 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                         st_buy_filled(oid, filled, o["token_id"], o["buy_price"], o["label"],
                                      market_end=o["cancel_at"] + CANCEL_BEFORE_END_HOURS * 3600)
                         tp_orders = place_sell_tranches(
-                            client, o["token_id"], o["label"], filled, o["buy_price"]
+                            client, o["token_id"], o["label"], filled, o["buy_price"],
+                            condition_id=o["condition_id"],
                         )
                         if tp_orders:
                             threading.Thread(
@@ -1727,44 +1820,7 @@ def monitor_and_sell(client: ClobClient, orders: list[dict]) -> None:
                             daemon=True,
                         ).start()
                     else:
-                        # Fallback: some API responses report 0 filled for closed orders,
-                        # while wallet balance already reflects the bought shares.
-                        wallet = get_token_position(client, o["token_id"])
-                        tracked = st_position_shares_for_token(o["token_id"])
-                        inferred = max(0, wallet - tracked)
-                        if inferred > 0:
-                            log.info(
-                                f"  FILLED ✓ {o['label']} | inferred {inferred} shares from wallet balance"
-                                f" (order_id={oid})"
-                            )
-                            st_buy_filled(oid, inferred, o["token_id"], o["buy_price"], o["label"])
-                            tp_orders: list[dict] = []
-                            for attempt in range(3):
-                                tp_orders = place_sell_tranches(
-                                    client, o["token_id"], o["label"], inferred, o["buy_price"]
-                                )
-                                if tp_orders:
-                                    break
-                                if attempt < 2:
-                                    log.warning(
-                                        f"  No SELL tranches placed for {o['label']} yet; retrying in 2s "
-                                        f"(attempt {attempt + 2}/3)"
-                                    )
-                                    time.sleep(2)
-                            if tp_orders:
-                                threading.Thread(
-                                    target=monitor_tp_sells,
-                                    args=(client, o["condition_id"], o["token_id"], tp_orders),
-                                    daemon=True,
-                                ).start()
-                            threading.Thread(
-                                target=last_hour_sell_monitor,
-                                args=(client, o["token_id"], o["label"],
-                                      o["condition_id"], o["cancel_at"]),
-                                daemon=True,
-                            ).start()
-                        else:
-                            log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
+                        log.info(f"  Order {o['label']} gone (0 fill) — skipping sell.")
 
         if not pending:
             log.info("All orders filled or gone.")
@@ -1930,7 +1986,6 @@ def place_for_date(
     brackets_config: list[tuple],
     slug_fn: callable,
     skip_slugs: set[str] | None = None,
-    allow_place: bool = True,
 ) -> list[dict]:
     """
     For a given date, place BUY limit orders for each entry in brackets_config.
@@ -1941,7 +1996,6 @@ def place_for_date(
     slug_fn:         callable(bracket, date) -> slug string (build_slug or build_xrp_slug)
     skip_slugs:      if provided, slugs already placed are skipped and newly placed
                      slugs are added to the set (used for tomorrow retry logic).
-    allow_place:     if False, only resume existing orders/positions; do not place new BUYs.
     """
     date_label = target_date.strftime("%b %-d")
     log.info(f"--- {date_label} | {len(brackets_config)} bracket(s) ---")
@@ -2031,7 +2085,8 @@ def place_for_date(
                     f"  [STARTUP] Existing position: {existing_shares} shares for {label}"
                     f" — placing sell tranches"
                 )
-                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price)
+                tp_orders = place_sell_tranches(client, token_id, label, existing_shares, price,
+                                                    condition_id=condition_id)
                 if tp_orders:
                     threading.Thread(
                         target=monitor_tp_sells,
@@ -2055,10 +2110,6 @@ def place_for_date(
                 f"  [SKIP] {label} — {hours_until_close:.1f}h until close, "
                 f"not placing new BUY"
             )
-            continue
-
-        if not allow_place:
-            log.debug(f"  [RESYNC] {label} — skipping new BUY placement")
             continue
 
         order_id = place_limit_order(
@@ -2103,7 +2154,6 @@ def main() -> None:
     placed_dates:    set[date] = set()  # today dates fully placed
     tmrw_placed:     set[str]  = set()  # ETH tomorrow slugs placed (for retry)
     xrp_tmrw_placed: set[str]  = set()  # XRP tomorrow slugs placed (for retry)
-    last_resync_ts = 0.0
 
     while True:
         utc_now  = datetime.now(timezone.utc)
@@ -2211,35 +2261,6 @@ def main() -> None:
                         ).start()
                 except Exception as e:
                     log.error(f"Tomorrow XRP retry failed: {e}")
-
-            # Periodic current-window resync: catch manual fills / missed fill-webhook cases
-            if time.time() - last_resync_ts >= 120:
-                try:
-                    eth = fetch_eth_spot()
-                    upper, upper2, lower, lower2 = get_brackets(eth)
-                    st_set_eth(eth, upper, upper2, lower, lower2)
-                    eth_brackets = [
-                        (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
-                        (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
-                        (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
-                        (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
-                    ]
-                    # Resync only (no new BUYs)
-                    place_for_date(client, today, eth_brackets, build_slug, allow_place=False)
-
-                    if XRP_ENABLED:
-                        xrp = fetch_xrp_spot()
-                        xrp_upper, xrp_lower = get_xrp_brackets(xrp)
-                        st_set_xrp(xrp, xrp_upper, xrp_lower)
-                        xrp_brackets = [
-                            (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
-                            (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
-                        ]
-                        place_for_date(client, today, xrp_brackets, build_xrp_slug, allow_place=False)
-                except Exception as e:
-                    log.warning(f"Current-window resync failed: {e}")
-                finally:
-                    last_resync_ts = time.time()
 
         time.sleep(LOOP_SLEEP)
 
