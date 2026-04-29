@@ -135,16 +135,16 @@ STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
-    "eth": 0.0015,   # 0.15% of ETH open
+    "eth": 0.001,   # 0.15% of ETH open
     "sol": 0.001,    # 0.1% of SOL open
-    "xrp": 0.002,    # 0.2% of XRP open
+    "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
     "mid":   2.5,   # 5–10 min
-    "late":  1.5,   # 10–15 min
+    "late":  1.0,   # 10–15 min
 }
-GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_PRICE     = 0.96   # sell all at this price
