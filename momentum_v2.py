@@ -125,9 +125,9 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.82   # buy if price >= this
-BUY_PRICE_MAX  = 0.86   # buy if price <= this
-ENTRY_AFTER    = 600    # seconds into window before buying allowed (10 min)
+BUY_PRICE_MIN  = 0.75   # buy if price >= this
+BUY_PRICE_MAX  = 0.85   # buy if price <= this
+ENTRY_AFTER    = 540    # seconds into window before buying allowed (10 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -135,20 +135,20 @@ STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
-    "eth": 0.0015,   # 0.15% of ETH open
+    "eth": 0.001,   # 0.15% of ETH open
     "sol": 0.001,    # 0.1% of SOL open
-    "xrp": 0.002,    # 0.2% of XRP open
+    "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   2.5,   # 5–10 min
-    "late":  1.5,   # 10–15 min
+    "mid":   0.6,   # 5–10 min
+    "late":  0.6,   # 10–15 min
 }
 GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.99   # sell all at this price
-CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
+SELL_PRICE     = 0.96   # sell all at this price
+CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 15    # force-stop cooldown 10–15 min
@@ -163,7 +163,7 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 2.0
+POLL_SECS              = 1.0
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
@@ -176,7 +176,7 @@ EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
-FEE_BUFFER               = 0.98
+FEE_BUFFER               = 0.99
 
 # =============================================================================
 #  INTERNAL CONSTANTS
