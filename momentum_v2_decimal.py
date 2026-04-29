@@ -176,7 +176,7 @@ EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 1
-FEE_BUFFER               = 1.00
+FEE_BUFFER               = 0.99
 
 # =============================================================================
 #  INTERNAL CONSTANTS
