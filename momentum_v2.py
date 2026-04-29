@@ -200,7 +200,7 @@ asset_history      = {}
 trade_log          = []
 last_pnl_snapshot  = 0
 
-_skip_first_window = True
+_skip_first_window = False
 _startup_window_ts = None
 
 stats = {
@@ -883,7 +883,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if window_start == _startup_window_ts:
             return
         else:
-            _skip_first_window = True
+            _skip_first_window = False
             log.info("[SKIP-WINDOW] Clean window started — gap guard active")
 
     # ── Advance gap_wait — check if gap has widened ───────────────────────────
