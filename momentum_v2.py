@@ -125,8 +125,8 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.82   # buy if price >= this
-BUY_PRICE_MAX  = 0.86   # buy if price <= this
+BUY_PRICE_MIN  = 0.75   # buy if price >= this
+BUY_PRICE_MAX  = 0.85   # buy if price <= this
 ENTRY_AFTER    = 540    # seconds into window before buying allowed (10 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 
