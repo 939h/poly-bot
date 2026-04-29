@@ -147,7 +147,7 @@ GAP_MAGNITUDE = {
 GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.98   # sell all at this price
+SELL_PRICE     = 0.96   # sell all at this price
 CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
