@@ -27,7 +27,7 @@ Infrastructure from fresh_bot10:
   - token_cache          avoids re-fetching same market every poll
 
 Requirements:
-    pip install py-clob-client requests numpy python-dotenv
+    pip install py-clob-client-v2 requests numpy python-dotenv
 
 .env keys:
     POLY_PRIVATE_KEY=0x...
@@ -67,15 +67,20 @@ except ImportError:
     COLORS = False
 
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import (
-        MarketOrderArgs, OrderType, ApiCreds,
-        BalanceAllowanceParams, AssetType,
+    from py_clob_client_v2 import (
+        ClobClient,
+        MarketOrderArgs,
+        OrderType,
+        ApiCreds,
+        BalanceAllowanceParams,
+        AssetType,
+        Side,
     )
-    from py_clob_client.order_builder.constants import BUY, SELL
-    from py_clob_client.constants import POLYGON
+    from py_clob_client_v2.constants import POLYGON
+    BUY  = Side.BUY
+    SELL = Side.SELL
 except ImportError:
-    print("Run: pip install py-clob-client requests numpy python-dotenv")
+    print("Run: pip install py-clob-client-v2 requests numpy python-dotenv")
     sys.exit(1)
 
 load_dotenv()
@@ -151,7 +156,7 @@ def log_price_to_csv(asset, price):
 # =============================================================================
 
 # --- Assets to watch ---------------------------------------------------------
-ASSETS           = ["btc", "eth", "sol"]   # any combo of btc/eth/sol/xrp
+ASSETS           = ["eth", "sol", "xrp"]   # any combo of btc/eth/sol/xrp
 
 # --- Trading mode & order size -----------------------------------------------
 DRY_RUN          = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -166,10 +171,10 @@ SETTLE_SECS      = 10    # first 120s of window = collect prices, no trading
                           # reference price = mean of prices collected here
 
 # --- Trigger conditions (ALL 3 must be true to buy) --------------------------
-ENTRY_PRICE_CAP  = 0.06   # condition 1: price must be below this (lottery zone)
-DROP_FROM_REF    = 0.20   # condition 2: price must drop >= 30% from reference price
+ENTRY_PRICE_CAP  = 0.16   # condition 1: price must be below this (lottery zone)
+DROP_FROM_REF    = 0.25   # condition 2: price must drop >= 30% from reference price
 SD_LOOKBACK      = 30     # condition 3: sigma — number of samples for baseline
-SD_THRESH        = 1.8    #              sigma floor multiplier (looser = more signals)
+SD_THRESH        = 2.5   #              sigma floor multiplier (looser = more signals)
 # --- Gap guard (condition 5 — post RSI gate) ---------------------------------
 # Prevents buying when Binance candle has already moved too far from its open.
 # GAP = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
@@ -190,9 +195,9 @@ GAP_MAGNITUDE = {
 }
 
 # --- Exit strategy -----------------------------------------------------------
-TP1_MULT         = 1.7    # take profit 1 — sell 50% of shares at entry x this
-TP2_MULT         = 8.0   # take profit 2 — sell remaining 50% of shares at entry x this
-TRAILING_STOP    = 0.30   # sell remaining shares if price drops 20% from peak after TP1
+TP1_MULT         = 1.5    # take profit 1 — sell 50% of shares at entry x this
+TP2_MULT         = 7   # take profit 2 — sell remaining 50% of shares at entry x this
+TRAILING_STOP    = 0.70   # sell remaining shares if price drops 20% from peak after TP1
 FORCE_STOP_LOSS  = 0.35   # cut loss ALL shares immediately if price drops 50% below entry
                           # fires regardless of peak — protects against falling knife
 
@@ -205,14 +210,14 @@ HOLD_MID_SECS    = 30     # 5-10 min  (middle market) — wait 40s before sellin
 HOLD_LATE_SECS   = 15     # 10-15 min (late market)   — wait 20s before selling
 
 # --- Timing ------------------------------------------------------------------
-POLL_SECS        = 0.3      # seconds between each price scan
+POLL_SECS        = 1.0      # seconds between each price scan
 STOP_TRADE_SECS  = 720    # stop opening NEW trades after this many seconds into window
                           # 720 = 12 minutes  (window is 900s = 15 min)
                           # open positions continue to be monitored and sold normally
-CONFIRM_REBOUND_MULT = 1.50  # rebound confirmation: buy only when price recovers
+CONFIRM_REBOUND_MULT = 1.30  # rebound confirmation: buy only when price recovers
                               # >= this multiple from the trough_min after trigger fires.
                               # 1.25 ≈ 1 pip recovery at most prices in the $0.01–$0.06 range.
-REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × this
+REBOUND_CAP_BUFFER   = 1.4  # rebound entry allowed up to ENTRY_PRICE_CAP × this
                               # e.g. cap=$0.10 → buys up to $0.12; above → discard
 
 # --- Optional trading windows (entry only; exits always allowed) -------------
@@ -220,9 +225,9 @@ REBOUND_CAP_BUFFER   = 1.5  # rebound entry allowed up to ENTRY_PRICE_CAP × thi
 # Two formats can be mixed:
 #   (start_h, end_h)                  whole-hour  e.g. (21, 24) = 9pm–midnight
 #   (start_h, start_m, end_h, end_m)  minute-precise  e.g. (16, 45, 17, 0) = 4:45pm–5pm
-TRADING_WINDOWS_ENABLED = True
+TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8      # local timezone offset from UTC (UTC+8 = MY/SG)
-TRADING_WINDOWS         = [(4, 27, 5, 15), (8, 27, 9, 30), (12, 27, 12, 45), (18, 19), (16, 45, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
+TRADING_WINDOWS         = [(4, 43, 5, 1), (8, 27, 10, 30), (11, 58, 12, 45), (18, 19), (16, 44, 17, 0), (21, 22), (23, 24)] # (16, 45, 17, 0) 4 digit, 16.45-1700
 
 EXIT_RETRY_COOLDOWN_SECS = 1  # avoid hammering the API if exits fail
 TP1_MIN_FILL_RATIO = 0.95     # require near-complete TP1 fill before switching to TP2 mode
@@ -567,10 +572,10 @@ def market_buy(client, token_id, label, price_hint=None):
             "filled_price": float(entry_est) if entry_est > 0 else float(price_hint or 0),
         }
     try:
-        order = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount, side=BUY, order_type=OrderType.FOK) 
+        resp = client.create_and_post_market_order(
+            order_args=MarketOrderArgs(token_id=token_id, amount=amount, side=BUY),
+            order_type=OrderType.FOK,
         )
-        resp = client.post_order(order, OrderType.FOK)
         log.info("[BUY] Executed %s | %s", label, resp)
         # BUY responses expose received shares in takingAmount.
         raw_taking = float(resp.get("takingAmount") or 0)  # shares received
@@ -629,10 +634,10 @@ def market_sell(client, token_id, shares, price, label):
     attempt_shares = sell_shares
     for attempt in range(2):
         try:
-            order = client.create_market_order(
-                MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL, order_type=OrderType.FAK)
+            resp = client.create_and_post_market_order(
+                order_args=MarketOrderArgs(token_id=token_id, amount=attempt_shares, side=SELL),
+                order_type=OrderType.FAK,
             )
-            resp = client.post_order(order, OrderType.FAK)
             log.info("[SELL] Executed %s | %s", label, resp)
             try:
                 client.update_balance_allowance(
