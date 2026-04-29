@@ -142,9 +142,9 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
     "mid":   2.5,   # 5–10 min
-    "late":  1.0,   # 10–15 min
+    "late":  0.6,   # 10–15 min
 }
-GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_PRICE     = 0.98   # sell all at this price
