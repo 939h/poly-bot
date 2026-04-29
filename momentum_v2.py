@@ -163,7 +163,7 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 1.0
+POLL_SECS              = 1.5
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
@@ -883,7 +883,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if window_start == _startup_window_ts:
             return
         else:
-            _skip_first_window = False
+            _skip_first_window = True
             log.info("[SKIP-WINDOW] Clean window started — gap guard active")
 
     # ── Advance gap_wait — check if gap has widened ───────────────────────────
