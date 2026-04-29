@@ -119,7 +119,7 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
-ASSETS         = ["btc", "eth", "sol", "xrp"]
+ASSETS         = ["btc", "eth", "sol"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
