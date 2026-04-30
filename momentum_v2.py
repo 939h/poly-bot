@@ -655,6 +655,9 @@ def manage_positions(client, server_ts=None):
     to_close = []
 
     for key, pos in open_positions.items():
+      # SKIP if this position is already in the process of being sold
+        if pos.get("closing"):
+            continue
         now = time.time()
         if now - pos.get("last_exit_attempt_ts", 0.0) < EXIT_RETRY_COOLDOWN_SECS:
             continue
@@ -706,6 +709,7 @@ def manage_positions(client, server_ts=None):
 
             # Confirmed cut-loss — sell all
             log.info("[CUT-LOSS] %s  price=%.4f  selling %.3f shares", key, current_price, shares)
+            pos["closing"] = True  # Set flag immediately[cite: 1]
             sell = market_sell(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
@@ -764,6 +768,9 @@ def manage_positions(client, server_ts=None):
         if current_price >= SELL_PRICE:
             tag = "FLIP-SELL" if is_flip else "SELL"
             log.info("[%s] %s  price=%.4f  selling %d shares", tag, key, current_price, shares)
+
+            pos["closing"] = True  # Set flag immediately[cite: 1]
+          
             sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
