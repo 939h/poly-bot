@@ -125,9 +125,9 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.75   # buy if price >= this
-BUY_PRICE_MAX  = 0.85   # buy if price <= this
-ENTRY_AFTER    = 540    # seconds into window before buying allowed (10 min)
+BUY_PRICE_MIN  = 0.82   # buy if price >= this
+BUY_PRICE_MAX  = 0.86   # buy if price <= this
+ENTRY_AFTER    = 540    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -135,14 +135,14 @@ STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
-    "eth": 0.001,   # 0.15% of ETH open
+    "eth": 0.0015,   # 0.15% of ETH open
     "sol": 0.001,    # 0.1% of SOL open
-    "xrp": 0.001,    # 0.2% of XRP open
+    "xrp": 0.002,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   0.6,   # 5–10 min
-    "late":  0.6,   # 10–15 min
+    "mid":   2.5,   # 5–10 min
+    "late":  1.5,   # 10–15 min
 }
 GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
@@ -163,7 +163,7 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 1.5
+POLL_SECS              = 2.0
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
@@ -176,7 +176,7 @@ EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
-FEE_BUFFER               = 0.99
+FEE_BUFFER               = 0.98
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -190,9 +190,10 @@ HTTP_PORT  = int(os.getenv("PORT", 8080))
 open_positions     = {}   # key ("eth_yes") -> position dict
 token_cache        = {}   # window_start -> {asset: (yes_tok, no_tok)}
 live_prices        = {}   # "eth_yes" / "eth_no" -> float
-traded_this_window = set()
-gap_wait           = {}   # asset -> {triggered_at, key, token, price}
-peak_gap           = {}   # asset -> float, highest gap seen this window
+traded_this_window  = set()
+flipped_this_window = set()   # assets that have already used their flip this window
+gap_wait            = {}   # asset -> {triggered_at, key, token, price}
+peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 
 pnl_history        = []
@@ -200,7 +201,7 @@ asset_history      = {}
 trade_log          = []
 last_pnl_snapshot  = 0
 
-_skip_first_window = False
+_skip_first_window = True
 _startup_window_ts = None
 
 stats = {
@@ -721,7 +722,7 @@ def manage_positions(client, server_ts=None):
                 # ── Flip to opposite side ─────────────────────────────────────
                 asset = key.split("_")[0]
                 side  = key.split("_")[1]
-                if asset not in traded_this_window:
+                if asset not in flipped_this_window:
                     opp_side = "no" if side == "yes" else "yes"
                     opp_key  = f"{asset}_{opp_side}"
                     tokens   = token_cache.get(pos.get("window_start"), {}).get(asset)
@@ -738,6 +739,7 @@ def manage_positions(client, server_ts=None):
                                               filled_shares=buy.get("filled_shares"),
                                               window_start=pos.get("window_start"),
                                               is_flip=True)
+                                flipped_this_window.add(asset)
                                 traded_this_window.add(asset)
                                 live_prices[opp_key] = opp_price
                         else:
@@ -1454,6 +1456,7 @@ def main():
                 token_cache.clear()
                 live_prices.clear()
                 traded_this_window.clear()
+                flipped_this_window.clear()
                 gap_wait.clear()
                 peak_gap.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
