@@ -125,8 +125,8 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.82   # buy if price >= this
-BUY_PRICE_MAX  = 0.86   # buy if price <= this
+BUY_PRICE_MIN  = 0.75   # buy if price >= this
+BUY_PRICE_MAX  = 0.85   # buy if price <= this
 ENTRY_AFTER    = 540    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 
@@ -135,14 +135,14 @@ STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
-    "eth": 0.0015,   # 0.15% of ETH open
+    "eth": 0.001,   # 0.15% of ETH open
     "sol": 0.001,    # 0.1% of SOL open
-    "xrp": 0.002,    # 0.2% of XRP open
+    "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   2.5,   # 5–10 min
-    "late":  1.5,   # 10–15 min
+    "mid":   0.7,   # 5–10 min
+    "late":  0.7,   # 10–15 min
 }
 GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
@@ -154,7 +154,7 @@ HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
-FLIP_MIN       = 0.50   # flip only if opposite >= this
+FLIP_MIN       = 0.40   # flip only if opposite >= this
 FLIP_MAX       = 0.75   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 2.0
+POLL_SECS              = 1.5
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
@@ -201,7 +201,7 @@ asset_history      = {}
 trade_log          = []
 last_pnl_snapshot  = 0
 
-_skip_first_window = True
+_skip_first_window = False
 _startup_window_ts = None
 
 stats = {
