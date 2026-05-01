@@ -1222,59 +1222,6 @@ def monitor_tp_sells(
         if open_ids is None:
             continue  # API error; assume all still open, retry next poll
 
-        # ── TP1 best-ask tracking ────────────────────────────────────────────
-        for oid in list(pending.keys()):
-            o = pending[oid]
-            if o.get("tp") != 1 or oid not in open_ids:
-                continue
-            buy_price = o.get("buy_price", 0)
-            tp1_floor = min(round(buy_price * 2, 4), 0.99)
-            # Exclude our own order's price so we see the true market ask, not ourselves
-            best_ask  = get_best_ask(client, o["token_id"],
-                                     exclude_price=o["current_price"])
-            if best_ask is None:
-                continue
-            # Gap too small — not worth repricing, stay at current price
-            if best_ask - o["current_price"] < 0.004:
-                continue
-            target = min(max(round(best_ask, 4), tp1_floor), 0.99)
-            if abs(target - o["current_price"]) < 1e-9:
-                continue
-            filled_so_far = get_filled_shares(client, oid)
-            remaining = o["shares"] - filled_so_far
-            if remaining <= 0:
-                continue
-            log.info(
-                f"  TP1 price update: {o['label']} "
-                f"{o['current_price']:.4f} → {target:.4f} "
-                f"| {remaining} shares remaining"
-            )
-            try:
-                client.cancel_order(OrderPayload(orderID=oid))
-                st_sell_cancelled(oid)
-            except Exception as e:
-                log.error(f"  TP1 cancel failed ({o['label']}/{oid}): {e}")
-                continue
-            new_oid = place_limit_order(client, o["token_id"], f"{o['label']}-TP1",
-                                        target, remaining, SELL)
-            # Only pop after confirmed — if placement fails, log and clean up explicitly
-            if new_oid:
-                pending.pop(oid)
-                open_ids.discard(oid)
-                st_sell_placed(o["label"], new_oid, 1, remaining, target)
-                new_entry = dict(o)
-                new_entry["order_id"]      = new_oid
-                new_entry["current_price"] = target
-                new_entry["shares"]        = remaining
-                pending[new_oid] = new_entry
-            else:
-                pending.pop(oid)
-                open_ids.discard(oid)
-                log.warning(
-                    f"  TP1 re-place failed for {o['label']} after cancel — "
-                    "position no longer monitored"
-                )
-
         for oid in list(pending.keys()):
             if oid in open_ids:
                 continue  # still open
