@@ -1064,18 +1064,9 @@ def place_sell_tranches(
     # Polymarket prices are in [0.01, 0.99]; cap all sell prices accordingly
     MAX_SELL_PRICE = 0.99
 
-    # TP1: check best ask; sell at whichever is higher
-    tp1_base = min(round(buy_price * 2, 4), MAX_SELL_PRICE)
-    if not DRY_RUN:
-        best_ask = get_best_ask(client, token_id)
-        if best_ask is not None and best_ask > tp1_base:
-            log.info(
-                f"  TP1 price adjusted: best_ask={best_ask:.4f}"
-                f" > 2x={tp1_base:.4f} → using best_ask"
-            )
+    
             tp1_base = min(round(best_ask, 4), MAX_SELL_PRICE)
-    else:
-        log.info(f"  [DRY RUN] TP1 would check orderbook; using 2x=${tp1_base}")
+    
 
     tp2_price = min(round(buy_price * 10, 4), MAX_SELL_PRICE)
     tp3_price = min(round(buy_price * 50, 4), MAX_SELL_PRICE)
