@@ -683,7 +683,7 @@ def manage_positions(client, server_ts=None):
         is_flip   = pos.get("is_flip", False)
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
-        if current_price <= cut_loss and not is_flip:
+        if current_price <= cut_loss:
             if pos.get("force_stop_triggered") is None:
                 # Spread check on first trigger
                 fsr = pos.get("force_stop_spread_retries", 0)
