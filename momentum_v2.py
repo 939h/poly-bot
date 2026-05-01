@@ -122,7 +122,7 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.75   # buy if price >= this
@@ -147,7 +147,7 @@ GAP_MAGNITUDE = {
 GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.92   # sell all at this price
+SELL_PRICE     = 0.95   # sell all at this price
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
@@ -155,7 +155,7 @@ HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.40   # flip only if opposite >= this
-FLIP_MAX       = 0.75   # flip only if opposite <= this
+FLIP_MAX       = 0.80   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
