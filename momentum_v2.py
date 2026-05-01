@@ -763,6 +763,9 @@ def manage_positions(client, server_ts=None):
                         traded_this_window.add(asset)
                 else:
                     log.info("[FLIP] %s skipped — already flipped this window", asset.upper())
+            else:
+                pos["closing"] = False
+                log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
             continue
 
         # Price recovered — reset cooldown
@@ -793,6 +796,9 @@ def manage_positions(client, server_ts=None):
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, exit_type, current_price, pnl)
                 to_close.append(key)
+            else:
+                pos["closing"] = False
+                log.warning("[%s] %s sell failed — will retry on next loop", tag, key)
 
     for key in to_close:
         del open_positions[key]
