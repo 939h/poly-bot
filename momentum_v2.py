@@ -663,7 +663,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
 def manage_positions(client, server_ts=None):
     to_close = []
 
-    for key, pos in open_positions.items():
+    for key, pos in list(open_positions.items()):
       # SKIP if this position is already in the process of being sold
         if pos.get("closing"):
             continue
