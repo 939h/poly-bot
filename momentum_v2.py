@@ -169,7 +169,7 @@ WINDOW_SECS            = 900
 # ── Trading windows (optional) ────────────────────────────────────────────────
 TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8
-TRADING_WINDOWS         = [(8, 30, 9, 30), (16, 17), (21, 22)]
+TRADING_WINDOWS         = [(12, 30, 16, 0), (18, 20)]
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
