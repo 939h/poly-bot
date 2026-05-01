@@ -176,7 +176,7 @@ EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
-FEE_BUFFER               = 0.98
+CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -470,9 +470,16 @@ def get_spread_value(client, token_id):
 
 def market_buy(client, token_id, label, price_hint=None):
     amount = round(BUY_AMOUNT, 4)
+    def _estimate_buy_shares(entry_price):
+        if entry_price <= 0:
+            return 0.0
+        gross_shares = amount / entry_price
+        # Polymarket buy fees are collected in shares: fee = C * r * p * (1 - p).
+        fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
+        return round(max(gross_shares - fee_shares, 0.0), 3)
     if DRY_RUN:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-        est_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
+        est_shares = _estimate_buy_shares(entry_est)
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
                  label, amount, est_shares, entry_est)
         return {
@@ -495,7 +502,7 @@ def market_buy(client, token_id, label, price_hint=None):
             return {"ok": False, "resp": resp, "filled_shares": 0.0, "filled_price": 0.0}
         if filled_shares <= 0:
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-            filled_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
+            filled_shares = _estimate_buy_shares(entry_est)
             filled_price  = float(entry_est)
         elif filled_price <= 0:
             filled_price = float(price_hint or 0) or get_midpoint(client, token_id)
@@ -623,7 +630,9 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
-        net_shares = round((BUY_AMOUNT / entry_price) * FEE_BUFFER, 3)
+        gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
+        fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
+        net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
 
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
