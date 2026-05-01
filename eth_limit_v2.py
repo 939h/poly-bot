@@ -96,7 +96,7 @@ DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 ORDER_PRICE        = float(os.getenv("ORDER_PRICE", "0.004"))      # inner brackets (upper/lower)
 ORDER_PRICE_EXT    = float(os.getenv("ORDER_PRICE_EXT", "0.002"))  # outer brackets (upper2/lower2)
 ORDER_SIZE         = int(os.getenv("ORDER_SIZE", "300"))        # shares per side
-CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "3"))  # cancel unfilled BUY orders N hours before market resolves
+CANCEL_BEFORE_END_HOURS   = int(os.getenv("CANCEL_BEFORE_END_HOURS", "5"))  # cancel unfilled BUY orders N hours before market resolves
 LAST_HOUR_SELL_HOURS      = int(os.getenv("LAST_HOUR_SELL_HOURS", "2"))  # aggressive sell window before end
 LAST_HOUR_DISCARD_PRICE   = float(os.getenv("LAST_HOUR_DISCARD_PRICE", "0.001"))
 EXPIRY_DISTANCE_THRESHOLD = 50  # $ from bracket: hold if winning by >$50, skip if losing by >$50
