@@ -1065,7 +1065,7 @@ def place_sell_tranches(
     MAX_SELL_PRICE = 0.99
 
     
-            tp1_base = min(round(buy_price, 4), MAX_SELL_PRICE)
+            tp1_base = min(round(buy_price * 2, 4), MAX_SELL_PRICE)
     
 
     tp2_price = min(round(buy_price * 10, 4), MAX_SELL_PRICE)
