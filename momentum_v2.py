@@ -129,6 +129,9 @@ BUY_PRICE_MIN  = 0.75   # buy if price >= this
 BUY_PRICE_MAX  = 0.85   # buy if price <= this
 ENTRY_AFTER    = 540    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
+TREND_GUARD_PRICE = 0.60
+TREND_GUARD_MIN_CONFIRMATIONS = 2
+
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
 # abs(binance_live_close - binance_candle_open) >= threshold → allow buy
@@ -846,7 +849,30 @@ def _update_prices(result):
         if current_gap > peak_gap.get(asset, 0.0):
             peak_gap[asset] = current_gap
 
+def _trend_guard_ok(trigger_asset, trigger_side, results):
+    confirmations = []
+    for asset in ASSETS:
+        if asset == trigger_asset:
+            continue
+        result = results.get(asset)
+        if result is None:
+            continue
+        _, yes_price, _, _ = result
+        side_price = yes_price if trigger_side == "yes" else round(1.0 - yes_price, 4)
+        if side_price > TREND_GUARD_PRICE:
+            confirmations.append(f"{asset}_{trigger_side}={side_price:.4f}")
 
+    if len(confirmations) >= TREND_GUARD_MIN_CONFIRMATIONS:
+        log.info("[TREND-GUARD] %s_%s confirmed by %s",
+                 trigger_asset.upper(), trigger_side.upper(), ", ".join(confirmations))
+        return True
+
+    log.info("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
+             trigger_asset.upper(), trigger_side.upper(),
+             len(confirmations), TREND_GUARD_MIN_CONFIRMATIONS,
+             TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
+    return False
+  
 def _volatility_check(asset, secs_into):
     """
     Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
@@ -931,6 +957,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             key   = gw["key"]
             token = gw["token"]
             price = live_prices.get(key, gw["price"])
+            side  = key.split("_")[1]
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
 
             # Spread check before buy
@@ -996,6 +1023,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         if triggered_key is None:
             continue
+        triggered_side = triggered_key.split("_")[1]
+        if not _trend_guard_ok(asset, triggered_side, results):
+            continue
 
         stats["triggers"] += 1
         log.info("[TRIGGER] %s  price=%.4f  checking volatility + gap guard", triggered_key, triggered_price)
@@ -1004,6 +1034,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if _volatility_check(asset, secs_into):
             traded_this_window.add(asset)
             continue
+          
 
         if check_gap_guard(asset, secs_into):
             # Gap large enough — check spread then buy immediately
