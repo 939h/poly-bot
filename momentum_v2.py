@@ -279,9 +279,19 @@ def save_state():
             "opened_at":   p.get("opened_at", "—"),
         }
     gap_out = {}
+    gap_threshold_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
+        if c_open > 0:
+            swing = GAP_SWING.get(a, 0.001)
+            gap_threshold_out[a] = {
+                "early": round(c_open * swing * GAP_MAGNITUDE["early"], 4),
+                "mid":   round(c_open * swing * GAP_MAGNITUDE["mid"], 4),
+                "late":  round(c_open * swing * GAP_MAGNITUDE["late"], 4),
+            }
+        else:
+            gap_threshold_out[a] = None
         if c_open > 0 and c_live is not None:
             gap_out[a] = round(abs(c_live - c_open), 4)
         else:
@@ -293,6 +303,7 @@ def save_state():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "gap":           gap_out,
+        "gap_threshold": gap_threshold_out,
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -1104,9 +1115,19 @@ def _build_state_snapshot():
     slot_ts = (now_ts // 900) * 900
     secs_in = now_ts - slot_ts
     gap_out = {}
+    gap_threshold_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
+        if c_open > 0:
+            swing = GAP_SWING.get(a, 0.001)
+            gap_threshold_out[a] = {
+                "early": round(c_open * swing * GAP_MAGNITUDE["early"], 4),
+                "mid":   round(c_open * swing * GAP_MAGNITUDE["mid"], 4),
+                "late":  round(c_open * swing * GAP_MAGNITUDE["late"], 4),
+            }
+        else:
+            gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1115,6 +1136,7 @@ def _build_state_snapshot():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "gap":           gap_out,
+        "gap_threshold": gap_threshold_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -1292,7 +1314,7 @@ function renderAssetHistory(assetHist,assets){
 
 function render(s){
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -1311,8 +1333,10 @@ function render(s){
     const yc=inZone(yp)?'green':'';
     const nc=inZone(np)?'green':'';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
-    const gv=gap[a];const gStr=gv!=null?gv.toFixed(4):'—';
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td style="font-family:monospace">${gStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
+    const gStr=gv!=null?gv.toFixed(4):'—';
+    const tStr=gt!=null?gt.toFixed(4):'—';
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td style="font-family:monospace">${gStr} / ${tStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1371,7 +1395,7 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap</th><th>Holding</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
