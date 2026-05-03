@@ -150,7 +150,8 @@ GAP_MAGNITUDE = {
 GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_MULTIPLIER = 1.20   # sell all at this price
+SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
+SELL_CAP        = float(os.getenv("SELL_CAP", "0.99"))
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
@@ -299,7 +300,8 @@ def save_state():
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
-            "sell":       SELL_PRICE,
+            "sell_multiplier": SELL_MULTIPLIER,
+            "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -636,13 +638,13 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
-
+    sell_price = min(round(entry_price * SELL_MULTIPLIER, 4), SELL_CAP)
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
     open_positions[key] = {
         "token_id":             token_id,
         "entry_price":          entry_price,
-        "sell_price":           round(entry_price * SELL_MULTIPLIER, 4),
+        "sell_price":           sell_price,
         "cut_loss_price":       cut_loss_price,
         "net_shares":           net_shares,
         "cost":                 round(BUY_AMOUNT, 4),
@@ -659,7 +661,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     tag = "FLIP " if is_flip else ""
     log.info(
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f",
-        tag, key, entry_price, net_shares, SELL_PRICE, cut_loss_price,
+        tag, key, entry_price, net_shares, sell_price, cut_loss_price,
     )
 
 
@@ -780,7 +782,7 @@ def manage_positions(client, server_ts=None):
             pos["force_stop_spread_retries"] = 0
 
         # ── Sell at target ────────────────────────────────────────────────────
-        if current_price >= SELL_PRICE:
+        if current_price >= pos["sell_price"]:
             tag = "FLIP-SELL" if is_flip else "SELL"
             log.info("[%s] %s  price=%.4f  selling %d shares", tag, key, current_price, shares)
 
@@ -1125,7 +1127,8 @@ def _build_state_snapshot():
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
-            "sell":       SELL_PRICE,
+            "sell_multiplier": SELL_MULTIPLIER,
+            "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -1387,10 +1390,10 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table><tbody>
-        <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell at</td><td>${(cfg.sell||0.99)*100|0}¢</td></tr>
         <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
+        <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
       </tbody></table>
     </div>
 
@@ -1472,10 +1475,10 @@ def main():
     log.info("=" * 55)
     log.info("  FreshBot23  [%s]", mode)
     log.info("  Assets : %s", ", ".join(a.upper() for a in ASSETS))
-    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=%.0f¢  cut-loss=%.0f%%",
+    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=x%.2f (cap %.0f¢)  cut-loss=%.0f%%",
              BUY_PRICE_MIN*100, BUY_PRICE_MAX*100,
              ENTRY_AFTER, STOP_BUY_AT,
-             SELL_PRICE*100, CUT_LOSS_PCT*100)
+             SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
