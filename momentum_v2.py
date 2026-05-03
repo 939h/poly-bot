@@ -125,9 +125,9 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.75   # buy if price >= this
+BUY_PRICE_MIN  = 0.60   # buy if price >= this
 BUY_PRICE_MAX  = 0.85   # buy if price <= this
-ENTRY_AFTER    = 480    # seconds into window before buying allowed (9 min)
+ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
@@ -144,13 +144,13 @@ GAP_SWING = {
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   0.7,   # 5–10 min
+    "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
 GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.94   # sell all at this price
+SELL_MULTIPLIER = 1.20   # sell all at this price
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
@@ -642,7 +642,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     open_positions[key] = {
         "token_id":             token_id,
         "entry_price":          entry_price,
-        "sell_price":           SELL_PRICE,
+        "sell_price":           round(entry_price * SELL_MULTIPLIER, 4),
         "cut_loss_price":       cut_loss_price,
         "net_shares":           net_shares,
         "cost":                 round(BUY_AMOUNT, 4),
