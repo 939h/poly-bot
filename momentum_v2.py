@@ -144,8 +144,8 @@ GAP_SWING = {
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   0.8,   # 5–10 min
-    "late":  0.7,   # 10–15 min
+    "mid":   0.7,   # 5–10 min
+    "late":  0.6,   # 10–15 min
 }
 GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 
