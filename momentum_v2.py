@@ -126,7 +126,7 @@ BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.60   # buy if price >= this
-BUY_PRICE_MAX  = 0.85   # buy if price <= this
+BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.65
@@ -1336,7 +1336,7 @@ function render(s){
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td style="font-family:monospace">${gStr} / ${tStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}" style="padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
