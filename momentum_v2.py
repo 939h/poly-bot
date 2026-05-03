@@ -122,14 +122,14 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.75   # buy if price >= this
 BUY_PRICE_MAX  = 0.85   # buy if price <= this
 ENTRY_AFTER    = 540    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
-TREND_GUARD_PRICE = 0.60
+TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
 
