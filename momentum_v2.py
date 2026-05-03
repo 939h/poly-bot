@@ -122,13 +122,16 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.75   # buy if price >= this
 BUY_PRICE_MAX  = 0.85   # buy if price <= this
-ENTRY_AFTER    = 540    # seconds into window before buying allowed (9 min)
+ENTRY_AFTER    = 480    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
+TREND_GUARD_PRICE = 0.65
+TREND_GUARD_MIN_CONFIRMATIONS = 2
+
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
 # abs(binance_live_close - binance_candle_open) >= threshold → allow buy
@@ -142,12 +145,12 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
     "mid":   0.7,   # 5–10 min
-    "late":  0.7,   # 10–15 min
+    "late":  0.6,   # 10–15 min
 }
-GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.92   # sell all at this price
+SELL_PRICE     = 0.94   # sell all at this price
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
@@ -155,7 +158,7 @@ HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.40   # flip only if opposite >= this
-FLIP_MAX       = 0.75   # flip only if opposite <= this
+FLIP_MAX       = 0.80   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
@@ -163,20 +166,20 @@ SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-POLL_SECS              = 1.5
+POLL_SECS              = 1.0
 WINDOW_SECS            = 900
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
 TRADING_WINDOWS_ENABLED = False
 TRADING_TZ_OFFSET_HRS   = 8
-TRADING_WINDOWS         = [(8, 30, 9, 30), (16, 17), (21, 22)]
+TRADING_WINDOWS         = [(12, 30, 16, 0), (18, 20)]
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
 SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
-FEE_BUFFER               = 0.98
+CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -470,9 +473,16 @@ def get_spread_value(client, token_id):
 
 def market_buy(client, token_id, label, price_hint=None):
     amount = round(BUY_AMOUNT, 4)
+    def _estimate_buy_shares(entry_price):
+        if entry_price <= 0:
+            return 0.0
+        gross_shares = amount / entry_price
+        # Polymarket buy fees are collected in shares: fee = C * r * p * (1 - p).
+        fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
+        return round(max(gross_shares - fee_shares, 0.0), 3)
     if DRY_RUN:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-        est_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
+        est_shares = _estimate_buy_shares(entry_est)
         log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
                  label, amount, est_shares, entry_est)
         return {
@@ -495,7 +505,7 @@ def market_buy(client, token_id, label, price_hint=None):
             return {"ok": False, "resp": resp, "filled_shares": 0.0, "filled_price": 0.0}
         if filled_shares <= 0:
             entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
-            filled_shares = round((amount / entry_est) * FEE_BUFFER, 3) if entry_est > 0 else 0.0
+            filled_shares = _estimate_buy_shares(entry_est)
             filled_price  = float(entry_est)
         elif filled_price <= 0:
             filled_price = float(price_hint or 0) or get_midpoint(client, token_id)
@@ -623,7 +633,9 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
-        net_shares = round((BUY_AMOUNT / entry_price) * FEE_BUFFER, 3)
+        gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
+        fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
+        net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
 
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
@@ -654,7 +666,10 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
 def manage_positions(client, server_ts=None):
     to_close = []
 
-    for key, pos in open_positions.items():
+    for key, pos in list(open_positions.items()):
+      # SKIP if this position is already in the process of being sold
+        if pos.get("closing"):
+            continue
         now = time.time()
         if now - pos.get("last_exit_attempt_ts", 0.0) < EXIT_RETRY_COOLDOWN_SECS:
             continue
@@ -671,7 +686,7 @@ def manage_positions(client, server_ts=None):
         is_flip   = pos.get("is_flip", False)
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
-        if current_price <= cut_loss and not is_flip:
+        if current_price <= cut_loss:
             if pos.get("force_stop_triggered") is None:
                 # Spread check on first trigger
                 fsr = pos.get("force_stop_spread_retries", 0)
@@ -706,6 +721,7 @@ def manage_positions(client, server_ts=None):
 
             # Confirmed cut-loss — sell all
             log.info("[CUT-LOSS] %s  price=%.4f  selling %.3f shares", key, current_price, shares)
+            pos["closing"] = True  # Set flag immediately[cite: 1]
             sell = market_sell(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
@@ -750,6 +766,9 @@ def manage_positions(client, server_ts=None):
                         traded_this_window.add(asset)
                 else:
                     log.info("[FLIP] %s skipped — already flipped this window", asset.upper())
+            else:
+                pos["closing"] = False
+                log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
             continue
 
         # Price recovered — reset cooldown
@@ -764,6 +783,9 @@ def manage_positions(client, server_ts=None):
         if current_price >= SELL_PRICE:
             tag = "FLIP-SELL" if is_flip else "SELL"
             log.info("[%s] %s  price=%.4f  selling %d shares", tag, key, current_price, shares)
+
+            pos["closing"] = True  # Set flag immediately[cite: 1]
+          
             sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
@@ -777,6 +799,9 @@ def manage_positions(client, server_ts=None):
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, exit_type, current_price, pnl)
                 to_close.append(key)
+            else:
+                pos["closing"] = False
+                log.warning("[%s] %s sell failed — will retry on next loop", tag, key)
 
     for key in to_close:
         del open_positions[key]
@@ -824,7 +849,30 @@ def _update_prices(result):
         if current_gap > peak_gap.get(asset, 0.0):
             peak_gap[asset] = current_gap
 
+def _trend_guard_ok(trigger_asset, trigger_side, results):
+    confirmations = []
+    for asset in ASSETS:
+        if asset == trigger_asset:
+            continue
+        result = results.get(asset)
+        if result is None:
+            continue
+        _, yes_price, _, _ = result
+        side_price = yes_price if trigger_side == "yes" else round(1.0 - yes_price, 4)
+        if side_price > TREND_GUARD_PRICE:
+            confirmations.append(f"{asset}_{trigger_side}={side_price:.4f}")
 
+    if len(confirmations) >= TREND_GUARD_MIN_CONFIRMATIONS:
+        log.info("[TREND-GUARD] %s_%s confirmed by %s",
+                 trigger_asset.upper(), trigger_side.upper(), ", ".join(confirmations))
+        return True
+
+    log.info("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
+             trigger_asset.upper(), trigger_side.upper(),
+             len(confirmations), TREND_GUARD_MIN_CONFIRMATIONS,
+             TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
+    return False
+  
 def _volatility_check(asset, secs_into):
     """
     Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
@@ -909,6 +957,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             key   = gw["key"]
             token = gw["token"]
             price = live_prices.get(key, gw["price"])
+            side  = key.split("_")[1]
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
 
             # Spread check before buy
@@ -974,6 +1023,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         if triggered_key is None:
             continue
+        triggered_side = triggered_key.split("_")[1]
+        if not _trend_guard_ok(asset, triggered_side, results):
+            continue
 
         stats["triggers"] += 1
         log.info("[TRIGGER] %s  price=%.4f  checking volatility + gap guard", triggered_key, triggered_price)
@@ -982,6 +1034,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if _volatility_check(asset, secs_into):
             traded_this_window.add(asset)
             continue
+          
 
         if check_gap_guard(asset, secs_into):
             # Gap large enough — check spread then buy immediately
