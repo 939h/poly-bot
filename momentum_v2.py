@@ -158,8 +158,8 @@ HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
-FLIP_MIN       = 0.40   # flip only if opposite >= this
-FLIP_MAX       = 0.80   # flip only if opposite <= this
+FLIP_MIN       = 0.10   # flip only if opposite >= this
+FLIP_MAX       = 0.15   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
