@@ -125,7 +125,7 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.60   # buy if price >= this
+BUY_PRICE_MIN  = 0.65   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
@@ -143,7 +143,7 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 5.0,   # 0–5 min
+    "early": 1.0,   # 0–5 min
     "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
@@ -152,8 +152,8 @@ GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.99"))
-CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
-HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
+CUT_LOSS_PCT   = 0.40   # cut loss if price drops to this fraction of buy price
+HOLD_EARLY_SECS = 25    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
@@ -172,8 +172,8 @@ OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
-OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
+OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.05"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.3"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
 
