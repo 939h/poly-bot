@@ -122,12 +122,12 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "5"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.75   # buy if price >= this
-BUY_PRICE_MAX  = 0.85   # buy if price <= this
-ENTRY_AFTER    = 480    # seconds into window before buying allowed (9 min)
+BUY_PRICE_MIN  = 0.60   # buy if price >= this
+BUY_PRICE_MAX  = 0.80   # buy if price <= this
+ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
@@ -144,21 +144,22 @@ GAP_SWING = {
 }
 GAP_MAGNITUDE = {
     "early": 5.0,   # 0–5 min
-    "mid":   0.7,   # 5–10 min
+    "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
 GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_PRICE     = 0.94   # sell all at this price
+SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
+SELL_CAP        = float(os.getenv("SELL_CAP", "0.99"))
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
-FLIP_MIN       = 0.40   # flip only if opposite >= this
-FLIP_MAX       = 0.80   # flip only if opposite <= this
+FLIP_MIN       = 0.10   # flip only if opposite >= this
+FLIP_MAX       = 0.15   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
@@ -278,9 +279,19 @@ def save_state():
             "opened_at":   p.get("opened_at", "—"),
         }
     gap_out = {}
+    gap_threshold_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
+        if c_open > 0:
+            swing = GAP_SWING.get(a, 0.001)
+            gap_threshold_out[a] = {
+                "early": round(c_open * swing * GAP_MAGNITUDE["early"], 4),
+                "mid":   round(c_open * swing * GAP_MAGNITUDE["mid"], 4),
+                "late":  round(c_open * swing * GAP_MAGNITUDE["late"], 4),
+            }
+        else:
+            gap_threshold_out[a] = None
         if c_open > 0 and c_live is not None:
             gap_out[a] = round(abs(c_live - c_open), 4)
         else:
@@ -292,6 +303,7 @@ def save_state():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "gap":           gap_out,
+        "gap_threshold": gap_threshold_out,
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -299,7 +311,8 @@ def save_state():
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
-            "sell":       SELL_PRICE,
+            "sell_multiplier": SELL_MULTIPLIER,
+            "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -636,13 +649,13 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
-
+    sell_price = min(round(entry_price * SELL_MULTIPLIER, 4), SELL_CAP)
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
     open_positions[key] = {
         "token_id":             token_id,
         "entry_price":          entry_price,
-        "sell_price":           SELL_PRICE,
+        "sell_price":           sell_price,
         "cut_loss_price":       cut_loss_price,
         "net_shares":           net_shares,
         "cost":                 round(BUY_AMOUNT, 4),
@@ -659,7 +672,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     tag = "FLIP " if is_flip else ""
     log.info(
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f",
-        tag, key, entry_price, net_shares, SELL_PRICE, cut_loss_price,
+        tag, key, entry_price, net_shares, sell_price, cut_loss_price,
     )
 
 
@@ -780,7 +793,7 @@ def manage_positions(client, server_ts=None):
             pos["force_stop_spread_retries"] = 0
 
         # ── Sell at target ────────────────────────────────────────────────────
-        if current_price >= SELL_PRICE:
+        if current_price >= pos["sell_price"]:
             tag = "FLIP-SELL" if is_flip else "SELL"
             log.info("[%s] %s  price=%.4f  selling %d shares", tag, key, current_price, shares)
 
@@ -1102,9 +1115,19 @@ def _build_state_snapshot():
     slot_ts = (now_ts // 900) * 900
     secs_in = now_ts - slot_ts
     gap_out = {}
+    gap_threshold_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
+        if c_open > 0:
+            swing = GAP_SWING.get(a, 0.001)
+            gap_threshold_out[a] = {
+                "early": round(c_open * swing * GAP_MAGNITUDE["early"], 4),
+                "mid":   round(c_open * swing * GAP_MAGNITUDE["mid"], 4),
+                "late":  round(c_open * swing * GAP_MAGNITUDE["late"], 4),
+            }
+        else:
+            gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1113,6 +1136,7 @@ def _build_state_snapshot():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "gap":           gap_out,
+        "gap_threshold": gap_threshold_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -1125,7 +1149,8 @@ def _build_state_snapshot():
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
-            "sell":       SELL_PRICE,
+            "sell_multiplier": SELL_MULTIPLIER,
+            "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -1289,7 +1314,7 @@ function renderAssetHistory(assetHist,assets){
 
 function render(s){
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -1308,8 +1333,10 @@ function render(s){
     const yc=inZone(yp)?'green':'';
     const nc=inZone(np)?'green':'';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
-    const gv=gap[a];const gStr=gv!=null?gv.toFixed(4):'—';
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}">${fmt(yp,2)}</td><td class="${nc}">${fmt(np,2)}</td><td style="font-family:monospace">${gStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
+    const gStr=gv!=null?gv.toFixed(4):'—';
+    const tStr=gt!=null?gt.toFixed(4):'—';
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1368,7 +1395,7 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap</th><th>Holding</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
@@ -1387,10 +1414,10 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table><tbody>
-        <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell at</td><td>${(cfg.sell||0.99)*100|0}¢</td></tr>
         <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
+        <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
       </tbody></table>
     </div>
 
@@ -1472,10 +1499,10 @@ def main():
     log.info("=" * 55)
     log.info("  FreshBot23  [%s]", mode)
     log.info("  Assets : %s", ", ".join(a.upper() for a in ASSETS))
-    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=%.0f¢  cut-loss=%.0f%%",
+    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=x%.2f (cap %.0f¢)  cut-loss=%.0f%%",
              BUY_PRICE_MIN*100, BUY_PRICE_MAX*100,
              ENTRY_AFTER, STOP_BUY_AT,
-             SELL_PRICE*100, CUT_LOSS_PCT*100)
+             SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
