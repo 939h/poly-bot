@@ -165,7 +165,7 @@ FLIP_MAX       = 0.15   # flip only if opposite <= this
 MAX_BOOK_SPREAD        = 0.02
 SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
-COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "90"))
+COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
@@ -173,8 +173,8 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
-OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.3"))
+OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "2.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
