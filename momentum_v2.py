@@ -165,6 +165,17 @@ FLIP_MAX       = 0.15   # flip only if opposite <= this
 MAX_BOOK_SPREAD        = 0.02
 SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
+COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "90"))
+
+# ── 3v1 opposite-direction mode ──────────────────────────────────────────────
+OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
+OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
+OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
+OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
+OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
+OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -199,6 +210,10 @@ flipped_this_window = set()   # assets that have already used their flip this wi
 gap_wait            = {}   # asset -> {triggered_at, key, token, price}
 peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
+last_entry_ts       = {}   # asset -> unix seconds of last buy
+oppo_bought_windows = set()  # window_start set when oppo mode already bought
+skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
+skip_log_window = None        # throttle skip log to once per window
 
 pnl_history        = []
 asset_history      = {}
@@ -649,7 +664,10 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
-    sell_price = min(round(entry_price * SELL_MULTIPLIER, 4), SELL_CAP)
+    is_oppo = key.endswith("_oppo")
+    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else SELL_MULTIPLIER
+    sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
+    sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
     cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
 
     open_positions[key] = {
@@ -668,6 +686,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "opened_at":            datetime.now().strftime("%H:%M"),
         "window_start":         window_start,
     }
+    base_asset = key.split("_")[0]
+    last_entry_ts[base_asset] = time.time()
     stats["buys"] += 1
     tag = "FLIP " if is_flip else ""
     log.info(
@@ -910,9 +930,28 @@ def _volatility_check(asset, secs_into):
         return True   # blocked
     return False
 
+def _extreme_gap_skip_triggered(secs_into):
+    """
+    Returns True if any asset has gap > (current-stage threshold * 8).
+    """
+    stage = "early" if secs_into < 300 else ("mid" if secs_into < 600 else "late")
+    for asset in ASSETS:
+        c_open = candle_open.get(asset, 0.0)
+        c_live = live_close.get(asset)
+        if c_open <= 0 or c_live is None:
+            continue
+        swing = GAP_SWING.get(asset, 0.001)
+        threshold = c_open * swing * GAP_MAGNITUDE[stage]
+        actual_gap = abs(c_live - c_open)
+        if actual_gap > threshold * 8:
+            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f (stage=%s)",
+                        asset.upper(), actual_gap, threshold * 8, stage)
+            return True
+    return False
+
 
 def scan_markets(client, window_start, secs_into, server_ts, executor):
-    global _skip_first_window, _startup_window_ts
+    global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
 
     stats["scans"] += 1
 
@@ -935,6 +974,20 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         _update_prices(results.get(asset))
 
     if not can_open_new_trades(server_ts):
+        return
+
+    if _extreme_gap_skip_triggered(secs_into):
+        skip_buy_until_window = window_start + (WINDOW_SECS * 4)  # this + next 3 windows
+        skip_log_window = None
+        log.warning("[BUY-SKIP-WINDOWS] Extreme gap detected — skipping buys until window %d",
+                    skip_buy_until_window)
+        return
+
+    if skip_buy_until_window is not None and window_start < skip_buy_until_window:
+        windows_left = max(0, int((skip_buy_until_window - window_start) // WINDOW_SECS))
+        if skip_log_window != window_start:
+            log.info("[BUY-SKIP] buy-disabled for %d window(s) due to prior extreme gap", windows_left)
+            skip_log_window = window_start
         return
 
     # ── Startup window skip ───────────────────────────────────────────────────
@@ -1006,6 +1059,62 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     # ── Evaluate fresh buy triggers ───────────────────────────────────────────
     if secs_into < ENTRY_AFTER or secs_into > STOP_BUY_AT:
         return
+
+    if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
+        side_values = {"yes": {}, "no": {}}
+        for asset in ASSETS:
+            result = results.get(asset)
+            if result is None:
+                continue
+            _, yes_price, yes_token, no_token = result
+            side_values["yes"][asset] = (yes_price, yes_token)
+            side_values["no"][asset] = (round(1.0 - yes_price, 4), no_token)
+
+        for side in ("yes", "no"):
+            high_assets, low_assets = [], []
+            for asset, (price, token) in side_values[side].items():
+                if price > OPPO_PRICE_HIGH:
+                    high_assets.append((asset, price))
+                if OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
+                    low_assets.append((asset, price, token))
+            if len(high_assets) != 3 or len(low_assets) != 1:
+                continue
+
+            opp_asset, opp_price, opp_token = low_assets[0]
+            if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
+                continue
+            if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
+                log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
+                         opp_asset.upper(), side.upper(), COOLDOWN_SEC)
+                continue
+
+            spread = get_spread_value(client, opp_token)
+            if spread is not None and spread > MAX_BOOK_SPREAD:
+                log.info("[OPPO-SPREAD-SKIP] %s_%s spread=%.4f > %.4f",
+                         opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
+                continue
+
+            c_open = candle_open.get(opp_asset, 0.0)
+            c_live = live_close.get(opp_asset)
+            if c_open > 0 and c_live is not None:
+                actual_gap = abs(c_live - c_open)
+                oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
+                if actual_gap >= oppo_gap_threshold:
+                    log.info("[OPPO-GAP-SKIP] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
+                             opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
+                    continue
+
+            label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
+            buy = market_buy(client, opp_token, label, price_hint=opp_price)
+            if buy["ok"]:
+                entry_px = float(buy.get("filled_price") or opp_price)
+                open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
+                              filled_shares=buy.get("filled_shares"),
+                              window_start=window_start)
+                traded_this_window.add(opp_asset)
+                oppo_bought_windows.add(window_start)
+                log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
+            break
 
     for asset in ASSETS:
         if asset in traded_this_window:
@@ -1539,6 +1648,7 @@ def main():
                 flipped_this_window.clear()
                 gap_wait.clear()
                 peak_gap.clear()
+                oppo_bought_windows.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
