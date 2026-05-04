@@ -122,7 +122,7 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "1"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.60   # buy if price >= this
