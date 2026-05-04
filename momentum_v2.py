@@ -121,7 +121,7 @@ log = logging.getLogger(__name__)
 
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
-DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "true"
+DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
