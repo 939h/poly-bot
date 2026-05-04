@@ -1047,17 +1047,17 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             opp_asset, opp_price, opp_token = low_assets[0]
             if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
-                break
+                continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
                          opp_asset.upper(), side.upper(), COOLDOWN_SEC)
-                break
+                continue
 
             spread = get_spread_value(client, opp_token)
             if spread is not None and spread > MAX_BOOK_SPREAD:
                 log.info("[OPPO-SPREAD-SKIP] %s_%s spread=%.4f > %.4f",
                          opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
-                break
+                continue
 
             c_open = candle_open.get(opp_asset, 0.0)
             c_live = live_close.get(opp_asset)
@@ -1067,7 +1067,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 if actual_gap >= oppo_gap_threshold:
                     log.info("[OPPO-GAP-SKIP] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                              opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
-                    break
+                    continue
 
             label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
             buy = market_buy(client, opp_token, label, price_hint=opp_price)
