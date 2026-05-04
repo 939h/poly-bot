@@ -1601,7 +1601,7 @@ def start_http_server():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global last_pnl_snapshot, pnl_history, armed_logged
+    global last_pnl_snapshot, pnl_history, armed_logged, skip_buy_until_window
 
     load_state()
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
@@ -1666,6 +1666,20 @@ def main():
                 if was_idle is not False:
                     log.info("[IDLE] Trading window open — resumed")
                 was_idle = False
+
+                # If extreme-gap skip is active, sleep whole windows when flat.
+                if (
+                    skip_buy_until_window is not None
+                    and window_start < skip_buy_until_window
+                    and not open_positions
+                ):
+                    sleep_for = max(1, secs_left + 1)
+                    windows_left = int((skip_buy_until_window - window_start) // WINDOW_SECS)
+                    log.info("[SLEEP-SKIP] Flat + buy-skip active, sleeping %ds (windows_left=%d)",
+                             sleep_for, windows_left)
+                    time.sleep(sleep_for)
+                    continue
+
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
