@@ -173,9 +173,11 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.4"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
+OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
+OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -214,6 +216,9 @@ last_entry_ts       = {}   # asset -> unix seconds of last buy
 oppo_bought_windows = set()  # window_start set when oppo mode already bought
 skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
 skip_log_window = None        # throttle skip log to once per window
+normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
+trend_guarded_assets = set()       # assets blocked by trend guard this window
+oppo_rebound_tracker = {}          # key asset_side -> trough price
 
 pnl_history        = []
 asset_history      = {}
@@ -1014,7 +1019,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if check_gap_guard(asset, secs_into):
             # Gap is now large enough — volatility check first
             if _volatility_check(asset, secs_into):
-                traded_this_window.add(asset)
+                normal_blacklisted_assets.add(asset)
                 del gap_wait[asset]
                 continue
             # Proceed to buy
@@ -1034,8 +1039,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     log.info("[SPREAD-WAIT] %s  spread=%.4f  retry %d/%d",
                              asset.upper(), spread, gw["spread_retries"], SPREAD_MAX_RETRIES)
                     continue
-                log.info("[SPREAD-SKIP] %s  spread still wide — blacklisting", asset.upper())
-                traded_this_window.add(asset)
+                log.info("[SPREAD-SKIP] %s  spread still wide — blacklisting (normal-buy only)", asset.upper())
+                normal_blacklisted_assets.add(asset)
                 del gap_wait[asset]
                 continue
 
@@ -1050,9 +1055,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             continue
 
         if elapsed >= GAP_WAIT_SECS:
-            log.info("[GAP-BLOCK] %s  gap still too small after %.1fs — blacklisted",
+            log.info("[GAP-BLOCK] %s  gap still too small after %.1fs — blacklisted (normal-buy only)",
                      asset.upper(), elapsed)
-            traded_this_window.add(asset)
+            normal_blacklisted_assets.add(asset)
             del gap_wait[asset]
         # else: still waiting, no log spam
 
@@ -1081,6 +1086,29 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 continue
 
             opp_asset, opp_price, opp_token = low_assets[0]
+            opp_key = f"{opp_asset}_{side}"
+
+            if opp_price <= OPPO_DEAD_ZONE:
+                oppo_rebound_tracker.pop(opp_key, None)
+                log.info("[OPPO-DEAD] %s price=%.4f <= dead-zone %.4f — discard",
+                         opp_key, opp_price, OPPO_DEAD_ZONE)
+                continue
+
+            trough = oppo_rebound_tracker.get(opp_key)
+            if trough is None:
+                oppo_rebound_tracker[opp_key] = opp_price
+                log.info("[OPPO-REBOUND] %s start trough=%.4f wait %.2fx rebound",
+                         opp_key, opp_price, OPPO_REBOUND_MULT)
+                continue
+            if opp_price < trough:
+                oppo_rebound_tracker[opp_key] = opp_price
+                log.info("[OPPO-REBOUND] %s new trough=%.4f", opp_key, opp_price)
+                continue
+            rebound_ratio = opp_price / trough if trough > 0 else 0.0
+            if rebound_ratio < OPPO_REBOUND_MULT:
+                log.info("[OPPO-REBOUND] %s waiting %.3fx/%.2fx",
+                         opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                continue
             if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
                 continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
@@ -1113,11 +1141,14 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                               window_start=window_start)
                 traded_this_window.add(opp_asset)
                 oppo_bought_windows.add(window_start)
+                oppo_rebound_tracker.pop(opp_key, None)
                 log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
             break
 
     for asset in ASSETS:
         if asset in traded_this_window:
+            continue
+        if asset in normal_blacklisted_assets:
             continue
         if asset in gap_wait:
             continue
@@ -1147,6 +1178,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             continue
         triggered_side = triggered_key.split("_")[1]
         if not _trend_guard_ok(asset, triggered_side, results):
+            trend_guarded_assets.add(asset)
             continue
 
         stats["triggers"] += 1
@@ -1154,7 +1186,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         # ── Volatility check — gap collapsed from peak → blacklist ────────────
         if _volatility_check(asset, secs_into):
-            traded_this_window.add(asset)
+            normal_blacklisted_assets.add(asset)
             continue
           
 
@@ -1251,6 +1283,8 @@ def _build_state_snapshot():
             "secs_left": 900 - secs_in,
             "period":    "early" if secs_in < 300 else ("mid" if secs_in < 600 else "late"),
         },
+        "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
+        "trend_guarded_assets": sorted(list(trend_guarded_assets)),
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -1424,6 +1458,8 @@ function renderAssetHistory(assetHist,assets){
 function render(s){
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
+  const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
+  const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -1442,10 +1478,12 @@ function render(s){
     const yc=inZone(yp)?'green':'';
     const nc=inZone(np)?'green':'';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
+    const flags=[normalBlacklisted.has(a)?'<span class="red">BLACKLISTED</span>':'',trendGuarded.has(a)?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
+    const holdingCell=[holding,flags].filter(Boolean).join(' <span class="dim">|</span> ');
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${holding||'<span class="dim">—</span>'}</td></tr>`;
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1649,6 +1687,9 @@ def main():
                 gap_wait.clear()
                 peak_gap.clear()
                 oppo_bought_windows.clear()
+                normal_blacklisted_assets.clear()
+                trend_guarded_assets.clear()
+                oppo_rebound_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
