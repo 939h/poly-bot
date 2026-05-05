@@ -1285,6 +1285,7 @@ def _build_state_snapshot():
         },
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
+        "asset_status":   asset_status_out,
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -1458,6 +1459,7 @@ function renderAssetHistory(assetHist,assets){
 function render(s){
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
+  const assetStatus=s.asset_status||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
@@ -1478,7 +1480,10 @@ function render(s){
     const yc=inZone(yp)?'green':'';
     const nc=inZone(np)?'green':'';
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
-    const flags=[normalBlacklisted.has(a)?'<span class="red">BLACKLISTED</span>':'',trendGuarded.has(a)?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
+    const stAsset=assetStatus[a]||{};
+    const isBlacklisted=stAsset.blacklisted===true || normalBlacklisted.has(a);
+    const isTrendGuarded=stAsset.trend_guarded===true || trendGuarded.has(a);
+    const flags=[isBlacklisted?'<span class="red">BLACKLISTED</span>':'',isTrendGuarded?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
     const holdingCell=[holding,flags].filter(Boolean).join(' <span class="dim">|</span> ');
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const gStr=gv!=null?gv.toFixed(4):'—';
