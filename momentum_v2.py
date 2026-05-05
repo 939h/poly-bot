@@ -153,7 +153,7 @@ GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.99"))
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
-HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
+HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
@@ -948,9 +948,9 @@ def _extreme_gap_skip_triggered(secs_into):
         swing = GAP_SWING.get(asset, 0.001)
         threshold = c_open * swing * GAP_MAGNITUDE[stage]
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 8:
+        if actual_gap > threshold * 10:
             log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f (stage=%s)",
-                        asset.upper(), actual_gap, threshold * 8, stage)
+                        asset.upper(), actual_gap, threshold * 10, stage)
             return True
     return False
 
