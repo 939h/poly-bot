@@ -1285,7 +1285,12 @@ def _build_state_snapshot():
         },
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
-        "asset_status":   asset_status_out,
+        "asset_status": {
+            a: {
+                "blacklisted": a in normal_blacklisted_assets,
+                "trend_guarded": a in trend_guarded_assets,
+            } for a in ASSETS
+        },
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
