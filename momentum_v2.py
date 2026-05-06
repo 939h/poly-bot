@@ -74,7 +74,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed
+from binance_ws import candle_open, live_close, get_macd_histogram, start_rsi_feed
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -302,6 +302,7 @@ def save_state():
         }
     gap_out = {}
     gap_threshold_out = {}
+    macd_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
@@ -318,6 +319,17 @@ def save_state():
             gap_out[a] = round(abs(c_live - c_open), 4)
         else:
             gap_out[a] = None
+
+        hist_pair = get_macd_histogram(a)
+        if hist_pair is None:
+            macd_out[a] = None
+        else:
+            prev_h, curr_h = hist_pair
+            macd_out[a] = {
+                "prev": round(prev_h, 8),
+                "current": round(curr_h, 8),
+                "decision": check_macd_momentum(hist_pair),
+            }
     state = {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -326,6 +338,7 @@ def save_state():
         "prices":        dict(live_prices),
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
+        "macd":          macd_out,
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -937,6 +950,51 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
              TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
     return False
   
+
+def check_macd_momentum(hist_data):
+    """
+    Return the MACD momentum permission for Binance 15m histogram values.
+
+    hist_data: sequence containing at least [previous_histogram, current_histogram].
+    """
+    if hist_data is None or len(hist_data) < 2:
+        return "BLOCK_TRADE"
+
+    prev_h = hist_data[-2]
+    curr_h = hist_data[-1]
+
+    # YES SIDE: green bright / hollow — above zero and moving higher.
+    if curr_h > 0 and curr_h > prev_h:
+        return "ALLOW_YES"
+
+    # NO SIDE: red solid / dark — below zero and moving further below zero.
+    if curr_h < 0 and curr_h < prev_h:
+        return "ALLOW_NO"
+
+    return "BLOCK_TRADE"
+
+
+def _macd_momentum_guard_ok(asset, side):
+    """Final pre-buy guard: require Binance MACD histogram acceleration."""
+    hist_pair = get_macd_histogram(asset)
+    decision = check_macd_momentum(hist_pair)
+    expected = "ALLOW_YES" if side == "yes" else "ALLOW_NO"
+
+    if decision == expected:
+        prev_h, curr_h = hist_pair
+        log.info("[MACD-ALLOW] %s_%s  hist %.8f → %.8f",
+                 asset.upper(), side.upper(), prev_h, curr_h)
+        return True
+
+    if hist_pair is None:
+        log.info("[MACD-BLOCK] %s_%s  no Binance MACD histogram yet — waiting next 15m candle",
+                 asset.upper(), side.upper())
+    else:
+        prev_h, curr_h = hist_pair
+        log.info("[MACD-BLOCK] %s_%s  hist %.8f → %.8f  decision=%s — waiting next 15m candle",
+                 asset.upper(), side.upper(), prev_h, curr_h, decision)
+    return False
+
 def _volatility_check(asset, secs_into):
     """
     Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
@@ -1072,6 +1130,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 del gap_wait[asset]
                 continue
 
+            if not _macd_momentum_guard_ok(asset, side):
+                normal_blacklisted_assets.add(asset)
+                del gap_wait[asset]
+                continue
+
             buy = market_buy(client, token, label, price_hint=price)
             del gap_wait[asset]
             if buy["ok"]:
@@ -1139,6 +1202,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 continue
             if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
                 continue
+            if opp_asset in normal_blacklisted_assets:
+                continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
                          opp_asset.upper(), side.upper(), COOLDOWN_SEC)
@@ -1159,6 +1224,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     log.info("[OPPO-GAP-SKIP] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                              opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                     continue
+
+            if not _macd_momentum_guard_ok(opp_asset, side):
+                normal_blacklisted_assets.add(opp_asset)
+                continue
 
             label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
             buy = market_buy(client, opp_token, label, price_hint=opp_price)
@@ -1225,6 +1294,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 log.info("[SPREAD-SKIP] %s  spread=%.4f > max=%.4f — skipping",
                          triggered_key, spread, MAX_BOOK_SPREAD)
                 continue
+            if not _macd_momentum_guard_ok(asset, triggered_side):
+                normal_blacklisted_assets.add(asset)
+                continue
+
             label = f"{asset.upper()}-{triggered_key.split('_')[1].upper()}"
             buy = market_buy(client, triggered_token, label, price_hint=triggered_price)
             if buy["ok"]:
@@ -1285,6 +1358,7 @@ def _build_state_snapshot():
     secs_in = now_ts - slot_ts
     gap_out = {}
     gap_threshold_out = {}
+    macd_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
@@ -1298,6 +1372,17 @@ def _build_state_snapshot():
         else:
             gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
+
+        hist_pair = get_macd_histogram(a)
+        if hist_pair is None:
+            macd_out[a] = None
+        else:
+            prev_h, curr_h = hist_pair
+            macd_out[a] = {
+                "prev": round(prev_h, 8),
+                "current": round(curr_h, 8),
+                "decision": check_macd_momentum(hist_pair),
+            }
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -1306,6 +1391,7 @@ def _build_state_snapshot():
         "prices":        dict(live_prices),
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
+        "macd":          macd_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -1374,6 +1460,15 @@ canvas{display:block;width:100%!important;height:180px!important}
 .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid #252d3d}
 .asset-row:last-child{border-bottom:none}
 .asset-row .k{color:#5a6a85}
+.macd-cell{min-width:155px}
+.macd-mini{position:relative;width:82px;height:38px;display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-right:8px;vertical-align:middle}
+.macd-mini:before{content:"";position:absolute;left:0;right:0;top:50%;border-top:1px solid #3a4560}
+.macd-bar{position:relative;width:16px;min-height:3px;border-radius:3px}
+.macd-bar.pos{align-self:flex-start;margin-top:calc(19px - var(--h));height:var(--h)}
+.macd-bar.neg{align-self:flex-start;margin-top:19px;height:var(--h)}
+.macd-bar.green.solid{background:#167a55}.macd-bar.green.hollow{border:2px solid #4ade9f;background:transparent}
+.macd-bar.red.solid{background:#9f2525}.macd-bar.red.hollow{border:2px solid #f87171;background:transparent}
+.macd-label{font-size:11px;font-family:monospace}
 footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bottom:10px}
 </style>
 </head>
@@ -1387,6 +1482,22 @@ function fmtPnl(v){
   return `<span class="${n>0?'green':n<0?'red':'dim'}">${n>=0?'+':''}$${Math.abs(n).toFixed(4)}</span>`;
 }
 function pnlColor(v){return v>0?'green':v<0?'red':'dim'}
+function macdBarClass(value,prev){
+  if(value==null)return 'dim solid';
+  if(value>0)return value>prev?'green hollow':'green solid';
+  if(value<0)return value<prev?'red solid':'red hollow';
+  return 'dim solid';
+}
+function macdCell(m){
+  if(!m)return '<span class="dim">warming up</span>';
+  const prev=Number(m.prev),curr=Number(m.current);
+  const maxAbs=Math.max(Math.abs(prev),Math.abs(curr),0.00000001);
+  const h=v=>Math.max(4,Math.round(Math.abs(v)/maxAbs*18));
+  const bar=(v,p)=>`<span class="macd-bar ${v>=0?'pos':'neg'} ${macdBarClass(v,p)}" style="--h:${h(v)}px" title="${v.toFixed(8)}"></span>`;
+  const cls=m.decision==='ALLOW_YES'?'green':m.decision==='ALLOW_NO'?'red':'dim';
+  const label=m.decision==='ALLOW_YES'?'YES':m.decision==='ALLOW_NO'?'NO':'BLOCK';
+  return `<div class="macd-cell"><span class="macd-mini">${bar(prev,prev)}${bar(curr,prev)}</span><span class="macd-label ${cls}">${label}</span><div class="dim" style="font-size:10px;margin-top:2px">${prev.toFixed(6)} → ${curr.toFixed(6)}</div></div>`;
+}
 
 function drawChart(history,wrap){
   if(!history||history.length<2){
@@ -1472,6 +1583,21 @@ function renderTradeLog(log){
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
+function renderMacdDashboard(macd,assets){
+  return '<div class="asset-grid">'+assets.map(a=>{
+    const m=macd[a];
+    if(!m)return`<div class="asset-card"><div class="name">${a.toUpperCase()}</div><div class="dim" style="font-size:12px">MACD warming up</div></div>`;
+    const cls=m.decision==='ALLOW_YES'?'green':m.decision==='ALLOW_NO'?'red':'dim';
+    const label=m.decision==='ALLOW_YES'?'ALLOW YES':m.decision==='ALLOW_NO'?'ALLOW NO':'BLOCK';
+    const explain=m.decision==='ALLOW_YES'?'green hollow / pump momentum':m.decision==='ALLOW_NO'?'red solid / dump momentum':'no accelerating setup';
+    return`<div class="asset-card">
+      <div class="name" style="display:flex;justify-content:space-between;gap:8px"><span>${a.toUpperCase()}</span><span class="${cls}" style="font-family:monospace;font-size:12px">${label}</span></div>
+      ${macdCell(m)}
+      <div class="asset-row"><span class="k">Signal</span><span class="${cls}">${explain}</span></div>
+    </div>`;
+  }).join('')+'</div>';
+}
+
 function renderAssetHistory(assetHist,assets){
   if(!assetHist||!Object.keys(assetHist).length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   return '<div class="asset-grid">'+assets.map(a=>{
@@ -1491,7 +1617,7 @@ function renderAssetHistory(assetHist,assets){
 
 function render(s){
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},macd=s.macd||{};
   const assetStatus=s.asset_status||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
@@ -1521,7 +1647,7 @@ function render(s){
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td></tr>`;
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td>${macdCell(macd[a])}</td><td>${holdingCell||'<span class="dim">—</span>'}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -1580,8 +1706,13 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>Holding</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>MACD Hist</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
+    </div>
+
+    <div class="section">
+      <h2>Binance MACD Histogram <span style="font-size:11px;color:#5a6a85;font-weight:400">15m prev/current bars — hollow green allows YES, solid red allows NO</span></h2>
+      ${renderMacdDashboard(macd,assets)}
     </div>
 
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
