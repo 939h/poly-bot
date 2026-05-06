@@ -127,7 +127,7 @@ BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
-ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
+ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
@@ -147,7 +147,7 @@ GAP_MAGNITUDE = {
     "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
-GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
@@ -165,7 +165,7 @@ FLIP_MAX       = 0.15   # flip only if opposite <= this
 MAX_BOOK_SPREAD        = 0.02
 SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
-COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "25"))
+COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
