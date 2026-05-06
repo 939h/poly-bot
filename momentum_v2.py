@@ -195,6 +195,7 @@ SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
 CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
+gap_mag_vol = 1.0
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -962,20 +963,22 @@ def _volatility_check(asset, secs_into):
 
 def _extreme_gap_skip_triggered(secs_into):
     """
-    Returns True if any asset has gap > (current-stage threshold * 8).
+    Returns True if any asset has gap > (threshold * 8).
+    Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
+    use the staged GAP_MAGNITUDE values.
     """
-    stage = "early" if secs_into < 300 else ("mid" if secs_into < 600 else "late")
+    
     for asset in ASSETS:
         c_open = candle_open.get(asset, 0.0)
         c_live = live_close.get(asset)
         if c_open <= 0 or c_live is None:
             continue
         swing = GAP_SWING.get(asset, 0.001)
-        threshold = c_open * swing * GAP_MAGNITUDE[stage]
+        threshold = c_open * swing * gap_mag_vol
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 10:
-            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f (stage=%s)",
-                        asset.upper(), actual_gap, threshold * 10, stage)
+        if actual_gap > threshold * 8:
+            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f",
+                        asset.upper(), actual_gap, threshold * 8)
             return True
     return False
 
