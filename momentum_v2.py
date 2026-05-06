@@ -125,7 +125,7 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.60   # buy if price >= this
+BUY_PRICE_MIN  = 0.65   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (9 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
@@ -143,17 +143,17 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 5.0,   # 0–5 min
+    "early": 1.0,   # 0–5 min
     "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
-GAP_WAIT_SECS = 5   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.99"))
 CUT_LOSS_PCT   = 0.50   # cut loss if price drops to this fraction of buy price
-HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
+HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
 
@@ -165,7 +165,7 @@ FLIP_MAX       = 0.15   # flip only if opposite <= this
 MAX_BOOK_SPREAD        = 0.02
 SPREAD_MAX_RETRIES     = 10
 FORCE_STOP_SPREAD_RETRIES = 10
-COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "90"))
+COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "25"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
@@ -973,9 +973,9 @@ def _extreme_gap_skip_triggered(secs_into):
         swing = GAP_SWING.get(asset, 0.001)
         threshold = c_open * swing * GAP_MAGNITUDE[stage]
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 8:
+        if actual_gap > threshold * 10:
             log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f (stage=%s)",
-                        asset.upper(), actual_gap, threshold * 8, stage)
+                        asset.upper(), actual_gap, threshold * 10, stage)
             return True
     return False
 
