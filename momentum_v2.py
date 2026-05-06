@@ -147,14 +147,14 @@ GAP_MAGNITUDE = {
     "mid":   0.8,   # 5–10 min
     "late":  0.6,   # 10–15 min
 }
-GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 25   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
 CUT_LOSS_PCT   = 0.65   # if put 0.65, means cutloss >-35%
 HOLD_EARLY_SECS = 10    # force-stop cooldown 0–5 min
-HOLD_MID_SECS   = 1    # force-stop cooldown 5–10 min
+HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 1    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
