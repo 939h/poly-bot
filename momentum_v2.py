@@ -1460,12 +1460,12 @@ canvas{display:block;width:100%!important;height:180px!important}
 .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid #252d3d}
 .asset-row:last-child{border-bottom:none}
 .asset-row .k{color:#5a6a85}
-.macd-cell{min-width:135px}
-.macd-mini{position:relative;width:64px;height:26px;display:inline-flex;align-items:center;justify-content:center;gap:8px;margin-right:8px;vertical-align:middle}
+.macd-cell{min-width:155px}
+.macd-mini{position:relative;width:82px;height:38px;display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-right:8px;vertical-align:middle}
 .macd-mini:before{content:"";position:absolute;left:0;right:0;top:50%;border-top:1px solid #3a4560}
-.macd-bar{position:relative;width:12px;min-height:2px;border-radius:2px}
-.macd-bar.pos{align-self:flex-start;margin-top:calc(13px - var(--h));height:var(--h)}
-.macd-bar.neg{align-self:flex-start;margin-top:13px;height:var(--h)}
+.macd-bar{position:relative;width:16px;min-height:3px;border-radius:3px}
+.macd-bar.pos{align-self:flex-start;margin-top:calc(19px - var(--h));height:var(--h)}
+.macd-bar.neg{align-self:flex-start;margin-top:19px;height:var(--h)}
 .macd-bar.green.solid{background:#167a55}.macd-bar.green.hollow{border:2px solid #4ade9f;background:transparent}
 .macd-bar.red.solid{background:#9f2525}.macd-bar.red.hollow{border:2px solid #f87171;background:transparent}
 .macd-label{font-size:11px;font-family:monospace}
@@ -1492,7 +1492,7 @@ function macdCell(m){
   if(!m)return '<span class="dim">warming up</span>';
   const prev=Number(m.prev),curr=Number(m.current);
   const maxAbs=Math.max(Math.abs(prev),Math.abs(curr),0.00000001);
-  const h=v=>Math.max(3,Math.round(Math.abs(v)/maxAbs*13));
+  const h=v=>Math.max(4,Math.round(Math.abs(v)/maxAbs*18));
   const bar=(v,p)=>`<span class="macd-bar ${v>=0?'pos':'neg'} ${macdBarClass(v,p)}" style="--h:${h(v)}px" title="${v.toFixed(8)}"></span>`;
   const cls=m.decision==='ALLOW_YES'?'green':m.decision==='ALLOW_NO'?'red':'dim';
   const label=m.decision==='ALLOW_YES'?'YES':m.decision==='ALLOW_NO'?'NO':'BLOCK';
@@ -1581,6 +1581,21 @@ function renderTradeLog(log){
   return `<div style="overflow-x:auto"><table>
     <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th></tr></thead>
     <tbody>${rows}</tbody></table></div>${btn}`;
+}
+
+function renderMacdDashboard(macd,assets){
+  return '<div class="asset-grid">'+assets.map(a=>{
+    const m=macd[a];
+    if(!m)return`<div class="asset-card"><div class="name">${a.toUpperCase()}</div><div class="dim" style="font-size:12px">MACD warming up</div></div>`;
+    const cls=m.decision==='ALLOW_YES'?'green':m.decision==='ALLOW_NO'?'red':'dim';
+    const label=m.decision==='ALLOW_YES'?'ALLOW YES':m.decision==='ALLOW_NO'?'ALLOW NO':'BLOCK';
+    const explain=m.decision==='ALLOW_YES'?'green hollow / pump momentum':m.decision==='ALLOW_NO'?'red solid / dump momentum':'no accelerating setup';
+    return`<div class="asset-card">
+      <div class="name" style="display:flex;justify-content:space-between;gap:8px"><span>${a.toUpperCase()}</span><span class="${cls}" style="font-family:monospace;font-size:12px">${label}</span></div>
+      ${macdCell(m)}
+      <div class="asset-row"><span class="k">Signal</span><span class="${cls}">${explain}</span></div>
+    </div>`;
+  }).join('')+'</div>';
 }
 
 function renderAssetHistory(assetHist,assets){
@@ -1693,6 +1708,11 @@ function render(s){
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>MACD Hist</th><th>Holding</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
+    </div>
+
+    <div class="section">
+      <h2>Binance MACD Histogram <span style="font-size:11px;color:#5a6a85;font-weight:400">15m prev/current bars — hollow green allows YES, solid red allows NO</span></h2>
+      ${renderMacdDashboard(macd,assets)}
     </div>
 
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
