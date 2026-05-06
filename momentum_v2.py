@@ -74,7 +74,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed
+from binance_ws import candle_open, live_close, get_macd_histogram, start_rsi_feed
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -937,6 +937,51 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
              TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
     return False
   
+
+def check_macd_momentum(hist_data):
+    """
+    Return the MACD momentum permission for Binance 15m histogram values.
+
+    hist_data: sequence containing at least [previous_histogram, current_histogram].
+    """
+    if hist_data is None or len(hist_data) < 2:
+        return "BLOCK_TRADE"
+
+    prev_h = hist_data[-2]
+    curr_h = hist_data[-1]
+
+    # YES SIDE: green bright / hollow — above zero and moving higher.
+    if curr_h > 0 and curr_h > prev_h:
+        return "ALLOW_YES"
+
+    # NO SIDE: red solid / dark — below zero and moving further below zero.
+    if curr_h < 0 and curr_h < prev_h:
+        return "ALLOW_NO"
+
+    return "BLOCK_TRADE"
+
+
+def _macd_momentum_guard_ok(asset, side):
+    """Final pre-buy guard: require Binance MACD histogram acceleration."""
+    hist_pair = get_macd_histogram(asset)
+    decision = check_macd_momentum(hist_pair)
+    expected = "ALLOW_YES" if side == "yes" else "ALLOW_NO"
+
+    if decision == expected:
+        prev_h, curr_h = hist_pair
+        log.info("[MACD-ALLOW] %s_%s  hist %.8f → %.8f",
+                 asset.upper(), side.upper(), prev_h, curr_h)
+        return True
+
+    if hist_pair is None:
+        log.info("[MACD-BLOCK] %s_%s  no Binance MACD histogram yet — waiting next 15m candle",
+                 asset.upper(), side.upper())
+    else:
+        prev_h, curr_h = hist_pair
+        log.info("[MACD-BLOCK] %s_%s  hist %.8f → %.8f  decision=%s — waiting next 15m candle",
+                 asset.upper(), side.upper(), prev_h, curr_h, decision)
+    return False
+
 def _volatility_check(asset, secs_into):
     """
     Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
@@ -1072,6 +1117,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 del gap_wait[asset]
                 continue
 
+            if not _macd_momentum_guard_ok(asset, side):
+                normal_blacklisted_assets.add(asset)
+                del gap_wait[asset]
+                continue
+
             buy = market_buy(client, token, label, price_hint=price)
             del gap_wait[asset]
             if buy["ok"]:
@@ -1139,6 +1189,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 continue
             if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
                 continue
+            if opp_asset in normal_blacklisted_assets:
+                continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
                          opp_asset.upper(), side.upper(), COOLDOWN_SEC)
@@ -1159,6 +1211,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     log.info("[OPPO-GAP-SKIP] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                              opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                     continue
+
+            if not _macd_momentum_guard_ok(opp_asset, side):
+                normal_blacklisted_assets.add(opp_asset)
+                continue
 
             label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
             buy = market_buy(client, opp_token, label, price_hint=opp_price)
@@ -1225,6 +1281,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 log.info("[SPREAD-SKIP] %s  spread=%.4f > max=%.4f — skipping",
                          triggered_key, spread, MAX_BOOK_SPREAD)
                 continue
+            if not _macd_momentum_guard_ok(asset, triggered_side):
+                normal_blacklisted_assets.add(asset)
+                continue
+
             label = f"{asset.upper()}-{triggered_key.split('_')[1].upper()}"
             buy = market_buy(client, triggered_token, label, price_hint=triggered_price)
             if buy["ok"]:
