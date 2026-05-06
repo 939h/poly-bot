@@ -125,11 +125,11 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.65   # buy if price >= this
+BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
-TREND_GUARD_PRICE = 0.65
+TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
 
@@ -151,11 +151,11 @@ GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
-SELL_CAP        = float(os.getenv("SELL_CAP", "0.97"))
-CUT_LOSS_PCT   = 0.40   # cut loss if price drops to this fraction of buy price
-HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
-HOLD_MID_SECS   = 15    # force-stop cooldown 5–10 min
-HOLD_LATE_SECS  = 10    # force-stop cooldown 10–15 min
+SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
+CUT_LOSS_PCT   = 0.65   # if put 0.65, means cutloss >-35%
+HOLD_EARLY_SECS = 10    # force-stop cooldown 0–5 min
+HOLD_MID_SECS   = 1    # force-stop cooldown 5–10 min
+HOLD_LATE_SECS  = 1    # force-stop cooldown 10–15 min
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.10   # flip only if opposite >= this
@@ -172,7 +172,7 @@ OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
-OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.04"))
+OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
@@ -182,11 +182,12 @@ OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
 WINDOW_SECS            = 900
+HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "240"))
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
-TRADING_WINDOWS_ENABLED = False
+TRADING_WINDOWS_ENABLED = True
 TRADING_TZ_OFFSET_HRS   = 8
-TRADING_WINDOWS         = [(12, 30, 16, 0), (18, 20), (23, 4)]
+TRADING_WINDOWS         = [(12, 30, 16, 0), (18, 0, 20, 0), (23, 0, 23, 59), (0, 0, 4, 0)]
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
@@ -194,6 +195,7 @@ SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
 CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
+gap_mag_vol = 1.0
 
 # =============================================================================
 #  INTERNAL CONSTANTS
@@ -647,7 +649,7 @@ def check_gap_guard(asset, secs_into):
     threshold = c_open * swing * magnitude
     actual    = abs(c_live - c_open)
 
-    log.info(
+    log.debug(
         "[GAP-GUARD] %s  open=%.4f  live=%.4f  actual=%.4f  threshold=%.4f"
         "  (swing=%.4f × mag=%.1f  stage=%s)",
         asset.upper(), c_open, c_live, actual, threshold, swing, magnitude, stage,
@@ -689,6 +691,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "force_stop_spread_retries": 0,
         "last_exit_attempt_ts": 0.0,
         "opened_at":            datetime.now().strftime("%H:%M"),
+        "opened_ts":            time.time(),
         "window_start":         window_start,
     }
     base_asset = key.split("_")[0]
@@ -722,6 +725,29 @@ def manage_positions(client, server_ts=None):
         shares    = pos["net_shares"]
         cut_loss  = pos["cut_loss_price"]
         is_flip   = pos.get("is_flip", False)
+        hold_secs = now - float(pos.get("opened_ts", now))
+
+        # ── Max holding time limit ───────────────────────────────────────────
+        if HOLD_POSITION_LIMIT_SECS > 0 and hold_secs >= HOLD_POSITION_LIMIT_SECS:
+            log.info("[TIME-LIMIT-SELL] %s  held=%ds/%ds  price=%.4f  selling %.3f shares",
+                     key, int(hold_secs), HOLD_POSITION_LIMIT_SECS, current_price, shares)
+            pos["closing"] = True
+            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            pos["last_exit_attempt_ts"] = time.time()
+            if sell["ok"]:
+                revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[TIME-LIMIT-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "TIME-LIMIT-SELL", current_price, pnl)
+                to_close.append(key)
+            else:
+                pos["closing"] = False
+                log.warning("[TIME-LIMIT-SELL] %s sell failed — will retry on next loop", key)
+            continue
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
         if current_price <= cut_loss:
@@ -905,7 +931,7 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
                  trigger_asset.upper(), trigger_side.upper(), ", ".join(confirmations))
         return True
 
-    log.info("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
+    log.debug("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
              trigger_asset.upper(), trigger_side.upper(),
              len(confirmations), TREND_GUARD_MIN_CONFIRMATIONS,
              TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
@@ -937,20 +963,22 @@ def _volatility_check(asset, secs_into):
 
 def _extreme_gap_skip_triggered(secs_into):
     """
-    Returns True if any asset has gap > (current-stage threshold * 8).
+    Returns True if any asset has gap > (threshold * 8).
+    Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
+    use the staged GAP_MAGNITUDE values.
     """
-    stage = "early" if secs_into < 300 else ("mid" if secs_into < 600 else "late")
+    
     for asset in ASSETS:
         c_open = candle_open.get(asset, 0.0)
         c_live = live_close.get(asset)
         if c_open <= 0 or c_live is None:
             continue
         swing = GAP_SWING.get(asset, 0.001)
-        threshold = c_open * swing * GAP_MAGNITUDE[stage]
+        threshold = c_open * swing * gap_mag_vol
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 10:
-            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f (stage=%s)",
-                        asset.upper(), actual_gap, threshold * 10, stage)
+        if actual_gap > threshold * 8:
+            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f",
+                        asset.upper(), actual_gap, threshold * 8)
             return True
     return False
 
