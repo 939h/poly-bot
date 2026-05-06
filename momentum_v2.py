@@ -649,7 +649,7 @@ def check_gap_guard(asset, secs_into):
     threshold = c_open * swing * magnitude
     actual    = abs(c_live - c_open)
 
-    log.info(
+    log.debug(
         "[GAP-GUARD] %s  open=%.4f  live=%.4f  actual=%.4f  threshold=%.4f"
         "  (swing=%.4f × mag=%.1f  stage=%s)",
         asset.upper(), c_open, c_live, actual, threshold, swing, magnitude, stage,
@@ -931,7 +931,7 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
                  trigger_asset.upper(), trigger_side.upper(), ", ".join(confirmations))
         return True
 
-    log.info("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
+    log.debug("[TREND-GUARD-BLOCK] %s_%s confirmed=%d/%d  need side > %.2f  matches=%s",
              trigger_asset.upper(), trigger_side.upper(),
              len(confirmations), TREND_GUARD_MIN_CONFIRMATIONS,
              TREND_GUARD_PRICE, ", ".join(confirmations) if confirmations else "none")
