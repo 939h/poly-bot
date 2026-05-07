@@ -85,9 +85,9 @@ class _ColorFormatter(logging.Formatter):
             return msg
         if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[FORCE-STOP]")):
+        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[FORCE-STOP]", "[FORCE-SELL]", "[REBOUND-DEAD]", "[REBOUND-CAP]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[FLIP]",)):
+        if any(t in msg for t in ("[FLIP]", "[REBOUND-FLIP]")):
             return Fore.CYAN + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[GAP-ALLOW]",)):
             return Fore.GREEN + msg + Style.RESET_ALL
@@ -156,10 +156,19 @@ CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.65"))   # if 0.65, cut loss 
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 20    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
+FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "2.0"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.10   # flip only if opposite >= this
 FLIP_MAX       = 0.15   # flip only if opposite <= this
+REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.5"))
+REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.05"))
+REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.30"))
+REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
+REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "5.0"))
+REBOUND_FIRST_SELL_FRACTION = float(os.getenv("REBOUND_FIRST_SELL_FRACTION", "0.50"))
+REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
+REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
@@ -198,6 +207,35 @@ MIN_SELL_SHARES          = 0.001
 CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 gap_mag_vol = 1.0
 
+
+
+def validate_settings():
+    errors = []
+    if FORCE_SELL_GAP_MULT <= 0:
+        errors.append("FORCE_SELL_GAP_MULT must be > 0")
+    if REBOUND_CUTLOSS_MULT <= 1.0:
+        errors.append("REBOUND_CUTLOSS_MULT must be > 1.0")
+    if REBOUND_CUTLOSS_DEAD_ZONE < 0:
+        errors.append("REBOUND_CUTLOSS_DEAD_ZONE must be >= 0")
+    if REBOUND_CUTLOSS_CAP <= REBOUND_CUTLOSS_DEAD_ZONE:
+        errors.append("REBOUND_CUTLOSS_CAP must be greater than REBOUND_CUTLOSS_DEAD_ZONE")
+    if REBOUND_CUTLOSS_CAP >= 1.0:
+        errors.append("REBOUND_CUTLOSS_CAP must be < 1.0")
+    if REBOUND_STOP_BUY_AT < 0:
+        errors.append("REBOUND_STOP_BUY_AT must be >= 0")
+    if REBOUND_SELL_MULTIPLIER <= 0:
+        errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
+    if not 0 < REBOUND_FIRST_SELL_FRACTION < 1:
+        errors.append("REBOUND_FIRST_SELL_FRACTION must be between 0 and 1")
+    if not 0 < REBOUND_FINAL_SELL_PRICE < 1:
+        errors.append("REBOUND_FINAL_SELL_PRICE must be between 0 and 1")
+    if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
+        errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
+    if errors:
+        for err in errors:
+            log.error("[CONFIG] %s", err)
+        sys.exit(1)
+
 # =============================================================================
 #  INTERNAL CONSTANTS
 # =============================================================================
@@ -222,6 +260,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+rebound_cutloss_tracker = {}       # key asset_side -> rebound tracking state after cut-loss
 
 pnl_history        = []
 asset_history      = {}
@@ -289,7 +328,7 @@ def save_state():
         curr     = live_prices.get(k, entry)
         target   = p["sell_price"]
         cut      = p["cut_loss_price"]
-        pnl_unreal = round((curr - entry) * p["net_shares"], 4)
+        pnl_unreal = round(p.get("realized_revenue", 0.0) + (curr * p["net_shares"]) - p.get("cost", 0.0), 4)
         pct      = round((curr - entry) / (target - entry) * 100, 1) if target != entry else 0
         positions_out[k] = {
             "entry":       round(entry, 4),
@@ -297,7 +336,9 @@ def save_state():
             "target":      round(target, 4),
             "cut_loss":    round(cut, 4),
             "is_flip":     p.get("is_flip", False),
+            "is_rebound":  p.get("is_rebound", False),
             "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
+            "rebound_tranches": p.get("rebound_tranches", []),
             "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
             "pnl":         pnl_unreal,
             "pct":         max(0, min(100, pct)),
@@ -342,6 +383,15 @@ def save_state():
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
+            "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
+            "rebound_cutloss_mult": REBOUND_CUTLOSS_MULT,
+            "rebound_cutloss_dead_zone": REBOUND_CUTLOSS_DEAD_ZONE,
+            "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
+            "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
+            "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
+            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
+            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
+            "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -380,6 +430,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "exit":     exit_type,
         "exit_px":  round(close_price, 4),
         "is_flip":  pos.get("is_flip", False),
+        "is_rebound": pos.get("is_rebound", False),
         "pnl":      round(pnl, 4),
     }
     trade_log.insert(0, record)
@@ -666,9 +717,39 @@ def check_gap_guard(asset, secs_into):
 
     return False   # gap too small — wait/block
 
+
+
+def get_gap_threshold(asset, secs_into, multiplier=1.0):
+    c_open = candle_open.get(asset, 0.0)
+    if c_open <= 0.0:
+        return None
+    if secs_into < 300:
+        stage = "early"
+    elif secs_into < 600:
+        stage = "mid"
+    else:
+        stage = "late"
+    return c_open * GAP_SWING.get(asset, 0.001) * GAP_MAGNITUDE[stage] * multiplier
+
+
+def get_binance_gap(asset):
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    if c_open <= 0.0 or c_live is None:
+        return None
+    return abs(c_live - c_open)
+
+
+def force_sell_gap_triggered(asset, secs_into):
+    threshold = get_gap_threshold(asset, secs_into, FORCE_SELL_GAP_MULT)
+    actual = get_binance_gap(asset)
+    if threshold is None or actual is None:
+        return False, actual, threshold
+    return actual >= threshold, actual, threshold
+
 # ── Position management ───────────────────────────────────────────────────────
 
-def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False):
+def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False, is_rebound=False):
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
@@ -676,11 +757,34 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
     is_oppo = key.endswith("_oppo")
-    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else SELL_MULTIPLIER
+    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER)
     sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
-    sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
+    if is_rebound:
+        rebound_5x_target = min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE)
+        sell_price = min(rebound_5x_target, REBOUND_FINAL_SELL_PRICE)
+    else:
+        sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
     cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
     cut_loss_price = round(entry_price * cut_loss_pct, 4)
+
+    rebound_first_shares = round(net_shares * REBOUND_FIRST_SELL_FRACTION, 3) if is_rebound else 0.0
+    rebound_final_shares = round(max(net_shares - rebound_first_shares, 0.0), 3) if is_rebound else 0.0
+    rebound_tranches = []
+    if is_rebound:
+        rebound_tranches = [
+            {
+                "name": "5X",
+                "target": min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE),
+                "shares": rebound_first_shares,
+                "sold": False,
+            },
+            {
+                "name": "FINAL",
+                "target": REBOUND_FINAL_SELL_PRICE,
+                "shares": rebound_final_shares,
+                "sold": False,
+            },
+        ]
 
     open_positions[key] = {
         "token_id":             token_id,
@@ -693,6 +797,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "cost":                 round(BUY_AMOUNT, 4),
         "realized_revenue":     0.0,
         "is_flip":              is_flip,
+        "is_rebound":           is_rebound,
+        "rebound_tranches":     rebound_tranches,
         "force_stop_triggered": None,
         "force_stop_cooldown":  None,
         "force_stop_spread_retries": 0,
@@ -704,11 +810,79 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
     stats["buys"] += 1
-    tag = "FLIP " if is_flip else ""
+    tag = "REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else "")
     log.info(
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f (%.0f%%)",
         tag, key, entry_price, net_shares, sell_price, cut_loss_price, cut_loss_pct * 100,
     )
+    if is_rebound:
+        log.info(
+            "[REBOUND-TARGETS] %s  %.0f%% @ %.4f  %.0f%% @ %.4f",
+            key, REBOUND_FIRST_SELL_FRACTION * 100, rebound_tranches[0]["target"],
+            (1 - REBOUND_FIRST_SELL_FRACTION) * 100, rebound_tranches[1]["target"],
+        )
+
+
+
+def update_rebound_sell_price(pos):
+    unsold_targets = [
+        float(t["target"]) for t in pos.get("rebound_tranches", [])
+        if not t.get("sold") and float(t.get("shares", 0.0)) >= MIN_SELL_SHARES
+    ]
+    if unsold_targets:
+        pos["sell_price"] = min(unsold_targets)
+
+
+def manage_rebound_target_sells(client, key, pos, current_price):
+    for tranche in pos.get("rebound_tranches", []):
+        if tranche.get("sold"):
+            continue
+        target = float(tranche.get("target", 0.0))
+        tranche_shares = round(float(tranche.get("shares", 0.0)), 3)
+        available_shares = round(float(pos.get("net_shares", 0.0)), 3)
+        sell_shares = min(tranche_shares, available_shares)
+
+        if sell_shares < MIN_SELL_SHARES:
+            tranche["sold"] = True
+            continue
+        if current_price < target:
+            continue
+
+        log.info(
+            "[REBOUND-SELL-%s] %s price=%.4f >= target=%.4f selling %.3f/%.3f shares",
+            tranche.get("name", "TRANCHE"), key, current_price, target, sell_shares, available_shares,
+        )
+        pos["closing"] = True
+        sell = market_sell_with_retries(client, pos["token_id"], sell_shares, current_price, key.upper())
+        pos["last_exit_attempt_ts"] = time.time()
+        if not sell["ok"]:
+            pos["closing"] = False
+            log.warning("[REBOUND-SELL-%s] %s sell failed — will retry on next loop", tranche.get("name", "TRANCHE"), key)
+            return False
+
+        filled_shares = round(float(sell.get("filled_shares") or sell_shares), 3)
+        revenue = float(sell.get("filled_quote") or round(filled_shares * current_price, 4))
+        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+        pos["net_shares"] = round(max(available_shares - filled_shares, 0.0), 3)
+        tranche["sold"] = True
+        log.info(
+            "[REBOUND-SELL-%s] %s partial finalized revenue=$%.4f remaining=%.3f",
+            tranche.get("name", "TRANCHE"), key, revenue, pos["net_shares"],
+        )
+
+    pos["closing"] = False
+    update_rebound_sell_price(pos)
+    all_sold = all(t.get("sold") for t in pos.get("rebound_tranches", []))
+    if all_sold or float(pos.get("net_shares", 0.0)) < MIN_SELL_SHARES:
+        pnl = round(pos.get("realized_revenue", 0.0) - pos["cost"], 4)
+        log.info("[REBOUND-SELL] %s finalized  pnl=$%.4f", key, pnl)
+        stats["wins" if pnl > 0 else "losses"] += 1
+        stats["pnl"] += pnl
+        _record_closed_trade(key, pnl)
+        _record_trade_log(key, pos, "REBOUND-SELL", current_price, pnl)
+        return True
+
+    return False
 
 
 def manage_positions(client, server_ts=None):
@@ -733,6 +907,35 @@ def manage_positions(client, server_ts=None):
         cut_loss  = pos["cut_loss_price"]
         is_flip   = pos.get("is_flip", False)
         hold_secs = now - float(pos.get("opened_ts", now))
+        unrealized_revenue = round(pos.get("realized_revenue", 0.0) + (current_price * shares), 4)
+        unrealized_pnl = round(unrealized_revenue - pos["cost"], 4)
+        server_ts_now = server_ts if server_ts is not None else get_server_time()
+        secs_into_now = server_ts_now - get_current_window_start(server_ts_now)
+
+        # ── Force sell profitable positions when Binance gap overextends ─────
+        gap_hit, actual_gap, force_threshold = force_sell_gap_triggered(key.split("_")[0], secs_into_now)
+        if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
+            log.info(
+                "[FORCE-SELL] %s  pnl=$%.4f  price=%.4f  gap=%.4f >= force-threshold=%.4f  selling %.3f shares",
+                key, unrealized_pnl, current_price, actual_gap, force_threshold, shares,
+            )
+            pos["closing"] = True
+            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            pos["last_exit_attempt_ts"] = time.time()
+            if sell["ok"]:
+                revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[FORCE-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "FORCE-SELL", current_price, pnl)
+                to_close.append(key)
+            else:
+                pos["closing"] = False
+                log.warning("[FORCE-SELL] %s sell failed — will retry on next loop", key)
+            continue
 
         # ── Max holding time limit ───────────────────────────────────────────
         if HOLD_POSITION_LIMIT_SECS > 0 and hold_secs >= HOLD_POSITION_LIMIT_SECS:
@@ -770,8 +973,7 @@ def manage_positions(client, server_ts=None):
                                  key, spread, fsr, FORCE_STOP_SPREAD_RETRIES)
                         continue
                     log.info("[STOP-SPREAD-FORCE] %s  forcing stop after %d retries", key, fsr)
-                server_ts_now = server_ts if server_ts is not None else get_server_time()
-                secs_in = server_ts_now - get_current_window_start(server_ts_now)
+                secs_in = secs_into_now
                 if secs_in < 300:
                     cooldown, period = HOLD_EARLY_SECS, "early"
                 elif secs_in < 600:
@@ -792,8 +994,8 @@ def manage_positions(client, server_ts=None):
 
             # Confirmed cut-loss — sell all
             log.info("[CUT-LOSS] %s  price=%.4f  selling %.3f shares", key, current_price, shares)
-            pos["closing"] = True  # Set flag immediately[cite: 1]
-            sell = market_sell(client, pos["token_id"], shares, current_price, key.upper())
+            pos["closing"] = True
+            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
@@ -806,37 +1008,21 @@ def manage_positions(client, server_ts=None):
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
                 to_close.append(key)
 
-                # ── Flip to opposite side ─────────────────────────────────────
+                # ── Rebound cut-loss flip: trace same side trough, then re-buy ──
                 asset = key.split("_")[0]
-                side  = key.split("_")[1]
-                if asset not in flipped_this_window:
-                    opp_side = "no" if side == "yes" else "yes"
-                    opp_key  = f"{asset}_{opp_side}"
-                    tokens   = token_cache.get(pos.get("window_start"), {}).get(asset)
-                    if tokens:
-                        opp_token = tokens[1] if opp_side == "no" else tokens[0]
-                        opp_price = get_midpoint(client, opp_token)
-                        if FLIP_MIN <= opp_price <= FLIP_MAX:
-                            log.info("[FLIP] %s → buying %s @ %.4f", asset.upper(), opp_side.upper(), opp_price)
-                            buy = market_buy(client, opp_token, f"{asset.upper()}-{opp_side.upper()}-FLIP",
-                                            price_hint=opp_price)
-                            if buy["ok"]:
-                                entry_px = float(buy.get("filled_price") or opp_price)
-                                open_position(opp_key, opp_token, entry_px,
-                                              filled_shares=buy.get("filled_shares"),
-                                              window_start=pos.get("window_start"),
-                                              is_flip=True)
-                                flipped_this_window.add(asset)
-                                traded_this_window.add(asset)
-                                live_prices[opp_key] = opp_price
-                        else:
-                            log.info("[FLIP] %s skipped — %s @ %.4f outside %.2f–%.2f",
-                                     asset.upper(), opp_side.upper(), opp_price, FLIP_MIN, FLIP_MAX)
-                            traded_this_window.add(asset)
-                    else:
-                        traded_this_window.add(asset)
+                if asset not in flipped_this_window and not pos.get("is_oppo"):
+                    rebound_cutloss_tracker[key] = {
+                        "token": pos["token_id"],
+                        "trough": current_price,
+                        "window_start": pos.get("window_start"),
+                        "armed_at": time.time(),
+                    }
+                    log.info(
+                        "[REBOUND-FLIP] %s armed  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
+                        key, current_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
+                    )
                 else:
-                    log.info("[FLIP] %s skipped — already flipped this window", asset.upper())
+                    log.info("[REBOUND-FLIP] %s skipped — already flipped this window or oppo position", asset.upper())
             else:
                 pos["closing"] = False
                 log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
@@ -850,12 +1036,18 @@ def manage_positions(client, server_ts=None):
             pos["force_stop_cooldown"]  = None
             pos["force_stop_spread_retries"] = 0
 
+        # ── Rebound positions sell in two tranches ───────────────────────────
+        if pos.get("is_rebound"):
+            if manage_rebound_target_sells(client, key, pos, current_price):
+                to_close.append(key)
+            continue
+
         # ── Sell at target ────────────────────────────────────────────────────
         if current_price >= pos["sell_price"]:
             tag = "FLIP-SELL" if is_flip else "SELL"
-            log.info("[%s] %s  price=%.4f  selling %d shares", tag, key, current_price, shares)
+            log.info("[%s] %s  price=%.4f  selling %.3f shares", tag, key, current_price, shares)
 
-            pos["closing"] = True  # Set flag immediately[cite: 1]
+            pos["closing"] = True
           
             sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
             pos["last_exit_attempt_ts"] = time.time()
@@ -990,6 +1182,95 @@ def _extreme_gap_skip_triggered(secs_into):
     return False
 
 
+def advance_rebound_cutloss_tracker(client, window_start, secs_into):
+    for key in list(rebound_cutloss_tracker.keys()):
+        tracker = rebound_cutloss_tracker[key]
+        asset = key.split("_")[0]
+
+        if tracker.get("window_start") != window_start:
+            del rebound_cutloss_tracker[key]
+            continue
+        if key in open_positions:
+            continue
+        if asset in flipped_this_window:
+            del rebound_cutloss_tracker[key]
+            continue
+
+        token = tracker["token"]
+        current_price = live_prices.get(key)
+        if current_price is None or current_price <= 0:
+            current_price = get_midpoint(client, token)
+        if current_price <= 0:
+            continue
+
+        if current_price <= REBOUND_CUTLOSS_DEAD_ZONE:
+            log.info(
+                "[REBOUND-DEAD] %s price=%.4f <= %.4f — discarding rebound buy",
+                key, current_price, REBOUND_CUTLOSS_DEAD_ZONE,
+            )
+            del rebound_cutloss_tracker[key]
+            continue
+
+        trough = float(tracker.get("trough", current_price))
+        if current_price < trough:
+            tracker["trough"] = current_price
+            log.info("[REBOUND-FLIP] %s new trough=%.4f", key, current_price)
+            continue
+
+        rebound_ratio = current_price / trough if trough > 0 else 0.0
+        if rebound_ratio < REBOUND_CUTLOSS_MULT:
+            log.info(
+                "[REBOUND-FLIP] %s waiting %.3fx/%.2fx from trough %.4f",
+                key, rebound_ratio, REBOUND_CUTLOSS_MULT, trough,
+            )
+            continue
+
+        if current_price >= REBOUND_CUTLOSS_CAP:
+            log.info(
+                "[REBOUND-CAP] %s rebound %.3fx reached at %.4f >= cap %.4f — discarding rebound buy",
+                key, rebound_ratio, current_price, REBOUND_CUTLOSS_CAP,
+            )
+            del rebound_cutloss_tracker[key]
+            continue
+
+        if secs_into > REBOUND_STOP_BUY_AT:
+            log.info(
+                "[REBOUND-STOP-BUY] %s rebound ready @ %.4f but secs_into=%d > rebound_stop_buy_at=%d — discarding",
+                key, current_price, secs_into, REBOUND_STOP_BUY_AT,
+            )
+            del rebound_cutloss_tracker[key]
+            continue
+
+        spread = get_spread_value(client, token)
+        if spread is not None and spread > MAX_BOOK_SPREAD:
+            log.info(
+                "[REBOUND-SPREAD-SKIP] %s spread=%.4f > %.4f",
+                key, spread, MAX_BOOK_SPREAD,
+            )
+            continue
+
+        label = f"{asset.upper()}-{key.split('_')[1].upper()}-REBOUND-FLIP"
+        log.info(
+            "[REBOUND-FLIP] %s buying after rebound %.3fx from trough %.4f @ %.4f",
+            key, rebound_ratio, trough, current_price,
+        )
+        buy = market_buy(client, token, label, price_hint=current_price)
+        if buy["ok"]:
+            entry_px = float(buy.get("filled_price") or current_price)
+            open_position(
+                key, token, entry_px,
+                filled_shares=buy.get("filled_shares"),
+                window_start=window_start,
+                is_flip=True,
+                is_rebound=True,
+            )
+            flipped_this_window.add(asset)
+            traded_this_window.add(asset)
+            live_prices[key] = current_price
+            del rebound_cutloss_tracker[key]
+
+
+
 def scan_markets(client, window_start, secs_into, server_ts, executor):
     global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
 
@@ -1015,6 +1296,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     if not can_open_new_trades(server_ts):
         return
+
+    advance_rebound_cutloss_tracker(client, window_start, secs_into)
 
     if _extreme_gap_skip_triggered(secs_into):
         skip_buy_until_window = window_start + (WINDOW_SECS * 4)  # this + next 3 windows
@@ -1275,7 +1558,7 @@ def _build_state_snapshot():
         target  = p["sell_price"]
         cut     = p["cut_loss_price"]
         shares  = p["net_shares"]
-        pnl_unreal = round((curr - entry) * shares, 4)
+        pnl_unreal = round(p.get("realized_revenue", 0.0) + (curr * shares) - p.get("cost", 0.0), 4)
         pct = round((curr - entry) / (target - entry) * 100, 1) if target != entry else 0
         positions_out[k] = {
             "entry":     round(entry, 4),
@@ -1283,6 +1566,8 @@ def _build_state_snapshot():
             "target":    round(target, 4),
             "cut_loss":  round(cut, 4),
             "is_flip":   p.get("is_flip", False),
+            "is_rebound": p.get("is_rebound", False),
+            "rebound_tranches": p.get("rebound_tranches", []),
             "pnl":       pnl_unreal,
             "pct":       max(0, min(100, pct)),
             "opened_at": p.get("opened_at", "—"),
@@ -1320,6 +1605,12 @@ def _build_state_snapshot():
         },
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
+        "rebound_cutloss_tracker": {
+            k: {
+                "trough": round(float(v.get("trough", 0.0)), 4),
+                "window_start": v.get("window_start"),
+            } for k, v in rebound_cutloss_tracker.items()
+        },
         "asset_status": {
             a: {
                 "blacklisted": a in normal_blacklisted_assets,
@@ -1339,6 +1630,15 @@ def _build_state_snapshot():
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
+            "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
+            "rebound_cutloss_mult": REBOUND_CUTLOSS_MULT,
+            "rebound_cutloss_dead_zone": REBOUND_CUTLOSS_DEAD_ZONE,
+            "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
+            "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
+            "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
+            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
+            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
+            "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -1535,7 +1835,7 @@ function render(s){
   const posCards=Object.entries(pos).map(([k,p])=>{
     const [asset,side]=k.split('_');
     const col=p.current>=p.entry?'green':'red';
-    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
+    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
     const pnlV=p.pnl||0;
     return`<div class="pos-card">
       <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${badges}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
@@ -1687,6 +1987,7 @@ def start_http_server():
 def main():
     global last_pnl_snapshot, pnl_history, armed_logged, skip_buy_until_window
 
+    validate_settings()
     load_state()
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log.info("=" * 55)
@@ -1698,6 +1999,14 @@ def main():
              SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100, OPPO_CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
+    log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
+    log.info(
+        "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
+        "stop-buy=%ds, sell %.0f%% at x%.2f and %.0f%% at %.0f¢",
+        REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP * 100, REBOUND_CUTLOSS_DEAD_ZONE * 100,
+        REBOUND_STOP_BUY_AT, REBOUND_FIRST_SELL_FRACTION * 100, REBOUND_SELL_MULTIPLIER,
+        (1 - REBOUND_FIRST_SELL_FRACTION) * 100, REBOUND_FINAL_SELL_PRICE * 100,
+    )
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
@@ -1736,6 +2045,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
