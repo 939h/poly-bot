@@ -1182,7 +1182,9 @@ def _extreme_gap_skip_triggered(secs_into):
     return False
 
 
-def advance_rebound_cutloss_tracker(client, window_start, secs_into):
+def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
+    if secs_into is None:
+        secs_into = max(0, int(time.time()) - int(window_start))
     for key in list(rebound_cutloss_tracker.keys()):
         tracker = rebound_cutloss_tracker[key]
         asset = key.split("_")[0]
