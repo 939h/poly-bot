@@ -154,7 +154,7 @@ SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
 CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.65"))   # if 0.65, cut loss at 65% of entry
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
-HOLD_MID_SECS   = 20    # force-stop cooldown 5–10 min
+HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "2.0"))
 
