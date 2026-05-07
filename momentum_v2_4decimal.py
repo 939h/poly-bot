@@ -83,7 +83,7 @@ class _ColorFormatter(logging.Formatter):
         msg = super().format(record)
         if not COLORS:
             return msg
-        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]")):
+        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]", "[FORCE-GAP-SELL]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[FORCE-STOP]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
@@ -148,6 +148,7 @@ GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_PRICE     = 0.96   # sell all at this price
+FORCE_SELL_GAP_THRESHOLD = float(os.getenv("FORCE_SELL_GAP_THRESHOLD", "2"))
 CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
@@ -295,6 +296,7 @@ def save_state():
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell":       SELL_PRICE,
+            "force_sell_gap_threshold": FORCE_SELL_GAP_THRESHOLD,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -615,6 +617,15 @@ def check_gap_guard(asset, secs_into):
 
     return False   # gap too small — wait/block
 
+
+def get_binance_gap(asset):
+    """Return the absolute Binance live-vs-open gap for an asset, or None if unavailable."""
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    if c_open <= 0.0 or c_live is None:
+        return None
+    return abs(c_live - c_open)
+
 # ── Position management ───────────────────────────────────────────────────────
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False):
@@ -667,6 +678,33 @@ def manage_positions(client, server_ts=None):
         shares    = pos["net_shares"]
         cut_loss  = pos["cut_loss_price"]
         is_flip   = pos.get("is_flip", False)
+        asset     = key.split("_")[0]
+        unrealized_pnl = round((current_price - entry) * shares, 4)
+        binance_gap = get_binance_gap(asset)
+
+        # ── Force sell on profit + large Binance gap ──────────────────────────
+        if (
+            unrealized_pnl > 0
+            and binance_gap is not None
+            and binance_gap > FORCE_SELL_GAP_THRESHOLD
+        ):
+            log.info(
+                "[FORCE-GAP-SELL] %s  pnl=$%.4f  binance_gap=%.4f > threshold=%.4f  selling %d shares",
+                key, unrealized_pnl, binance_gap, FORCE_SELL_GAP_THRESHOLD, shares,
+            )
+            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            pos["last_exit_attempt_ts"] = time.time()
+            if sell["ok"]:
+                revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[FORCE-GAP-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "FORCE-GAP-SELL", current_price, pnl)
+                to_close.append(key)
+            continue
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
         if current_price <= cut_loss and not is_flip:
@@ -1028,6 +1066,7 @@ def _build_state_snapshot():
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell":       SELL_PRICE,
+            "force_sell_gap_threshold": FORCE_SELL_GAP_THRESHOLD,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -1147,9 +1186,9 @@ function tlToggle(){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','FORCE-GAP-SELL':'#24150a','CUT-LOSS':'#2a0d0d'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','FORCE-GAP-SELL':'#f59e0b','CUT-LOSS':'#f87171'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','FORCE-GAP-SELL':'#7c4a03','CUT-LOSS':'#5c1d1d'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -1290,8 +1329,9 @@ function render(s){
       <h2>Settings</h2>
       <table><tbody>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell at</td><td>${(cfg.sell||0.99)*100|0}¢</td></tr>
-        <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
-        <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
+        <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Force sell gap</td><td>${cfg.force_sell_gap_threshold ?? 2}</td></tr>
+        <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
+        <tr><td>Poll</td><td>${cfg.poll||2}s</td><td></td><td></td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
       </tbody></table>
     </div>
@@ -1380,6 +1420,7 @@ def main():
              SELL_PRICE*100, CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
+    log.info("  Force gap sell: pnl > $0 and Binance gap > %.4f", FORCE_SELL_GAP_THRESHOLD)
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
