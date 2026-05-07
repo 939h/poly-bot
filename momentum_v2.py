@@ -125,9 +125,9 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.70   # buy if price >= this
-BUY_PRICE_MAX  = 0.80   # buy if price <= this
-ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
+BUY_PRICE_MIN  = 0.30   # buy if price >= this
+BUY_PRICE_MAX  = 0.40   # buy if price <= this
+ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
@@ -150,7 +150,7 @@ GAP_MAGNITUDE = {
 GAP_WAIT_SECS = 25   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
+SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.50"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
 CUT_LOSS_PCT   = 0.65   # if put 0.65, means cutloss >-35%
 HOLD_EARLY_SECS = 10    # force-stop cooldown 0–5 min
