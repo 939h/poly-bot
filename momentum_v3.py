@@ -1995,7 +1995,7 @@ def main():
     load_state()
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log.info("=" * 55)
-    log.info("  FreshBot23  [%s]", mode)
+    log.info("  Momentum v3  [%s]", mode)
     log.info("  Assets : %s", ", ".join(a.upper() for a in ASSETS))
     log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=x%.2f (cap %.0f¢)  cut-loss=%.0f%%  oppo-cut-loss=%.0f%%",
              BUY_PRICE_MIN*100, BUY_PRICE_MAX*100,
