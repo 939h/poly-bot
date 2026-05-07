@@ -953,15 +953,23 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
 
 def check_macd_momentum(hist_data):
     """
-    Return the MACD momentum permission for Binance 15m histogram values.
+    Return the main-branch MACD momentum permission for Binance 15m histograms.
 
     hist_data: sequence containing at least [previous_histogram, current_histogram].
+    Main branch treats a positive, rising histogram as YES momentum and a
+    negative, falling histogram as NO momentum; every other shape blocks buys.
     """
     if hist_data is None or len(hist_data) < 2:
         return "BLOCK_TRADE"
 
-    prev_h = hist_data[-2]
-    curr_h = hist_data[-1]
+    try:
+        prev_h = float(hist_data[-2])
+        curr_h = float(hist_data[-1])
+    except (TypeError, ValueError):
+        return "BLOCK_TRADE"
+
+    if not (math.isfinite(prev_h) and math.isfinite(curr_h)):
+        return "BLOCK_TRADE"
 
     # YES SIDE: green bright / hollow — above zero and moving higher.
     if curr_h > 0 and curr_h > prev_h:
