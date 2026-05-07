@@ -176,7 +176,7 @@ OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
-OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.70"))
+OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.30"))
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
