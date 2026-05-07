@@ -166,6 +166,9 @@ REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.05")
 REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.30"))
 REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
 REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "5.0"))
+REBOUND_FIRST_SELL_FRACTION = float(os.getenv("REBOUND_FIRST_SELL_FRACTION", "0.50"))
+REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
+REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
@@ -222,6 +225,12 @@ def validate_settings():
         errors.append("REBOUND_STOP_BUY_AT must be >= 0")
     if REBOUND_SELL_MULTIPLIER <= 0:
         errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
+    if not 0 < REBOUND_FIRST_SELL_FRACTION < 1:
+        errors.append("REBOUND_FIRST_SELL_FRACTION must be between 0 and 1")
+    if not 0 < REBOUND_FINAL_SELL_PRICE < 1:
+        errors.append("REBOUND_FINAL_SELL_PRICE must be between 0 and 1")
+    if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
+        errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -319,7 +328,7 @@ def save_state():
         curr     = live_prices.get(k, entry)
         target   = p["sell_price"]
         cut      = p["cut_loss_price"]
-        pnl_unreal = round((curr - entry) * p["net_shares"], 4)
+        pnl_unreal = round(p.get("realized_revenue", 0.0) + (curr * p["net_shares"]) - p.get("cost", 0.0), 4)
         pct      = round((curr - entry) / (target - entry) * 100, 1) if target != entry else 0
         positions_out[k] = {
             "entry":       round(entry, 4),
@@ -329,6 +338,7 @@ def save_state():
             "is_flip":     p.get("is_flip", False),
             "is_rebound":  p.get("is_rebound", False),
             "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
+            "rebound_tranches": p.get("rebound_tranches", []),
             "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
             "pnl":         pnl_unreal,
             "pct":         max(0, min(100, pct)),
@@ -379,6 +389,9 @@ def save_state():
             "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
             "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
+            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
+            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
+            "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -746,9 +759,32 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     is_oppo = key.endswith("_oppo")
     sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER)
     sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
-    sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
+    if is_rebound:
+        rebound_5x_target = min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE)
+        sell_price = min(rebound_5x_target, REBOUND_FINAL_SELL_PRICE)
+    else:
+        sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
     cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
     cut_loss_price = round(entry_price * cut_loss_pct, 4)
+
+    rebound_first_shares = round(net_shares * REBOUND_FIRST_SELL_FRACTION, 3) if is_rebound else 0.0
+    rebound_final_shares = round(max(net_shares - rebound_first_shares, 0.0), 3) if is_rebound else 0.0
+    rebound_tranches = []
+    if is_rebound:
+        rebound_tranches = [
+            {
+                "name": "5X",
+                "target": min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE),
+                "shares": rebound_first_shares,
+                "sold": False,
+            },
+            {
+                "name": "FINAL",
+                "target": REBOUND_FINAL_SELL_PRICE,
+                "shares": rebound_final_shares,
+                "sold": False,
+            },
+        ]
 
     open_positions[key] = {
         "token_id":             token_id,
@@ -762,6 +798,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "realized_revenue":     0.0,
         "is_flip":              is_flip,
         "is_rebound":           is_rebound,
+        "rebound_tranches":     rebound_tranches,
         "force_stop_triggered": None,
         "force_stop_cooldown":  None,
         "force_stop_spread_retries": 0,
@@ -778,6 +815,74 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f (%.0f%%)",
         tag, key, entry_price, net_shares, sell_price, cut_loss_price, cut_loss_pct * 100,
     )
+    if is_rebound:
+        log.info(
+            "[REBOUND-TARGETS] %s  %.0f%% @ %.4f  %.0f%% @ %.4f",
+            key, REBOUND_FIRST_SELL_FRACTION * 100, rebound_tranches[0]["target"],
+            (1 - REBOUND_FIRST_SELL_FRACTION) * 100, rebound_tranches[1]["target"],
+        )
+
+
+
+def update_rebound_sell_price(pos):
+    unsold_targets = [
+        float(t["target"]) for t in pos.get("rebound_tranches", [])
+        if not t.get("sold") and float(t.get("shares", 0.0)) >= MIN_SELL_SHARES
+    ]
+    if unsold_targets:
+        pos["sell_price"] = min(unsold_targets)
+
+
+def manage_rebound_target_sells(client, key, pos, current_price):
+    for tranche in pos.get("rebound_tranches", []):
+        if tranche.get("sold"):
+            continue
+        target = float(tranche.get("target", 0.0))
+        tranche_shares = round(float(tranche.get("shares", 0.0)), 3)
+        available_shares = round(float(pos.get("net_shares", 0.0)), 3)
+        sell_shares = min(tranche_shares, available_shares)
+
+        if sell_shares < MIN_SELL_SHARES:
+            tranche["sold"] = True
+            continue
+        if current_price < target:
+            continue
+
+        log.info(
+            "[REBOUND-SELL-%s] %s price=%.4f >= target=%.4f selling %.3f/%.3f shares",
+            tranche.get("name", "TRANCHE"), key, current_price, target, sell_shares, available_shares,
+        )
+        pos["closing"] = True
+        sell = market_sell_with_retries(client, pos["token_id"], sell_shares, current_price, key.upper())
+        pos["last_exit_attempt_ts"] = time.time()
+        if not sell["ok"]:
+            pos["closing"] = False
+            log.warning("[REBOUND-SELL-%s] %s sell failed — will retry on next loop", tranche.get("name", "TRANCHE"), key)
+            return False
+
+        filled_shares = round(float(sell.get("filled_shares") or sell_shares), 3)
+        revenue = float(sell.get("filled_quote") or round(filled_shares * current_price, 4))
+        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+        pos["net_shares"] = round(max(available_shares - filled_shares, 0.0), 3)
+        tranche["sold"] = True
+        log.info(
+            "[REBOUND-SELL-%s] %s partial finalized revenue=$%.4f remaining=%.3f",
+            tranche.get("name", "TRANCHE"), key, revenue, pos["net_shares"],
+        )
+
+    pos["closing"] = False
+    update_rebound_sell_price(pos)
+    all_sold = all(t.get("sold") for t in pos.get("rebound_tranches", []))
+    if all_sold or float(pos.get("net_shares", 0.0)) < MIN_SELL_SHARES:
+        pnl = round(pos.get("realized_revenue", 0.0) - pos["cost"], 4)
+        log.info("[REBOUND-SELL] %s finalized  pnl=$%.4f", key, pnl)
+        stats["wins" if pnl > 0 else "losses"] += 1
+        stats["pnl"] += pnl
+        _record_closed_trade(key, pnl)
+        _record_trade_log(key, pos, "REBOUND-SELL", current_price, pnl)
+        return True
+
+    return False
 
 
 def manage_positions(client, server_ts=None):
@@ -802,14 +907,14 @@ def manage_positions(client, server_ts=None):
         cut_loss  = pos["cut_loss_price"]
         is_flip   = pos.get("is_flip", False)
         hold_secs = now - float(pos.get("opened_ts", now))
-        unrealized_revenue = round(current_price * shares, 4)
+        unrealized_revenue = round(pos.get("realized_revenue", 0.0) + (current_price * shares), 4)
         unrealized_pnl = round(unrealized_revenue - pos["cost"], 4)
         server_ts_now = server_ts if server_ts is not None else get_server_time()
         secs_into_now = server_ts_now - get_current_window_start(server_ts_now)
 
         # ── Force sell profitable positions when Binance gap overextends ─────
         gap_hit, actual_gap, force_threshold = force_sell_gap_triggered(key.split("_")[0], secs_into_now)
-        if unrealized_pnl > 0 and gap_hit:
+        if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
             log.info(
                 "[FORCE-SELL] %s  pnl=$%.4f  price=%.4f  gap=%.4f >= force-threshold=%.4f  selling %.3f shares",
                 key, unrealized_pnl, current_price, actual_gap, force_threshold, shares,
@@ -930,6 +1035,12 @@ def manage_positions(client, server_ts=None):
             pos["force_stop_triggered"] = None
             pos["force_stop_cooldown"]  = None
             pos["force_stop_spread_retries"] = 0
+
+        # ── Rebound positions sell in two tranches ───────────────────────────
+        if pos.get("is_rebound"):
+            if manage_rebound_target_sells(client, key, pos, current_price):
+                to_close.append(key)
+            continue
 
         # ── Sell at target ────────────────────────────────────────────────────
         if current_price >= pos["sell_price"]:
@@ -1449,7 +1560,7 @@ def _build_state_snapshot():
         target  = p["sell_price"]
         cut     = p["cut_loss_price"]
         shares  = p["net_shares"]
-        pnl_unreal = round((curr - entry) * shares, 4)
+        pnl_unreal = round(p.get("realized_revenue", 0.0) + (curr * shares) - p.get("cost", 0.0), 4)
         pct = round((curr - entry) / (target - entry) * 100, 1) if target != entry else 0
         positions_out[k] = {
             "entry":     round(entry, 4),
@@ -1458,6 +1569,7 @@ def _build_state_snapshot():
             "cut_loss":  round(cut, 4),
             "is_flip":   p.get("is_flip", False),
             "is_rebound": p.get("is_rebound", False),
+            "rebound_tranches": p.get("rebound_tranches", []),
             "pnl":       pnl_unreal,
             "pct":       max(0, min(100, pct)),
             "opened_at": p.get("opened_at", "—"),
@@ -1526,6 +1638,9 @@ def _build_state_snapshot():
             "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
             "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
+            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
+            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
+            "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -1722,7 +1837,7 @@ function render(s){
   const posCards=Object.entries(pos).map(([k,p])=>{
     const [asset,side]=k.split('_');
     const col=p.current>=p.entry?'green':'red';
-    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
+    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
     const pnlV=p.pnl||0;
     return`<div class="pos-card">
       <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${badges}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
@@ -1887,9 +2002,13 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
-    log.info("  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, stop-buy=%ds, sell=x%.2f",
-             REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP * 100, REBOUND_CUTLOSS_DEAD_ZONE * 100,
-             REBOUND_STOP_BUY_AT, REBOUND_SELL_MULTIPLIER)
+    log.info(
+        "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
+        "stop-buy=%ds, sell %.0f%% at x%.2f and %.0f%% at %.0f¢",
+        REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP * 100, REBOUND_CUTLOSS_DEAD_ZONE * 100,
+        REBOUND_STOP_BUY_AT, REBOUND_FIRST_SELL_FRACTION * 100, REBOUND_SELL_MULTIPLIER,
+        (1 - REBOUND_FIRST_SELL_FRACTION) * 100, REBOUND_FINAL_SELL_PRICE * 100,
+    )
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
