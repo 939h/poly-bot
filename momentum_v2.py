@@ -122,15 +122,15 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
-BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
+BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
+STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
-TREND_GUARD_MIN_CONFIRMATIONS = 2
+TREND_GUARD_MIN_CONFIRMATIONS = 3
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -145,9 +145,9 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 1.0,   # 0–5 min
     "mid":   0.8,   # 5–10 min
-    "late":  0.6,   # 10–15 min
+    "late":  0.5,   # 10–15 min
 }
-GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
@@ -163,20 +163,20 @@ FLIP_MAX       = 0.15   # flip only if opposite <= this
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
-SPREAD_MAX_RETRIES     = 10
-FORCE_STOP_SPREAD_RETRIES = 10
+SPREAD_MAX_RETRIES     = 20
+FORCE_STOP_SPREAD_RETRIES = 20
 COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
-OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
-OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
-OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.30"))
+OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "20.0"))
+OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
+OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.10"))
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
