@@ -83,11 +83,11 @@ class _ColorFormatter(logging.Formatter):
         msg = super().format(record)
         if not COLORS:
             return msg
-        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]")):
+        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]", "[FORCE-GAP-SELL]", "[REBOUND-BUY]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[FORCE-STOP]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[FLIP]",)):
+        if any(t in msg for t in ("[FLIP]", "[REBOUND]")):
             return Fore.CYAN + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[GAP-ALLOW]",)):
             return Fore.GREEN + msg + Style.RESET_ALL
@@ -148,6 +148,7 @@ GAP_WAIT_SECS = 20   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_PRICE     = 0.96   # sell all at this price
+FORCE_SELL_GAP_THRESHOLD = float(os.getenv("FORCE_SELL_GAP_THRESHOLD", "2"))
 CUT_LOSS_PCT   = 0.60   # cut loss if price drops to this fraction of buy price
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 30    # force-stop cooldown 5–10 min
@@ -156,6 +157,11 @@ HOLD_LATE_SECS  = 15    # force-stop cooldown 10–15 min
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.50   # flip only if opposite >= this
 FLIP_MAX       = 0.75   # flip only if opposite <= this
+
+# ── Rebound cut-loss flip ─────────────────────────────────────────────────────
+REBOUND_CUTLOSS_MULTIPLIER = float(os.getenv("REBOUND_CUTLOSS_MULTIPLIER", "1.5"))
+REBOUND_BUY_CAP_PRICE      = float(os.getenv("REBOUND_BUY_CAP_PRICE", "0.40"))
+REBOUND_DISCARD_PRICE      = float(os.getenv("REBOUND_DISCARD_PRICE", "0.05"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.02
@@ -192,6 +198,7 @@ token_cache        = {}   # window_start -> {asset: (yes_tok, no_tok)}
 live_prices        = {}   # "eth_yes" / "eth_no" -> float
 traded_this_window = set()
 gap_wait           = {}   # asset -> {triggered_at, key, token, price}
+rebound_watch      = {}   # asset -> {key, token, low, window_start, spread_retries}
 armed_logged       = False
 
 pnl_history        = []
@@ -243,11 +250,12 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot, rebound_watch
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
+    rebound_watch = {}
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -287,6 +295,7 @@ def save_state():
         "positions":     positions_out,
         "prices":        dict(live_prices),
         "gap":           gap_out,
+        "rebound_watch": dict(rebound_watch),
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
@@ -295,9 +304,13 @@ def save_state():
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell":       SELL_PRICE,
+            "force_sell_gap_threshold": FORCE_SELL_GAP_THRESHOLD,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
+            "rebound_multiplier": REBOUND_CUTLOSS_MULTIPLIER,
+            "rebound_buy_cap": REBOUND_BUY_CAP_PRICE,
+            "rebound_discard": REBOUND_DISCARD_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -615,7 +628,115 @@ def check_gap_guard(asset, secs_into):
 
     return False   # gap too small — wait/block
 
+
+def get_binance_gap(asset):
+    """Return the absolute Binance live-vs-open gap for an asset, or None if unavailable."""
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    if c_open <= 0.0 or c_live is None:
+        return None
+    return abs(c_live - c_open)
+
 # ── Position management ───────────────────────────────────────────────────────
+
+def start_rebound_watch(key, pos, current_price):
+    asset = key.split("_")[0]
+    if current_price < REBOUND_DISCARD_PRICE:
+        log.info(
+            "[REBOUND-DISCARD] %s  price=%.4f below discard=%.4f — no rebound buy",
+            key, current_price, REBOUND_DISCARD_PRICE,
+        )
+        traded_this_window.add(asset)
+        return
+
+    rebound_watch[asset] = {
+        "key":            key,
+        "token":          pos["token_id"],
+        "low":            round(current_price, 4),
+        "window_start":   pos.get("window_start"),
+        "spread_retries": 0,
+    }
+    traded_this_window.add(asset)
+    log.info(
+        "[REBOUND-WATCH] %s  low=%.4f  trigger=>%.4f  buy_cap<%.4f  discard<%.4f",
+        key, current_price, current_price * REBOUND_CUTLOSS_MULTIPLIER,
+        REBOUND_BUY_CAP_PRICE, REBOUND_DISCARD_PRICE,
+    )
+
+
+def process_rebound_watches(client, window_start):
+    for asset in list(rebound_watch.keys()):
+        rw = rebound_watch[asset]
+        if rw.get("window_start") != window_start:
+            log.info("[REBOUND-DISCARD] %s  expired with prior window", rw["key"])
+            del rebound_watch[asset]
+            continue
+
+        key = rw["key"]
+        if key in open_positions:
+            del rebound_watch[asset]
+            continue
+
+        token = rw["token"]
+        current_price = live_prices.get(key)
+        if current_price is None or current_price <= 0:
+            current_price = get_midpoint(client, token)
+        if current_price <= 0:
+            continue
+
+        if current_price < REBOUND_DISCARD_PRICE:
+            log.info(
+                "[REBOUND-DISCARD] %s  price=%.4f below discard=%.4f — no rebound buy",
+                key, current_price, REBOUND_DISCARD_PRICE,
+            )
+            del rebound_watch[asset]
+            continue
+
+        low = rw.get("low", current_price)
+        if current_price < low:
+            rw["low"] = round(current_price, 4)
+            low = current_price
+            log.info("[REBOUND-LOW] %s  new low=%.4f", key, low)
+            continue
+
+        trigger_price = low * REBOUND_CUTLOSS_MULTIPLIER
+        if current_price > trigger_price:
+            if current_price >= REBOUND_BUY_CAP_PRICE:
+                log.info(
+                    "[REBOUND-DISCARD] %s  price=%.4f reached buy cap=%.4f — no rebound buy",
+                    key, current_price, REBOUND_BUY_CAP_PRICE,
+                )
+                del rebound_watch[asset]
+                continue
+
+            spread = get_spread_value(client, token)
+            if spread is not None and spread > MAX_BOOK_SPREAD:
+                rw["spread_retries"] = rw.get("spread_retries", 0) + 1
+                if rw["spread_retries"] < SPREAD_MAX_RETRIES:
+                    log.info(
+                        "[REBOUND-SPREAD-WAIT] %s  spread=%.4f  retry %d/%d",
+                        key, spread, rw["spread_retries"], SPREAD_MAX_RETRIES,
+                    )
+                    continue
+                log.info("[REBOUND-DISCARD] %s  spread still wide — no rebound buy", key)
+                del rebound_watch[asset]
+                continue
+
+            log.info(
+                "[REBOUND-BUY] %s  price=%.4f rebounded from low=%.4f by %.2fx",
+                key, current_price, low, current_price / low if low > 0 else 0,
+            )
+            buy = market_buy(client, token, f"{asset.upper()}-{key.split('_')[1].upper()}-REBOUND",
+                             price_hint=current_price)
+            del rebound_watch[asset]
+            if buy["ok"]:
+                entry_px = float(buy.get("filled_price") or current_price)
+                open_position(key, token, entry_px,
+                              filled_shares=buy.get("filled_shares"),
+                              window_start=window_start,
+                              is_flip=True)
+                live_prices[key] = current_price
+
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False):
     if filled_shares is not None and filled_shares > 0:
@@ -667,6 +788,33 @@ def manage_positions(client, server_ts=None):
         shares    = pos["net_shares"]
         cut_loss  = pos["cut_loss_price"]
         is_flip   = pos.get("is_flip", False)
+        asset     = key.split("_")[0]
+        unrealized_pnl = round((current_price - entry) * shares, 4)
+        binance_gap = get_binance_gap(asset)
+
+        # ── Force sell on profit + large Binance gap ──────────────────────────
+        if (
+            unrealized_pnl > 0
+            and binance_gap is not None
+            and binance_gap > FORCE_SELL_GAP_THRESHOLD
+        ):
+            log.info(
+                "[FORCE-GAP-SELL] %s  pnl=$%.4f  binance_gap=%.4f > threshold=%.4f  selling %d shares",
+                key, unrealized_pnl, binance_gap, FORCE_SELL_GAP_THRESHOLD, shares,
+            )
+            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            pos["last_exit_attempt_ts"] = time.time()
+            if sell["ok"]:
+                revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                log.info("[FORCE-GAP-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                stats["wins" if pnl > 0 else "losses"] += 1
+                stats["pnl"] += pnl
+                _record_closed_trade(key, pnl)
+                _record_trade_log(key, pos, "FORCE-GAP-SELL", current_price, pnl)
+                to_close.append(key)
+            continue
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
         if current_price <= cut_loss and not is_flip:
@@ -717,36 +865,8 @@ def manage_positions(client, server_ts=None):
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
                 to_close.append(key)
 
-                # ── Flip to opposite side ─────────────────────────────────────
-                asset = key.split("_")[0]
-                side  = key.split("_")[1]
-                if asset not in traded_this_window:
-                    opp_side = "no" if side == "yes" else "yes"
-                    opp_key  = f"{asset}_{opp_side}"
-                    tokens   = token_cache.get(pos.get("window_start"), {}).get(asset)
-                    if tokens:
-                        opp_token = tokens[1] if opp_side == "no" else tokens[0]
-                        opp_price = get_midpoint(client, opp_token)
-                        if FLIP_MIN <= opp_price <= FLIP_MAX:
-                            log.info("[FLIP] %s → buying %s @ %.4f", asset.upper(), opp_side.upper(), opp_price)
-                            buy = market_buy(client, opp_token, f"{asset.upper()}-{opp_side.upper()}-FLIP",
-                                            price_hint=opp_price)
-                            if buy["ok"]:
-                                entry_px = float(buy.get("filled_price") or opp_price)
-                                open_position(opp_key, opp_token, entry_px,
-                                              filled_shares=buy.get("filled_shares"),
-                                              window_start=pos.get("window_start"),
-                                              is_flip=True)
-                                traded_this_window.add(asset)
-                                live_prices[opp_key] = opp_price
-                        else:
-                            log.info("[FLIP] %s skipped — %s @ %.4f outside %.2f–%.2f",
-                                     asset.upper(), opp_side.upper(), opp_price, FLIP_MIN, FLIP_MAX)
-                            traded_this_window.add(asset)
-                    else:
-                        traded_this_window.add(asset)
-                else:
-                    log.info("[FLIP] %s skipped — already flipped this window", asset.upper())
+                # ── Rebound cut-loss flip — watch same side for a bounce ───────
+                start_rebound_watch(key, pos, current_price)
             continue
 
         # Price recovered — reset cooldown
@@ -852,6 +972,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         else:
             _skip_first_window = False
             log.info("[SKIP-WINDOW] Clean window started — gap guard active")
+
+    # ── Advance rebound cut-loss watches ──────────────────────────────────────
+    process_rebound_watches(client, window_start)
 
     # ── Advance gap_wait — check if gap has widened ───────────────────────────
     for asset in list(gap_wait.keys()):
@@ -1023,14 +1146,19 @@ def _build_state_snapshot():
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
+        "rebound_watch": dict(rebound_watch),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell":       SELL_PRICE,
+            "force_sell_gap_threshold": FORCE_SELL_GAP_THRESHOLD,
             "cut_loss":   CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
+            "rebound_multiplier": REBOUND_CUTLOSS_MULTIPLIER,
+            "rebound_buy_cap": REBOUND_BUY_CAP_PRICE,
+            "rebound_discard": REBOUND_DISCARD_PRICE,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -1147,9 +1275,9 @@ function tlToggle(){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','FORCE-GAP-SELL':'#24150a','CUT-LOSS':'#2a0d0d'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','FORCE-GAP-SELL':'#f59e0b','CUT-LOSS':'#f87171'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','FORCE-GAP-SELL':'#7c4a03','CUT-LOSS':'#5c1d1d'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -1290,8 +1418,11 @@ function render(s){
       <h2>Settings</h2>
       <table><tbody>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell at</td><td>${(cfg.sell||0.99)*100|0}¢</td></tr>
-        <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
-        <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
+        <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Force sell gap</td><td>${cfg.force_sell_gap_threshold ?? 2}</td></tr>
+        <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
+        <tr><td>Rebound flip</td><td>&gt;${cfg.rebound_multiplier ?? 1.5}x from low</td><td>Buy cap</td><td>&lt;${fmt(cfg.rebound_buy_cap ?? 0.4)}</td></tr>
+        <tr><td>Discard below</td><td>${fmt(cfg.rebound_discard ?? 0.05)}</td><td></td><td></td></tr>
+        <tr><td>Poll</td><td>${cfg.poll||2}s</td><td></td><td></td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
       </tbody></table>
     </div>
@@ -1380,6 +1511,9 @@ def main():
              SELL_PRICE*100, CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
+    log.info("  Force gap sell: pnl > $0 and Binance gap > %.4f", FORCE_SELL_GAP_THRESHOLD)
+    log.info("  Rebound flip: buy same side after >%.2fx rebound below %.4f; discard below %.4f",
+             REBOUND_CUTLOSS_MULTIPLIER, REBOUND_BUY_CAP_PRICE, REBOUND_DISCARD_PRICE)
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
@@ -1412,6 +1546,7 @@ def main():
                 live_prices.clear()
                 traded_this_window.clear()
                 gap_wait.clear()
+                rebound_watch.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
