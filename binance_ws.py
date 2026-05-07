@@ -8,7 +8,7 @@ Tracks candle open price, live close price, and 15m MACD histogram per asset.
 Exports:
     candle_open   — dict {asset: float}  open price of current 15m candle
     live_close    — dict {asset: float|None}  latest tick close price
-    macd_histogram — dict {asset: tuple(prev_hist, curr_hist)|None}
+    macd_histogram — dict {asset: tuple(prior_hist, prev_hist, curr_hist)|None}
     get_macd_histogram(asset) — thread-safe MACD histogram lookup
     start_rsi_feed() — call once on startup
 
