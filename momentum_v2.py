@@ -126,7 +126,7 @@ BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "2"))   # USDC per trade
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.30   # buy if price >= this
-BUY_PRICE_MAX  = 0.40   # buy if price <= this
+BUY_PRICE_MAX  = 0.60   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 780    # seconds into window after which no new buys (13 min)
 TREND_GUARD_PRICE = 0.70
@@ -143,9 +143,9 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 1.0,   # 0–5 min
-    "mid":   0.8,   # 5–10 min
-    "late":  0.6,   # 10–15 min
+    "early": 0.5,   # 0–5 min
+    "mid":   0.4,   # 5–10 min
+    "late":  0.3,   # 10–15 min
 }
 GAP_WAIT_SECS = 25   # wait this long for gap to widen before blacklisting
 
