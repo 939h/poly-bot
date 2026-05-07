@@ -152,7 +152,7 @@ GAP_WAIT_SECS = 10   # wait this long for gap to widen before blacklisting
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = 0.65   # if put 0.65, means cutloss >-35%
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.65"))   # if 0.65, cut loss at 65% of entry
 HOLD_EARLY_SECS = 10    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 1    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 1    # force-stop cooldown 10–15 min
@@ -176,6 +176,7 @@ OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "3.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.99"))
+OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.70"))
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
@@ -296,6 +297,8 @@ def save_state():
             "target":      round(target, 4),
             "cut_loss":    round(cut, 4),
             "is_flip":     p.get("is_flip", False),
+            "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
+            "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
             "pnl":         pnl_unreal,
             "pct":         max(0, min(100, pct)),
             "opened_at":   p.get("opened_at", "—"),
@@ -336,6 +339,7 @@ def save_state():
             "sell_multiplier": SELL_MULTIPLIER,
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
+            "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "order":      BUY_AMOUNT,
@@ -675,13 +679,16 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else SELL_MULTIPLIER
     sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
     sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
-    cut_loss_price = round(entry_price * CUT_LOSS_PCT, 4)
+    cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
+    cut_loss_price = round(entry_price * cut_loss_pct, 4)
 
     open_positions[key] = {
         "token_id":             token_id,
         "entry_price":          entry_price,
         "sell_price":           sell_price,
         "cut_loss_price":       cut_loss_price,
+        "cut_loss_pct":         cut_loss_pct,
+        "is_oppo":              is_oppo,
         "net_shares":           net_shares,
         "cost":                 round(BUY_AMOUNT, 4),
         "realized_revenue":     0.0,
@@ -699,8 +706,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     stats["buys"] += 1
     tag = "FLIP " if is_flip else ""
     log.info(
-        "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f",
-        tag, key, entry_price, net_shares, sell_price, cut_loss_price,
+        "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f (%.0f%%)",
+        tag, key, entry_price, net_shares, sell_price, cut_loss_price, cut_loss_pct * 100,
     )
 
 
@@ -1329,6 +1336,7 @@ def _build_state_snapshot():
             "sell_multiplier": SELL_MULTIPLIER,
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
+            "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "order":      BUY_AMOUNT,
@@ -1512,7 +1520,7 @@ function render(s){
     const inZone=p=>p!=null&&p>=cfg.buy_min&&p<=cfg.buy_max;
     const yc=inZone(yp)?'green':'';
     const nc=inZone(np)?'green':'';
-    const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':''].filter(Boolean).join(' ');
+    const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':'',(a+'_yes_oppo' in pos)?'<span class="amber">YES OPPO</span>':'',(a+'_no_oppo' in pos)?'<span class="amber">NO OPPO</span>':''].filter(Boolean).join(' ');
     const stAsset=assetStatus[a]||{};
     const isBlacklisted=stAsset.blacklisted===true || normalBlacklisted.has(a);
     const isTrendGuarded=stAsset.trend_guarded===true || trendGuarded.has(a);
@@ -1527,15 +1535,15 @@ function render(s){
   const posCards=Object.entries(pos).map(([k,p])=>{
     const [asset,side]=k.split('_');
     const col=p.current>=p.entry?'green':'red';
-    const flipBadge=p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'';
+    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
     const pnlV=p.pnl||0;
     return`<div class="pos-card">
-      <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${flipBadge}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
+      <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${badges}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
       <div style="display:flex;gap:16px;font-size:13px;flex-wrap:wrap">
         <span><span class="dim">entry</span> <strong>${fmt(p.entry)}</strong></span>
         <span><span class="dim">current</span> <strong class="${col}">${fmt(p.current)}</strong></span>
         <span><span class="dim">sell @</span> <strong class="green">${fmt(p.target,2)}</strong></span>
-        <span><span class="dim">cut @</span> <strong class="red">${fmt(p.cut_loss)}</strong></span>
+        <span><span class="dim">cut @</span> <strong class="red">${fmt(p.cut_loss)}</strong> <span class="dim">(${((p.cut_loss_pct||cfg.cut_loss||0)*100).toFixed(0)}%)</span></span>
       </div>
       <div class="bar-bg"><div class="bar-fill" style="width:${p.pct||0}%;background:${p.current>=p.entry?'#1db87a':'#e24b4a'}"></div></div>
       <div class="pos-meta">
@@ -1599,7 +1607,7 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table><tbody>
-        <tr><td>Cut loss</td><td>${((cfg.cut_loss||0.6)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
+        <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
@@ -1684,10 +1692,10 @@ def main():
     log.info("=" * 55)
     log.info("  FreshBot23  [%s]", mode)
     log.info("  Assets : %s", ", ".join(a.upper() for a in ASSETS))
-    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=x%.2f (cap %.0f¢)  cut-loss=%.0f%%",
+    log.info("  Buy zone: %.0f–%.0f¢  entry %d–%ds  sell=x%.2f (cap %.0f¢)  cut-loss=%.0f%%  oppo-cut-loss=%.0f%%",
              BUY_PRICE_MIN*100, BUY_PRICE_MAX*100,
              ENTRY_AFTER, STOP_BUY_AT,
-             SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100)
+             SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100, OPPO_CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
