@@ -1,5 +1,5 @@
 """
-Polymarket 15-Min Up/Down Bot — fresh_bot23
+Polymarket 15-Min Up/Down Bot — momentum bot v3
 ============================================
 Strategy:
   Buy YES or NO when price hits BUY_PRICE_MIN–BUY_PRICE_MAX between
@@ -83,11 +83,11 @@ class _ColorFormatter(logging.Formatter):
         msg = super().format(record)
         if not COLORS:
             return msg
-        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]")):
+        if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]", "[FORCE-SELL]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[FORCE-STOP]", "[FORCE-SELL]", "[REBOUND-DEAD]", "[REBOUND-CAP]")):
+        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[REBOUND-DEAD]", "[REBOUND-CAP]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[FLIP]", "[REBOUND-FLIP]")):
+        if any(t in msg for t in ("[FLIP]", "[REBOUND-FLIP]",  "[FORCE-STOP]")):
             return Fore.CYAN + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[GAP-ALLOW]",)):
             return Fore.GREEN + msg + Style.RESET_ALL
