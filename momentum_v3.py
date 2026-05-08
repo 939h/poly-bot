@@ -261,7 +261,7 @@ normal_blacklisted_assets = set()  # assets blacklisted for normal buys this win
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 rebound_cutloss_tracker = {}       # key asset_side -> rebound tracking state after cut-loss
-
+last_rebound_flip_log = 0
 pnl_history        = []
 asset_history      = {}
 trade_log          = []
@@ -1017,6 +1017,8 @@ def manage_positions(client, server_ts=None):
                         "window_start": pos.get("window_start"),
                         "armed_at": time.time(),
                     }
+                now = time.time()
+                    if now - last_rebound_flip_log >= 3.0:
                     log.info(
                         "[REBOUND-FLIP] %s armed  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
                         key, current_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
