@@ -1018,7 +1018,7 @@ def manage_positions(client, server_ts=None):
                         "armed_at": time.time(),
                     }
                 now = time.time()
-                    if now - last_rebound_flip_log >= 3.0:
+                if now - last_rebound_flip_log >= 3.0:
                     log.info(
                         "[REBOUND-FLIP] %s armed  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
                         key, current_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
