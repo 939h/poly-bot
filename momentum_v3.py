@@ -123,6 +123,7 @@ ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
+REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
@@ -211,6 +212,8 @@ gap_mag_vol = 1.0
 
 def validate_settings():
     errors = []
+    if REBOUND_BUY_AMOUNT <= 0:
+        errors.append("REBOUND_BUY_AMOUNT must be > 0")
     if FORCE_SELL_GAP_MULT <= 0:
         errors.append("FORCE_SELL_GAP_MULT must be > 0")
     if REBOUND_CUTLOSS_MULT <= 1.0:
@@ -261,7 +264,7 @@ normal_blacklisted_assets = set()  # assets blacklisted for normal buys this win
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 rebound_cutloss_tracker = {}       # key asset_side -> rebound tracking state after cut-loss
-last_rebound_flip_log = 0
+
 pnl_history        = []
 asset_history      = {}
 trade_log          = []
@@ -343,6 +346,7 @@ def save_state():
             "pnl":         pnl_unreal,
             "pct":         max(0, min(100, pct)),
             "opened_at":   p.get("opened_at", "—"),
+            "rebound_buy_amount": REBOUND_BUY_AMOUNT,
         }
     gap_out = {}
     gap_threshold_out = {}
@@ -561,8 +565,8 @@ def get_spread_value(client, token_id):
         return None
 
 
-def market_buy(client, token_id, label, price_hint=None):
-    amount = round(BUY_AMOUNT, 4)
+def market_buy(client, token_id, label, price_hint=None, amount=None):
+    amount = round(amount if amount is not None else BUY_AMOUNT, 4)
     def _estimate_buy_shares(entry_price):
         if entry_price <= 0:
             return 0.0
@@ -749,11 +753,13 @@ def force_sell_gap_triggered(asset, secs_into):
 
 # ── Position management ───────────────────────────────────────────────────────
 
-def open_position(key, token_id, entry_price, filled_shares=None, window_start=None, is_flip=False, is_rebound=False):
+def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
+                  is_flip=False, is_rebound=False, buy_amount=None):
+    amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
-        gross_shares = BUY_AMOUNT / entry_price if entry_price > 0 else 0.0
+        gross_shares = amount / entry_price if entry_price > 0 else 0.0
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
     is_oppo = key.endswith("_oppo")
@@ -794,7 +800,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "cut_loss_pct":         cut_loss_pct,
         "is_oppo":              is_oppo,
         "net_shares":           net_shares,
-        "cost":                 round(BUY_AMOUNT, 4),
+        "cost":                 round(amount, 4),
         "realized_revenue":     0.0,
         "is_flip":              is_flip,
         "is_rebound":           is_rebound,
@@ -1017,8 +1023,6 @@ def manage_positions(client, server_ts=None):
                         "window_start": pos.get("window_start"),
                         "armed_at": time.time(),
                     }
-                now = time.time()
-                if now - last_rebound_flip_log >= 3.0:
                     log.info(
                         "[REBOUND-FLIP] %s armed  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
                         key, current_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
@@ -1258,7 +1262,7 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
             "[REBOUND-FLIP] %s buying after rebound %.3fx from trough %.4f @ %.4f",
             key, rebound_ratio, trough, current_price,
         )
-        buy = market_buy(client, token, label, price_hint=current_price)
+        buy = market_buy(client, token, label, price_hint=current_price, amount=REBOUND_BUY_AMOUNT)
         if buy["ok"]:
             entry_px = float(buy.get("filled_price") or current_price)
             open_position(
@@ -1267,6 +1271,7 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
                 window_start=window_start,
                 is_flip=True,
                 is_rebound=True,
+                buy_amount=REBOUND_BUY_AMOUNT,
             )
             flipped_this_window.add(asset)
             traded_this_window.add(asset)
