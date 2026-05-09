@@ -133,7 +133,7 @@ BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
-TREND_GUARD_MIN_CONFIRMATIONS = 3
+TREND_GUARD_MIN_CONFIRMATIONS = 2
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -155,7 +155,7 @@ GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.65"))   # if 0.65, cut loss at 65% of entry
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.60"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
@@ -1325,7 +1325,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             skip_log_window = window_start
         return
 
-    advance_rebound_cutloss_tracker(client, window_start)
 
     # ── Startup window skip ───────────────────────────────────────────────────
     if _skip_first_window:
