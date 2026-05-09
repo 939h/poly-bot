@@ -1693,7 +1693,7 @@ def _build_state_snapshot():
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fresh Bot 23</title>
+<ttitleMomentum v3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#0f1117;color:#e8edf5;font-size:14px;padding:20px}
@@ -1957,7 +1957,7 @@ function render(s){
       </tbody></table>
     </div>
 
-    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; FreshBot23</footer>`;
+    <footer>Auto-refreshes every 2s &nbsp;&mdash;&nbsp; FreshBot23</footer>`;
 
   const wrap=document.getElementById('chartWrap');
   if(wrap)drawChart(pnlHist,wrap);
@@ -1977,7 +1977,7 @@ async function poll(){
   try{const r=await fetch('/state');const d=await r.json();render(d);}
   catch(e){console.error('fetch error',e);}
 }
-poll();setInterval(poll,5000);
+poll();setInterval(poll,2000);
 </script></body></html>"""
 
 
