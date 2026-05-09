@@ -185,21 +185,21 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
-OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
+OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.30"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.4"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.10"))
-OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
+OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.4"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
 WINDOW_SECS            = 900
-HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "240"))
+HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "400"))
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
 TRADING_WINDOWS_ENABLED = False
