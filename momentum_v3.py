@@ -1159,7 +1159,7 @@ def _volatility_check(asset, secs_into):
     peak        = peak_gap.get(asset, 0.0)
     if peak <= 0:
         return False   # no peak recorded yet → allow
-    if current_gap <= peak * 0.40:
+    if current_gap <= peak * 0.80:
         log.info(
             "[VOL-BLOCK] %s  current_gap=%.4f  peak_gap=%.4f  drop=%.1f%%"
             " — gap collapsed, blacklisting",
@@ -1171,7 +1171,7 @@ def _volatility_check(asset, secs_into):
 
 def _extreme_gap_skip_triggered(secs_into):
     """
-    Returns True if any asset has gap > (threshold * 8).
+    Returns True if any asset has gap > (threshold * 15).
     Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
     use the staged GAP_MAGNITUDE values.
     """
@@ -1184,9 +1184,9 @@ def _extreme_gap_skip_triggered(secs_into):
         swing = GAP_SWING.get(asset, 0.001)
         threshold = c_open * swing * gap_mag_vol
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 8:
+        if actual_gap > threshold * 15:
             log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f",
-                        asset.upper(), actual_gap, threshold * 8)
+                        asset.upper(), actual_gap, threshold * 15)
             return True
     return False
 
