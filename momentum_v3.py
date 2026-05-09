@@ -150,7 +150,11 @@ GAP_MAGNITUDE = {
     "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
-GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = {
+    "early": 300,
+    "mid": 60,
+    "late": 30,
+}   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
@@ -699,12 +703,7 @@ def check_gap_guard(asset, secs_into):
         log.debug("[GAP-GUARD] %s data not ready — allowing by default", asset.upper())
         return True   # allow when data unavailable
 
-    if secs_into < 300:
-        stage = "early"
-    elif secs_into < 600:
-        stage = "mid"
-    else:
-        stage = "late"
+    stage = get_stage(secs_into)
 
     swing     = GAP_SWING.get(asset, 0.001)
     magnitude = GAP_MAGNITUDE[stage]
@@ -730,13 +729,16 @@ def get_gap_threshold(asset, secs_into, multiplier=1.0):
     c_open = candle_open.get(asset, 0.0)
     if c_open <= 0.0:
         return None
-    if secs_into < 300:
-        stage = "early"
-    elif secs_into < 600:
-        stage = "mid"
-    else:
-        stage = "late"
+    stage = get_stage(secs_into)
     return c_open * GAP_SWING.get(asset, 0.001) * GAP_MAGNITUDE[stage] * multiplier
+
+
+def get_stage(secs_into):
+    if secs_into < 300:
+        return "early"
+    if secs_into < 600:
+        return "mid"
+    return "late"
 
 
 def get_binance_gap(asset):
@@ -1388,7 +1390,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 traded_this_window.add(asset)
             continue
 
-        if elapsed >= GAP_WAIT_SECS:
+        wait_secs = GAP_WAIT_SECS[get_stage(secs_into)]
+        if elapsed >= wait_secs:
             log.info("[GAP-BLOCK] %s  gap still too small after %.1fs — blacklisted (normal-buy only)",
                      asset.upper(), elapsed)
             normal_blacklisted_assets.add(asset)
@@ -1551,8 +1554,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 "price":         triggered_price,
                 "spread_retries": 0,
             }
+            wait_secs = GAP_WAIT_SECS[get_stage(secs_into)]
             log.info("[GAP-WAIT] %s  gap too small — waiting %.0fs for momentum  price=%.4f",
-                     asset.upper(), GAP_WAIT_SECS, triggered_price)
+                     asset.upper(), wait_secs, triggered_price)
 
 # ── Status ────────────────────────────────────────────────────────────────────
 
@@ -2026,7 +2030,7 @@ def main():
         REBOUND_STOP_BUY_AT, REBOUND_FIRST_SELL_FRACTION * 100, REBOUND_SELL_MULTIPLIER,
         (1 - REBOUND_FIRST_SELL_FRACTION) * 100, REBOUND_FINAL_SELL_PRICE * 100,
     )
-    log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
+    log.info("  Gap guard: swing=%s  magnitude=%s  wait=%s",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
 
