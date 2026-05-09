@@ -159,7 +159,7 @@ GAP_WAIT_SECS = {
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.60"))   # if 0.65, u loss 35%
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.35"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
