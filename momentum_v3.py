@@ -1325,7 +1325,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             skip_log_window = window_start
         return
 
-    advance_rebound_cutloss_tracker(client, window_start)
+    advance_simulated_normal_entries(client, window_start)
+    advance_rebound_cutloss_tracker(client, window_start, secs_into)
 
     # ── Startup window skip ───────────────────────────────────────────────────
     if _skip_first_window:
