@@ -25,6 +25,7 @@ Requirements:
     POLY_API_PASSPHRASE=...
     POLY_FUNDER_ADDRESS=0x...
     DRY_RUN=true
+    SIMULATE_NORMAL_BUY_ONLY=false
     BUY_AMOUNT=2
 """
 
@@ -122,16 +123,17 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
+SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
-ENTRY_AFTER    = 300    # seconds into window before buying allowed (5 min)
+ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
-TREND_GUARD_MIN_CONFIRMATIONS = 3
+TREND_GUARD_MIN_CONFIRMATIONS = 2
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -144,8 +146,8 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 1.0,   # 0–5 min
-    "mid":   0.8,   # 5–10 min
+    "early": 0.8,   # 0–5 min
+    "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
 GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
@@ -153,7 +155,7 @@ GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.65"))   # if 0.65, cut loss at 65% of entry
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.60"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
@@ -172,7 +174,7 @@ REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
 REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
-MAX_BOOK_SPREAD        = 0.02
+MAX_BOOK_SPREAD        = 0.03
 SPREAD_MAX_RETRIES     = 20
 FORCE_STOP_SPREAD_RETRIES = 20
 COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
@@ -565,7 +567,7 @@ def get_spread_value(client, token_id):
         return None
 
 
-def market_buy(client, token_id, label, price_hint=None, amount=None):
+def market_buy(client, token_id, label, price_hint=None, amount=None, simulate=False):
     amount = round(amount if amount is not None else BUY_AMOUNT, 4)
     def _estimate_buy_shares(entry_price):
         if entry_price <= 0:
@@ -574,13 +576,14 @@ def market_buy(client, token_id, label, price_hint=None, amount=None):
         # Polymarket buy fees are collected in shares: fee = C * r * p * (1 - p).
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         return round(max(gross_shares - fee_shares, 0.0), 3)
-    if DRY_RUN:
+    if DRY_RUN or simulate:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
         est_shares = _estimate_buy_shares(entry_est)
-        log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
-                 label, amount, est_shares, entry_est)
+        mode = "DRY-RUN" if DRY_RUN else "SIM-NORMAL-BUY"
+        log.info("[%s] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
+                 mode, label, amount, est_shares, entry_est)
         return {
-            "ok": True, "resp": {"dry_run": True},
+            "ok": True, "resp": {"dry_run": DRY_RUN, "simulated": simulate},
             "filled_shares": est_shares,
             "filled_price": float(entry_est),
         }
@@ -1144,7 +1147,7 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
   
 def _volatility_check(asset, secs_into):
     """
-    Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
+    Returns True → gap dropped ≥80% from peak → blacklist, skip buy.
     Returns False → gap healthy, allow buy.
     If no peak data yet → allow (safe fallback).
     """
@@ -1156,7 +1159,7 @@ def _volatility_check(asset, secs_into):
     peak        = peak_gap.get(asset, 0.0)
     if peak <= 0:
         return False   # no peak recorded yet → allow
-    if current_gap <= peak * 0.40:
+    if current_gap <= peak * 0.20:
         log.info(
             "[VOL-BLOCK] %s  current_gap=%.4f  peak_gap=%.4f  drop=%.1f%%"
             " — gap collapsed, blacklisting",
@@ -1168,7 +1171,7 @@ def _volatility_check(asset, secs_into):
 
 def _extreme_gap_skip_triggered(secs_into):
     """
-    Returns True if any asset has gap > (threshold * 8).
+    Returns True if any asset has gap > (threshold * 15).
     Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
     use the staged GAP_MAGNITUDE values.
     """
@@ -1181,9 +1184,9 @@ def _extreme_gap_skip_triggered(secs_into):
         swing = GAP_SWING.get(asset, 0.001)
         threshold = c_open * swing * gap_mag_vol
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 8:
+        if actual_gap > threshold * 15:
             log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f",
-                        asset.upper(), actual_gap, threshold * 8)
+                        asset.upper(), actual_gap, threshold * 15)
             return True
     return False
 
@@ -1322,7 +1325,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             skip_log_window = window_start
         return
 
-    advance_rebound_cutloss_tracker(client, window_start)
 
     # ── Startup window skip ───────────────────────────────────────────────────
     if _skip_first_window:
@@ -1373,7 +1375,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 del gap_wait[asset]
                 continue
 
-            buy = market_buy(client, token, label, price_hint=price)
+            buy = market_buy(
+                client, token, label, price_hint=price,
+                simulate=SIMULATE_NORMAL_BUY_ONLY,
+            )
             del gap_wait[asset]
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or price)
@@ -1527,7 +1532,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                          triggered_key, spread, MAX_BOOK_SPREAD)
                 continue
             label = f"{asset.upper()}-{triggered_key.split('_')[1].upper()}"
-            buy = market_buy(client, triggered_token, label, price_hint=triggered_price)
+            buy = market_buy(
+                client, triggered_token, label, price_hint=triggered_price,
+                simulate=SIMULATE_NORMAL_BUY_ONLY,
+            )
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or triggered_price)
                 open_position(triggered_key, triggered_token, entry_px,
