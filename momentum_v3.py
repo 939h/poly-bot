@@ -146,8 +146,8 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 1.0,   # 0–5 min
-    "mid":   0.8,   # 5–10 min
+    "early": 0.8,   # 0–5 min
+    "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
 GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
