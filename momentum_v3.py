@@ -174,7 +174,7 @@ REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
 REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
-MAX_BOOK_SPREAD        = 0.02
+MAX_BOOK_SPREAD        = 0.03
 SPREAD_MAX_RETRIES     = 20
 FORCE_STOP_SPREAD_RETRIES = 20
 COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
