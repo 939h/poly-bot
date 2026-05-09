@@ -1147,7 +1147,7 @@ def _trend_guard_ok(trigger_asset, trigger_side, results):
   
 def _volatility_check(asset, secs_into):
     """
-    Returns True → gap dropped ≥60% from peak → blacklist, skip buy.
+    Returns True → gap dropped ≥80% from peak → blacklist, skip buy.
     Returns False → gap healthy, allow buy.
     If no peak data yet → allow (safe fallback).
     """
@@ -1159,7 +1159,7 @@ def _volatility_check(asset, secs_into):
     peak        = peak_gap.get(asset, 0.0)
     if peak <= 0:
         return False   # no peak recorded yet → allow
-    if current_gap <= peak * 0.80:
+    if current_gap <= peak * 0.20:
         log.info(
             "[VOL-BLOCK] %s  current_gap=%.4f  peak_gap=%.4f  drop=%.1f%%"
             " — gap collapsed, blacklisting",
