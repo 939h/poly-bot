@@ -131,7 +131,7 @@ REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # 
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
