@@ -25,6 +25,7 @@ Requirements:
     POLY_API_PASSPHRASE=...
     POLY_FUNDER_ADDRESS=0x...
     DRY_RUN=true
+    SIMULATE_NORMAL_BUY_ONLY=false
     BUY_AMOUNT=2
 """
 
@@ -122,6 +123,7 @@ log = logging.getLogger(__name__)
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
+SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
@@ -565,7 +567,7 @@ def get_spread_value(client, token_id):
         return None
 
 
-def market_buy(client, token_id, label, price_hint=None, amount=None):
+def market_buy(client, token_id, label, price_hint=None, amount=None, simulate=False):
     amount = round(amount if amount is not None else BUY_AMOUNT, 4)
     def _estimate_buy_shares(entry_price):
         if entry_price <= 0:
@@ -574,13 +576,14 @@ def market_buy(client, token_id, label, price_hint=None, amount=None):
         # Polymarket buy fees are collected in shares: fee = C * r * p * (1 - p).
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         return round(max(gross_shares - fee_shares, 0.0), 3)
-    if DRY_RUN:
+    if DRY_RUN or simulate:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
         est_shares = _estimate_buy_shares(entry_est)
-        log.info("[DRY-RUN] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
-                 label, amount, est_shares, entry_est)
+        mode = "DRY-RUN" if DRY_RUN else "SIM-NORMAL-BUY"
+        log.info("[%s] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
+                 mode, label, amount, est_shares, entry_est)
         return {
-            "ok": True, "resp": {"dry_run": True},
+            "ok": True, "resp": {"dry_run": DRY_RUN, "simulated": simulate},
             "filled_shares": est_shares,
             "filled_price": float(entry_est),
         }
@@ -1373,7 +1376,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 del gap_wait[asset]
                 continue
 
-            buy = market_buy(client, token, label, price_hint=price)
+            buy = market_buy(
+                client, token, label, price_hint=price,
+                simulate=SIMULATE_NORMAL_BUY_ONLY,
+            )
             del gap_wait[asset]
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or price)
@@ -1527,7 +1533,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                          triggered_key, spread, MAX_BOOK_SPREAD)
                 continue
             label = f"{asset.upper()}-{triggered_key.split('_')[1].upper()}"
-            buy = market_buy(client, triggered_token, label, price_hint=triggered_price)
+            buy = market_buy(
+                client, triggered_token, label, price_hint=triggered_price,
+                simulate=SIMULATE_NORMAL_BUY_ONLY,
+            )
             if buy["ok"]:
                 entry_px = float(buy.get("filled_price") or triggered_price)
                 open_position(triggered_key, triggered_token, entry_px,
