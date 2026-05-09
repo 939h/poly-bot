@@ -1411,9 +1411,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
         wait_secs = GAP_WAIT_SECS[get_stage(secs_into)]
         if elapsed >= wait_secs:
-            log.info("[GAP-BLOCK] %s  gap still too small after %.1fs — blacklisted (normal-buy only)",
+            log.info("[GAP-DEFER] %s  gap still too small after %.1fs — not blacklisted, will re-check on next trigger",
                      asset.upper(), elapsed)
-            normal_blacklisted_assets.add(asset)
             del gap_wait[asset]
         # else: still waiting, no log spam
 
