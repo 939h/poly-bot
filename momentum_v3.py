@@ -131,7 +131,7 @@ REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # 
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
@@ -159,17 +159,17 @@ GAP_WAIT_SECS = {
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.60"))   # if 0.65, u loss 35%
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.35"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
-FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "2.2"))
+FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "8"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.10   # flip only if opposite >= this
 FLIP_MAX       = 0.15   # flip only if opposite <= this
 REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.5"))
-REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.05"))
+REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.29"))
 REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.30"))
 REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
 REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "2.0"))
@@ -185,21 +185,21 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
-OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "600"))  # last 5 min
+OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.30"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.4"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
-OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
+OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.75"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.10"))
-OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
+OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.4"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
 WINDOW_SECS            = 900
-HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "240"))
+HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "400"))
 
 # ── Trading windows (optional) ────────────────────────────────────────────────
 TRADING_WINDOWS_ENABLED = False
@@ -1692,7 +1692,7 @@ def _build_state_snapshot():
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fresh Bot 23</title>
+<ttitleMomentumBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#0f1117;color:#e8edf5;font-size:14px;padding:20px}
@@ -1956,7 +1956,7 @@ function render(s){
       </tbody></table>
     </div>
 
-    <footer>Auto-refreshes every 5s &nbsp;&mdash;&nbsp; FreshBot23</footer>`;
+    <footer>Auto-refreshes every 2s &nbsp;&mdash;&nbsp; MomentumBot</footer>`;
 
   const wrap=document.getElementById('chartWrap');
   if(wrap)drawChart(pnlHist,wrap);
@@ -1976,7 +1976,7 @@ async function poll(){
   try{const r=await fetch('/state');const d=await r.json();render(d);}
   catch(e){console.error('fetch error',e);}
 }
-poll();setInterval(poll,5000);
+poll();setInterval(poll,2000);
 </script></body></html>"""
 
 
