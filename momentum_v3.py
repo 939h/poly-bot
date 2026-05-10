@@ -1464,7 +1464,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 log.info("[OPPO-REBOUND] %s waiting %.3fx/%.2fx",
                          opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                 continue
-            if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
+            if f"{opp_asset}_{side}_oppo" in open_positions:
                 continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
@@ -1495,7 +1495,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                               filled_shares=buy.get("filled_shares"),
                               window_start=window_start,
                               is_simulated=bool((buy.get("resp") or {}).get("simulated")))
-                traded_this_window.add(opp_asset)
                 oppo_bought_windows.add(window_start)
                 oppo_rebound_tracker.pop(opp_key, None)
                 log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
