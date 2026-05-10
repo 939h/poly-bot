@@ -150,7 +150,11 @@ GAP_MAGNITUDE = {
     "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
-GAP_WAIT_SECS = 60   # wait this long for gap to widen before blacklisting
+GAP_WAIT_SECS = {
+    "early": 300,
+    "mid": 60,
+    "late": 30,
+}   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
@@ -618,14 +622,15 @@ def market_buy(client, token_id, label, price_hint=None, amount=None, simulate=F
         return {"ok": False, "resp": None, "filled_shares": 0, "filled_price": 0.0}
 
 
-def market_sell(client, token_id, shares, price, label):
+def market_sell(client, token_id, shares, price, label, simulate=False):
     sell_shares = round(shares, 3)
     if sell_shares < MIN_SELL_SHARES:
         return {"ok": False, "resp": None, "filled_shares": 0.0, "filled_quote": 0.0}
-    if DRY_RUN:
+    if DRY_RUN or simulate:
         est = round(sell_shares * price, 4)
-        log.info("[DRY-RUN] MARKET SELL %s %.3f sh @ %.4f (est $%.4f)", label, sell_shares, price, est)
-        return {"ok": True, "resp": {"dry_run": True}, "filled_shares": sell_shares, "filled_quote": est}
+        mode = "DRY-RUN" if DRY_RUN else "SIM-SELL"
+        log.info("[%s] MARKET SELL %s %.3f sh @ %.4f (est $%.4f)", mode, label, sell_shares, price, est)
+        return {"ok": True, "resp": {"dry_run": DRY_RUN, "simulated": simulate}, "filled_shares": sell_shares, "filled_quote": est}
     try:
         client.update_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
@@ -670,10 +675,10 @@ def market_sell(client, token_id, shares, price, label):
     return {"ok": False, "resp": None, "filled_shares": 0, "filled_quote": 0.0}
 
 
-def market_sell_with_retries(client, token_id, shares, price, label):
+def market_sell_with_retries(client, token_id, shares, price, label, simulate=False):
     last = {"ok": False, "resp": None, "filled_shares": 0}
     for attempt in range(1, SELL_MAX_ATTEMPTS + 1):
-        last = market_sell(client, token_id, shares, price, label)
+        last = market_sell(client, token_id, shares, price, label, simulate=simulate)
         if last["ok"]:
             if attempt > 1:
                 log.info("[SELL-RETRY] %s ok on attempt %d/%d", label, attempt, SELL_MAX_ATTEMPTS)
@@ -699,12 +704,7 @@ def check_gap_guard(asset, secs_into):
         log.debug("[GAP-GUARD] %s data not ready — allowing by default", asset.upper())
         return True   # allow when data unavailable
 
-    if secs_into < 300:
-        stage = "early"
-    elif secs_into < 600:
-        stage = "mid"
-    else:
-        stage = "late"
+    stage = get_stage(secs_into)
 
     swing     = GAP_SWING.get(asset, 0.001)
     magnitude = GAP_MAGNITUDE[stage]
@@ -730,13 +730,16 @@ def get_gap_threshold(asset, secs_into, multiplier=1.0):
     c_open = candle_open.get(asset, 0.0)
     if c_open <= 0.0:
         return None
-    if secs_into < 300:
-        stage = "early"
-    elif secs_into < 600:
-        stage = "mid"
-    else:
-        stage = "late"
+    stage = get_stage(secs_into)
     return c_open * GAP_SWING.get(asset, 0.001) * GAP_MAGNITUDE[stage] * multiplier
+
+
+def get_stage(secs_into):
+    if secs_into < 300:
+        return "early"
+    if secs_into < 600:
+        return "mid"
+    return "late"
 
 
 def get_binance_gap(asset):
@@ -757,7 +760,7 @@ def force_sell_gap_triggered(asset, secs_into):
 # ── Position management ───────────────────────────────────────────────────────
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
-                  is_flip=False, is_rebound=False, buy_amount=None):
+                  is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
@@ -815,6 +818,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "opened_at":            datetime.now().strftime("%H:%M"),
         "opened_ts":            time.time(),
         "window_start":         window_start,
+        "is_simulated":         is_simulated,
     }
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
@@ -862,7 +866,10 @@ def manage_rebound_target_sells(client, key, pos, current_price):
             tranche.get("name", "TRANCHE"), key, current_price, target, sell_shares, available_shares,
         )
         pos["closing"] = True
-        sell = market_sell_with_retries(client, pos["token_id"], sell_shares, current_price, key.upper())
+        sell = market_sell_with_retries(
+            client, pos["token_id"], sell_shares, current_price, key.upper(),
+            simulate=pos.get("is_simulated", False),
+        )
         pos["last_exit_attempt_ts"] = time.time()
         if not sell["ok"]:
             pos["closing"] = False
@@ -929,7 +936,10 @@ def manage_positions(client, server_ts=None):
                 key, unrealized_pnl, current_price, actual_gap, force_threshold, shares,
             )
             pos["closing"] = True
-            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            sell = market_sell_with_retries(
+                client, pos["token_id"], shares, current_price, key.upper(),
+                simulate=pos.get("is_simulated", False),
+            )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
@@ -951,7 +961,10 @@ def manage_positions(client, server_ts=None):
             log.info("[TIME-LIMIT-SELL] %s  held=%ds/%ds  price=%.4f  selling %.3f shares",
                      key, int(hold_secs), HOLD_POSITION_LIMIT_SECS, current_price, shares)
             pos["closing"] = True
-            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            sell = market_sell_with_retries(
+                client, pos["token_id"], shares, current_price, key.upper(),
+                simulate=pos.get("is_simulated", False),
+            )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
@@ -1004,7 +1017,10 @@ def manage_positions(client, server_ts=None):
             # Confirmed cut-loss — sell all
             log.info("[CUT-LOSS] %s  price=%.4f  selling %.3f shares", key, current_price, shares)
             pos["closing"] = True
-            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            sell = market_sell_with_retries(
+                client, pos["token_id"], shares, current_price, key.upper(),
+                simulate=pos.get("is_simulated", False),
+            )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
@@ -1058,7 +1074,10 @@ def manage_positions(client, server_ts=None):
 
             pos["closing"] = True
           
-            sell = market_sell_with_retries(client, pos["token_id"], shares, current_price, key.upper())
+            sell = market_sell_with_retries(
+                client, pos["token_id"], shares, current_price, key.upper(),
+                simulate=pos.get("is_simulated", False),
+            )
             pos["last_exit_attempt_ts"] = time.time()
             if sell["ok"]:
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
@@ -1275,6 +1294,7 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
                 is_flip=True,
                 is_rebound=True,
                 buy_amount=REBOUND_BUY_AMOUNT,
+                is_simulated=bool((buy.get("resp") or {}).get("simulated")),
             )
             flipped_this_window.add(asset)
             traded_this_window.add(asset)
@@ -1384,14 +1404,15 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 entry_px = float(buy.get("filled_price") or price)
                 open_position(key, token, entry_px,
                               filled_shares=buy.get("filled_shares"),
-                              window_start=window_start)
+                              window_start=window_start,
+                              is_simulated=bool((buy.get("resp") or {}).get("simulated")))
                 traded_this_window.add(asset)
             continue
 
-        if elapsed >= GAP_WAIT_SECS:
-            log.info("[GAP-BLOCK] %s  gap still too small after %.1fs — blacklisted (normal-buy only)",
+        wait_secs = GAP_WAIT_SECS[get_stage(secs_into)]
+        if elapsed >= wait_secs:
+            log.info("[GAP-DEFER] %s  gap still too small after %.1fs — not blacklisted, will re-check on next trigger",
                      asset.upper(), elapsed)
-            normal_blacklisted_assets.add(asset)
             del gap_wait[asset]
         # else: still waiting, no log spam
 
@@ -1443,7 +1464,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 log.info("[OPPO-REBOUND] %s waiting %.3fx/%.2fx",
                          opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                 continue
-            if opp_asset in traded_this_window or f"{opp_asset}_{side}_oppo" in open_positions:
+            if f"{opp_asset}_{side}_oppo" in open_positions:
                 continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
@@ -1472,8 +1493,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 entry_px = float(buy.get("filled_price") or opp_price)
                 open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
                               filled_shares=buy.get("filled_shares"),
-                              window_start=window_start)
-                traded_this_window.add(opp_asset)
+                              window_start=window_start,
+                              is_simulated=bool((buy.get("resp") or {}).get("simulated")))
                 oppo_bought_windows.add(window_start)
                 oppo_rebound_tracker.pop(opp_key, None)
                 log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
@@ -1540,7 +1561,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 entry_px = float(buy.get("filled_price") or triggered_price)
                 open_position(triggered_key, triggered_token, entry_px,
                               filled_shares=buy.get("filled_shares"),
-                              window_start=window_start)
+                              window_start=window_start,
+                              is_simulated=bool((buy.get("resp") or {}).get("simulated")))
                 traded_this_window.add(asset)
         else:
             # Gap too small — wait up to GAP_WAIT_SECS for it to widen
@@ -1551,8 +1573,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 "price":         triggered_price,
                 "spread_retries": 0,
             }
+            wait_secs = GAP_WAIT_SECS[get_stage(secs_into)]
             log.info("[GAP-WAIT] %s  gap too small — waiting %.0fs for momentum  price=%.4f",
-                     asset.upper(), GAP_WAIT_SECS, triggered_price)
+                     asset.upper(), wait_secs, triggered_price)
 
 # ── Status ────────────────────────────────────────────────────────────────────
 
@@ -2026,7 +2049,7 @@ def main():
         REBOUND_STOP_BUY_AT, REBOUND_FIRST_SELL_FRACTION * 100, REBOUND_SELL_MULTIPLIER,
         (1 - REBOUND_FIRST_SELL_FRACTION) * 100, REBOUND_FINAL_SELL_PRICE * 100,
     )
-    log.info("  Gap guard: swing=%s  magnitude=%s  wait=%ds",
+    log.info("  Gap guard: swing=%s  magnitude=%s  wait=%s",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
     log.info("=" * 55)
 
