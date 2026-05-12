@@ -1123,21 +1123,31 @@ def manage_positions(client, server_ts=None):
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
                 to_close.append(key)
 
-                # ── Rebound cut-loss flip: trace same side trough, then re-buy ──
+                # ── Rebound cut-loss flip: trace opposite side trough, then buy opposite side ──
                 asset = key.split("_")[0]
-                if asset not in flipped_this_window and not pos.get("is_oppo"):
-                    rebound_cutloss_tracker[key] = {
-                        "token": pos["token_id"],
-                        "trough": current_price,
-                        "window_start": pos.get("window_start"),
-                        "armed_at": time.time(),
-                    }
-                    log.info(
-                        "[REBOUND-FLIP] %s armed  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
-                        key, current_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
-                    )
+                side = key.split("_")[1]
+                flip_side = "no" if side == "yes" else "yes"
+                flip_key = f"{asset}_{flip_side}"
+                flip_token = get_token_for_key(asset, flip_side, pos.get("window_start"))
+                if asset not in flipped_this_window and not pos.get("is_oppo") and flip_token:
+                    flip_price = live_prices.get(flip_key)
+                    if flip_price is None or flip_price <= 0:
+                        flip_price = get_midpoint(client, flip_token)
+                    if flip_price and flip_price > 0:
+                        rebound_cutloss_tracker[flip_key] = {
+                            "token": flip_token,
+                            "trough": flip_price,
+                            "window_start": pos.get("window_start"),
+                            "armed_at": time.time(),
+                        }
+                        log.info(
+                            "[REBOUND-FLIP] %s armed from %s cut-loss  trough=%.4f  need %.2fx rebound below cap %.4f; discard <= %.4f",
+                            flip_key, key, flip_price, REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP, REBOUND_CUTLOSS_DEAD_ZONE,
+                        )
+                    else:
+                        log.info("[REBOUND-FLIP] %s skipped — no valid price to arm", flip_key)
                 else:
-                    log.info("[REBOUND-FLIP] %s skipped — already flipped this window or oppo position", asset.upper())
+                    log.info("[REBOUND-FLIP] %s skipped — already flipped this window, oppo position, or missing token", asset.upper())
             else:
                 pos["closing"] = False
                 log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
@@ -1329,15 +1339,16 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
         if current_price <= 0:
             continue
 
+        trough = float(tracker.get("trough", current_price))
+
         if current_price <= REBOUND_CUTLOSS_DEAD_ZONE:
             log.info(
-                "[REBOUND-DEAD] %s price=%.4f <= %.4f — discarding rebound buy",
+                "[REBOUND-DEAD] %s price=%.4f <= dead-zone %.4f — discarding rebound buy",
                 key, current_price, REBOUND_CUTLOSS_DEAD_ZONE,
             )
             del rebound_cutloss_tracker[key]
             continue
 
-        trough = float(tracker.get("trough", current_price))
         if current_price < trough:
             tracker["trough"] = current_price
             log.info("[REBOUND-FLIP] %s new trough=%.4f", key, current_price)
