@@ -1205,6 +1205,27 @@ def manage_positions(client, server_ts=None):
 
 # ── Market fetch + scan ───────────────────────────────────────────────────────
 
+def get_token_for_key(asset, side, window_start=None):
+    """Return token id for asset side ('yes'/'no') from cache."""
+    side = (side or "").lower()
+    if side not in ("yes", "no"):
+        return None
+
+    # Prefer explicit window first
+    if window_start is not None:
+        tokens = token_cache.get(window_start, {}).get(asset)
+        if tokens:
+            return tokens[0] if side == "yes" else tokens[1]
+
+    # Fallback: newest cached window containing this asset
+    for ws in sorted(token_cache.keys(), reverse=True):
+        tokens = token_cache.get(ws, {}).get(asset)
+        if tokens:
+            return tokens[0] if side == "yes" else tokens[1]
+
+    return None
+
+
 def _fetch_asset(client, asset, window_start):
     if asset not in token_cache.get(window_start, {}):
         slug = build_slug(asset, window_start)
