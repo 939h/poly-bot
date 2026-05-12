@@ -161,7 +161,7 @@ GAP_WAIT_SECS = {
 # ── Exit ──────────────────────────────────────────────────────────────────────
 SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.30"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.98"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.35"))   # if 0.65, u loss 35%
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.50"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
@@ -170,14 +170,14 @@ FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "8"))
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.10   # flip only if opposite >= this
 FLIP_MAX       = 0.15   # flip only if opposite <= this
-REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.5"))
-REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.29"))
-REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.30"))
+REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.2"))
+REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.04"))
+REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.80"))
 REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
 REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "2.0"))
 REBOUND_FIRST_SELL_FRACTION = float(os.getenv("REBOUND_FIRST_SELL_FRACTION", "0.50"))
 REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
-REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
+REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.95"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.03
