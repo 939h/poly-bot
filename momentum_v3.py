@@ -1993,7 +1993,7 @@ function render(s){
 
   document.getElementById('root').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
-      <div><strong style="font-size:18px">Fresh<span class="green">Bot23</span></strong> &nbsp; ${mode}</div>
+      <div><strong style="font-size:18px">Momentum<span class="green">Bot_v3</span></strong> &nbsp; ${mode}</div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
         <div style="display:flex;align-items:center;gap:6px">
