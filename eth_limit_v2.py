@@ -11,8 +11,8 @@ Strategy:
   Upper bracket ("ETH above 2400?") → BUY YES at ORDER_PRICE (cheap ~4%)
   Lower bracket ("ETH above 2200?") → BUY NO  at ORDER_PRICE (cheap ~1%)
 
-  Orders are placed for TODAY and TOMORROW (tomorrow may not be live yet —
-  silently skipped if market not found).
+  Orders are placed for TODAY, TOMORROW, and DAY+2 (future dates may not be
+  live yet — silently skipped if market not found).
 
   After a BUY fills, three tiered GTC limit SELL orders are placed:
     TP1  50% of shares  at max(buy_price * 2, best_ask)   ← 2x or better
@@ -2093,7 +2093,9 @@ def main() -> None:
     client = build_client()
     placed_dates:    set[date] = set()  # today dates fully placed
     tmrw_placed:     set[str]  = set()  # ETH tomorrow slugs placed (for retry)
+    day3_placed:     set[str]  = set()  # ETH day+2 slugs placed (for retry)
     xrp_tmrw_placed: set[str]  = set()  # XRP tomorrow slugs placed (for retry)
+    xrp_day3_placed: set[str]  = set()  # XRP day+2 slugs placed (for retry)
 
     while True:
         utc_now  = datetime.now(timezone.utc)
@@ -2104,6 +2106,7 @@ def main() -> None:
         else:
             today = utc_now.date()
         tomorrow = today + timedelta(days=1)
+        day3 = today + timedelta(days=2)
 
         if today not in placed_dates:
             try:
@@ -2126,10 +2129,14 @@ def main() -> None:
 
                 placed_dates.add(today)
                 tmrw_placed.clear()
+                day3_placed.clear()
                 xrp_tmrw_placed.clear()
+                xrp_day3_placed.clear()
 
                 all_orders += place_for_date(client, tomorrow, eth_brackets, build_slug,
                                              skip_slugs=tmrw_placed)
+                all_orders += place_for_date(client, day3, eth_brackets, build_slug,
+                                             skip_slugs=day3_placed)
 
                 if XRP_ENABLED:
                     xrp = fetch_xrp_spot()
@@ -2142,6 +2149,8 @@ def main() -> None:
                     all_orders += place_for_date(client, today, xrp_brackets, build_xrp_slug)
                     all_orders += place_for_date(client, tomorrow, xrp_brackets, build_xrp_slug,
                                                  skip_slugs=xrp_tmrw_placed)
+                    all_orders += place_for_date(client, day3, xrp_brackets, build_xrp_slug,
+                                                 skip_slugs=xrp_day3_placed)
 
                 orphans = resync_orphan_buys(client, {o["order_id"] for o in all_orders})
                 all_orders += orphans
@@ -2180,6 +2189,30 @@ def main() -> None:
                 except Exception as e:
                     log.error(f"Tomorrow ETH retry failed: {e}")
 
+            # ETH retry: < 4 slugs placed for day+2
+            if len(day3_placed) < 4:
+                try:
+                    eth = fetch_eth_spot()
+                    upper, upper2, lower, lower2 = get_brackets(eth)
+                    st_set_eth(eth, upper, upper2, lower, lower2)
+                    eth_brackets = [
+                        (upper,  "YES", 0, ORDER_PRICE,     ORDER_SIZE),
+                        (upper2, "YES", 0, ORDER_PRICE_EXT, ORDER_SIZE),
+                        (lower,  "NO",  1, ORDER_PRICE,     ORDER_SIZE),
+                        (lower2, "NO",  1, ORDER_PRICE_EXT, ORDER_SIZE),
+                    ]
+                    retry_orders = place_for_date(client, day3, eth_brackets, build_slug,
+                                                  skip_slugs=day3_placed)
+                    if retry_orders:
+                        log.info(f"Day+2 ETH retry: placed {len(retry_orders)} new order(s).")
+                        threading.Thread(
+                            target=monitor_and_sell,
+                            args=(client, retry_orders),
+                            daemon=True,
+                        ).start()
+                except Exception as e:
+                    log.error(f"Day+2 ETH retry failed: {e}")
+
             # XRP retry: < 2 slugs placed for tomorrow
             if XRP_ENABLED and len(xrp_tmrw_placed) < 2:
                 try:
@@ -2201,6 +2234,28 @@ def main() -> None:
                         ).start()
                 except Exception as e:
                     log.error(f"Tomorrow XRP retry failed: {e}")
+
+            # XRP retry: < 2 slugs placed for day+2
+            if XRP_ENABLED and len(xrp_day3_placed) < 2:
+                try:
+                    xrp = fetch_xrp_spot()
+                    xrp_upper, xrp_lower = get_xrp_brackets(xrp)
+                    st_set_xrp(xrp, xrp_upper, xrp_lower)
+                    xrp_brackets = [
+                        (xrp_upper, "YES", 0, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                        (xrp_lower, "NO",  1, XRP_ORDER_PRICE, XRP_ORDER_SIZE),
+                    ]
+                    retry_orders = place_for_date(client, day3, xrp_brackets, build_xrp_slug,
+                                                  skip_slugs=xrp_day3_placed)
+                    if retry_orders:
+                        log.info(f"Day+2 XRP retry: placed {len(retry_orders)} new order(s).")
+                        threading.Thread(
+                            target=monitor_and_sell,
+                            args=(client, retry_orders),
+                            daemon=True,
+                        ).start()
+                except Exception as e:
+                    log.error(f"Day+2 XRP retry failed: {e}")
 
         time.sleep(LOOP_SLEEP)
 
