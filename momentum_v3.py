@@ -86,7 +86,7 @@ class _ColorFormatter(logging.Formatter):
             return msg
         if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]", "[FORCE-SELL]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[REBOUND-DEAD]", "[REBOUND-CAP]")):
+        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[REBOUND-DEAD]", "[REBOUND-CAP]", "[OPPO-DISCARD]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[FLIP]", "[REBOUND-FLIP]",  "[FORCE-STOP]")):
             return Fore.CYAN + Style.BRIGHT + msg + Style.RESET_ALL
@@ -100,6 +100,8 @@ class _ColorFormatter(logging.Formatter):
             return Fore.MAGENTA + msg + Style.RESET_ALL
         if record.levelno >= logging.ERROR:
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
+        if any(t in msg for t in ("[OPPO-WAIT]",)):
+            return Fore.YELLOW + msg + Style.RESET_ALL
         if record.levelno >= logging.WARNING:
             return Fore.YELLOW + msg + Style.RESET_ALL
         return msg
@@ -1539,23 +1541,23 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             if opp_price <= OPPO_DEAD_ZONE:
                 oppo_rebound_tracker.pop(opp_key, None)
-                log.info("[OPPO-DEAD] %s price=%.4f <= dead-zone %.4f — discard",
+                log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f",
                          opp_key, opp_price, OPPO_DEAD_ZONE)
                 continue
 
             trough = oppo_rebound_tracker.get(opp_key)
             if trough is None:
                 oppo_rebound_tracker[opp_key] = opp_price
-                log.info("[OPPO-REBOUND] %s start trough=%.4f wait %.2fx rebound",
+                log.info("[OPPO-WAIT] %s start trough=%.4f wait %.2fx rebound",
                          opp_key, opp_price, OPPO_REBOUND_MULT)
                 continue
             if opp_price < trough:
                 oppo_rebound_tracker[opp_key] = opp_price
-                log.info("[OPPO-REBOUND] %s new trough=%.4f", opp_key, opp_price)
+                log.info("[OPPO-WAIT] %s new trough=%.4f", opp_key, opp_price)
                 continue
             rebound_ratio = opp_price / trough if trough > 0 else 0.0
             if rebound_ratio < OPPO_REBOUND_MULT:
-                log.info("[OPPO-REBOUND] %s waiting %.3fx/%.2fx",
+                log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
                          opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                 continue
             if f"{opp_asset}_{side}_oppo" in open_positions:
@@ -1567,7 +1569,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             spread = get_spread_value(client, opp_token)
             if spread is not None and spread > MAX_BOOK_SPREAD:
-                log.info("[OPPO-SPREAD-SKIP] %s_%s spread=%.4f > %.4f",
+                log.info("[OPPO-DISCARD] %s_%s spread=%.4f > %.4f",
                          opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
                 continue
 
@@ -1577,7 +1579,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 actual_gap = abs(c_live - c_open)
                 oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
                 if actual_gap >= oppo_gap_threshold:
-                    log.info("[OPPO-GAP-SKIP] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
+                    log.info("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                              opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                     continue
 
