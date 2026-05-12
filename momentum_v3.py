@@ -440,10 +440,10 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "time":     pos.get("opened_at", "—"),
         "asset":    parts[0].upper(),
         "side":     parts[1].upper() if len(parts) > 1 else "—",
-        "entry":    round(pos["entry_price"], 4),
-        "target":   round(pos["sell_price"], 4),
+        "entry":    round(pos["entry_price"], 2),
+        "target":   round(pos["sell_price"], 2),
         "exit":     exit_type,
-        "exit_px":  round(close_price, 4),
+        "exit_px":  round(close_price, 2),
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
         "pnl":      round(pnl, 4),
@@ -1904,10 +1904,10 @@ function renderTradeLog(log){
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
       <td><strong>${t.asset}-${t.side}</strong>${flipTag}</td>
-      <td>${fmt(t.entry)}</td>
-      <td>${fmt(t.target,2)}</td>
-      <td>${exitBadge(t.exit)}</td>
-      <td>${fmt(t.exit_px)}</td>
+      <td>${fmt(t.entry, 2)}</td>
+      <td>${fmt(t.target, 2)}</td>
+      <td>${exitBadge(t.exit, 2)}</td>
+      <td>${fmt(t.exit_px, 2)}</td>
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
     </tr>`;
   }).join('');
