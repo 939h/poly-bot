@@ -133,7 +133,7 @@ REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # 
 BUY_PRICE_MIN  = 0.70   # buy if price >= this
 BUY_PRICE_MAX  = 0.80   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 780    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.70
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
@@ -159,9 +159,9 @@ GAP_WAIT_SECS = {
 }   # wait this long for gap to widen before blacklisting
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
-SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.20"))
-SELL_CAP        = float(os.getenv("SELL_CAP", "0.95"))
-CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.35"))   # if 0.65, u loss 35%
+SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.30"))
+SELL_CAP        = float(os.getenv("SELL_CAP", "0.98"))
+CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.50"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 60    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
@@ -170,14 +170,14 @@ FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "8"))
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.10   # flip only if opposite >= this
 FLIP_MAX       = 0.15   # flip only if opposite <= this
-REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.5"))
-REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.29"))
-REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.30"))
+REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.2"))
+REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.04"))
+REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.80"))
 REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
 REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "2.0"))
 REBOUND_FIRST_SELL_FRACTION = float(os.getenv("REBOUND_FIRST_SELL_FRACTION", "0.50"))
 REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
-REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.99"))
+REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.95"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
 MAX_BOOK_SPREAD        = 0.03
@@ -189,7 +189,7 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.30"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.35"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
@@ -440,10 +440,10 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "time":     pos.get("opened_at", "—"),
         "asset":    parts[0].upper(),
         "side":     parts[1].upper() if len(parts) > 1 else "—",
-        "entry":    round(pos["entry_price"], 4),
-        "target":   round(pos["sell_price"], 4),
+        "entry":    round(pos["entry_price"], 2),
+        "target":   round(pos["sell_price"], 2),
         "exit":     exit_type,
-        "exit_px":  round(close_price, 4),
+        "exit_px":  round(close_price, 2),
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
         "pnl":      round(pnl, 4),
@@ -1936,10 +1936,10 @@ function renderTradeLog(log){
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
       <td><strong>${t.asset}-${t.side}</strong>${flipTag}</td>
-      <td>${fmt(t.entry)}</td>
-      <td>${fmt(t.target,2)}</td>
-      <td>${exitBadge(t.exit)}</td>
-      <td>${fmt(t.exit_px)}</td>
+      <td>${fmt(t.entry, 2)}</td>
+      <td>${fmt(t.target, 2)}</td>
+      <td>${exitBadge(t.exit, 2)}</td>
+      <td>${fmt(t.exit_px, 2)}</td>
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
     </tr>`;
   }).join('');
@@ -2025,7 +2025,7 @@ function render(s){
 
   document.getElementById('root').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
-      <div><strong style="font-size:18px">Fresh<span class="green">Bot23</span></strong> &nbsp; ${mode}</div>
+      <div><strong style="font-size:18px">Momentum<span class="green">Bot_v3</span></strong> &nbsp; ${mode}</div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:12px;color:#5a6a85">${s.updated||''} &nbsp; <span class="badge ${period}">${period.toUpperCase()}</span> &nbsp; ${wStr}</div>
         <div style="display:flex;align-items:center;gap:6px">
