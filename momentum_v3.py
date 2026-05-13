@@ -1360,6 +1360,14 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
         if current_price <= 0:
             continue
 
+        if secs_into > REBOUND_STOP_BUY_AT:
+            log.info(
+                "[REBOUND-STOP-BUY] %s secs_into=%d > rebound_stop_buy_at=%d — discarding",
+                key, secs_into, REBOUND_STOP_BUY_AT,
+            )
+            del rebound_cutloss_tracker[key]
+            continue
+
         trough = float(tracker.get("trough", current_price))
 
         if current_price <= REBOUND_CUTLOSS_DEAD_ZONE:
@@ -1387,14 +1395,6 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
             log.info(
                 "[REBOUND-CAP] %s rebound %.3fx reached at %.4f >= cap %.4f — discarding rebound buy",
                 key, rebound_ratio, current_price, REBOUND_CUTLOSS_CAP,
-            )
-            del rebound_cutloss_tracker[key]
-            continue
-
-        if secs_into > REBOUND_STOP_BUY_AT:
-            log.info(
-                "[REBOUND-STOP-BUY] %s rebound ready @ %.4f but secs_into=%d > rebound_stop_buy_at=%d — discarding",
-                key, current_price, secs_into, REBOUND_STOP_BUY_AT,
             )
             del rebound_cutloss_tracker[key]
             continue
