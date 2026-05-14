@@ -1066,8 +1066,8 @@ def place_sell_tranches(
 
     
     tp1_base = min(round(buy_price * 2, 4), MAX_SELL_PRICE)
-    tp2_price = min(round(buy_price * 10, 4), MAX_SELL_PRICE)
-    tp3_price = min(round(buy_price * 50, 4), MAX_SELL_PRICE)
+    tp2_price = min(round(buy_price * 20, 4), MAX_SELL_PRICE)
+    tp3_price = min(round(buy_price * 100, 4), MAX_SELL_PRICE)
     log.info(
         f"  Placing sell tranches for {label}"
         f" | filled={filled_shares} shares | buy_price=${buy_price}"
