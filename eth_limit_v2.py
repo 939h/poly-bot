@@ -1039,8 +1039,8 @@ def place_sell_tranches(
     Place 3 tiered GTC limit SELL orders after a BUY fills.
 
     TP1  50% shares  at max(buy_price * 2, best_ask)
-    TP2  25% shares  at buy_price * 10
-    TP3  remaining   at buy_price * 50
+    TP2  25% shares  at buy_price * 20
+    TP3  remaining   at buy_price * 100
 
     condition_id: stored on the TP1 entry so the 0-fill re-place handler
     can call get_reserved_open_sell_shares() without a pending lookup.
