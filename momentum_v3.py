@@ -1930,6 +1930,7 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bo
 <body>
 <div id="root"><p style="color:#5a6a85;padding:40px;text-align:center">Loading...</p></div>
 <script>
+let oppoResetConfirmOpen=false;
 function fmt(v,d=4){return v!=null?'$'+parseFloat(v).toFixed(d):'—'}
 function fmtPct(v){return v!=null?(parseFloat(v)*100).toFixed(0)+'%':'—'}
 function fmtPnl(v){
@@ -2203,9 +2204,18 @@ async function doReset(){
     setTimeout(()=>{ok.style.display='none'},3000);
   }catch(e){console.error('reset failed',e)}
 }
-function startOppoReset(){document.getElementById('oppoResetConfirm').style.display='inline-flex';}
-function cancelOppoReset(){document.getElementById('oppoResetConfirm').style.display='none';}
+function startOppoReset(){
+  oppoResetConfirmOpen=true;
+  const el=document.getElementById('oppoResetConfirm');
+  if(el)el.style.display='inline-flex';
+}
+function cancelOppoReset(){
+  oppoResetConfirmOpen=false;
+  const el=document.getElementById('oppoResetConfirm');
+  if(el)el.style.display='none';
+}
 async function doOppoReset(){
+  oppoResetConfirmOpen=false;
   document.getElementById('oppoResetConfirm').style.display='none';
   try{
     await fetch('/reset-oppo',{method:'POST'});
@@ -2216,6 +2226,8 @@ async function doOppoReset(){
 async function poll(){
   try{const r=await fetch('/state');const d=await r.json();render(d);}
   catch(e){console.error('fetch error',e);}
+  const el=document.getElementById('oppoResetConfirm');
+  if(el)el.style.display=oppoResetConfirmOpen?'inline-flex':'none';
 }
 poll();setInterval(poll,2000);
 </script></body></html>"""
