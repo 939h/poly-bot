@@ -166,7 +166,7 @@ CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.6"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 2    # force-stop cooldown 10–15 min
-FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "8"))
+FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.20   # flip only if opposite >= this
