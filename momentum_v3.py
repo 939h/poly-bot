@@ -275,8 +275,11 @@ normal_blacklisted_assets = set()  # assets blacklisted for normal buys this win
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
+oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
+    if time.time() < oppo_log_suppressed_until:
+        return
     oppo_last_trigger[opp_key] = {
         "asset": opp_asset,
         "side": side,
@@ -348,7 +351,10 @@ def reset_state():
     save_state()
 
 def reset_oppo_log():
+    global oppo_log_suppressed_until
     oppo_last_trigger.clear()
+    # Prevent immediate re-population from the very next scan cycle.
+    oppo_log_suppressed_until = time.time() + max(2.0, POLL_SECS * 3)
     log.info("[STATE] OPPO trigger log reset by user")
 
 
