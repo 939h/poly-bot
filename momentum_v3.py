@@ -169,8 +169,8 @@ HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "8"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
-FLIP_MIN       = 0.10   # flip only if opposite >= this
-FLIP_MAX       = 0.15   # flip only if opposite <= this
+FLIP_MIN       = 0.20   # flip only if opposite >= this
+FLIP_MAX       = 0.75   # flip only if opposite <= this
 REBOUND_CUTLOSS_MULT = float(os.getenv("REBOUND_CUTLOSS_MULT", "1.2"))
 REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.04"))
 REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.80"))
