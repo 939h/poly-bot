@@ -176,8 +176,6 @@ REBOUND_CUTLOSS_DEAD_ZONE = float(os.getenv("REBOUND_CUTLOSS_DEAD_ZONE", "0.04")
 REBOUND_CUTLOSS_CAP = float(os.getenv("REBOUND_CUTLOSS_CAP", "0.80"))
 REBOUND_STOP_BUY_AT = int(os.getenv("REBOUND_STOP_BUY_AT", str(STOP_BUY_AT)))
 REBOUND_SELL_MULTIPLIER = float(os.getenv("REBOUND_SELL_MULTIPLIER", "1.7"))
-REBOUND_FIRST_SELL_FRACTION = float(os.getenv("REBOUND_FIRST_SELL_FRACTION", "0.50"))
-REBOUND_FINAL_SELL_PRICE = float(os.getenv("REBOUND_FINAL_SELL_PRICE", "0.90"))
 REBOUND_MAX_TARGET_PRICE = float(os.getenv("REBOUND_MAX_TARGET_PRICE", "0.95"))
 
 # ── Spread guard ─────────────────────────────────────────────────────────────
@@ -240,10 +238,6 @@ def validate_settings():
         errors.append("REBOUND_STOP_BUY_AT must be >= 0")
     if REBOUND_SELL_MULTIPLIER <= 0:
         errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
-    if not 0 < REBOUND_FIRST_SELL_FRACTION < 1:
-        errors.append("REBOUND_FIRST_SELL_FRACTION must be between 0 and 1")
-    if not 0 < REBOUND_FINAL_SELL_PRICE < 1:
-        errors.append("REBOUND_FINAL_SELL_PRICE must be between 0 and 1")
     if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
         errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
     if errors:
@@ -429,8 +423,6 @@ def save_state():
             "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
             "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
-            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
-            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
@@ -817,7 +809,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
     if is_rebound:
         rebound_5x_target = min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE)
-        sell_price = min(rebound_5x_target, REBOUND_FINAL_SELL_PRICE)
+        sell_price = rebound_5x_target
     elif is_oppo:
         sell_price = min(round(entry_price * OPPO_FIRST_SELL_MULTIPLIER, 4), OPPO_SELL_CAP)
     else:
@@ -1876,8 +1868,6 @@ def _build_state_snapshot():
             "rebound_cutloss_cap": REBOUND_CUTLOSS_CAP,
             "rebound_stop_buy_at": REBOUND_STOP_BUY_AT,
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
-            "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
-            "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
