@@ -1544,6 +1544,13 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             key   = gw["key"]
             token = gw["token"]
             price = live_prices.get(key, gw["price"])
+            if not (BUY_PRICE_MIN <= price <= BUY_PRICE_MAX):
+                log.info(
+                    "[GAP-CLEAR-SKIP] %s price=%.4f outside buy zone %.4f–%.4f after wait — requiring new trigger",
+                    key, price, BUY_PRICE_MIN, BUY_PRICE_MAX,
+                )
+                del gap_wait[asset]
+                continue
             side  = key.split("_")[1]
             label = f"{asset.upper()}-{key.split('_')[1].upper()}"
 
