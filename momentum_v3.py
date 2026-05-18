@@ -126,6 +126,7 @@ ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
+SIMULATE_REBOUND_MODE_ENABLED = os.getenv("SIMULATE_REBOUND_MODE_ENABLED", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
@@ -431,6 +432,7 @@ def save_state():
             "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
             "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
+            "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
@@ -625,7 +627,7 @@ def market_buy(client, token_id, label, price_hint=None, amount=None, simulate=F
     if DRY_RUN or simulate:
         entry_est = float(price_hint or 0) or get_midpoint(client, token_id)
         est_shares = _estimate_buy_shares(entry_est)
-        mode = "DRY-RUN" if DRY_RUN else "SIM-NORMAL-BUY"
+        mode = "DRY-RUN" if DRY_RUN else "SIMULATED-BUY"
         log.info("[%s] MARKET BUY %s $%.2f USDC → est %.3f shares @ %.4f",
                  mode, label, amount, est_shares, entry_est)
         return {
@@ -1449,7 +1451,12 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
             "[REBOUND-FLIP] %s buying after rebound %.3fx from trough %.4f @ %.4f",
             key, rebound_ratio, trough, current_price,
         )
-        buy = market_buy(client, token, label, price_hint=current_price, amount=REBOUND_BUY_AMOUNT)
+        buy = market_buy(
+            client, token, label,
+            price_hint=current_price,
+            amount=REBOUND_BUY_AMOUNT,
+            simulate=SIMULATE_REBOUND_MODE_ENABLED,
+        )
         if buy["ok"]:
             entry_px = float(buy.get("filled_price") or current_price)
             open_position(
@@ -1881,6 +1888,7 @@ def _build_state_snapshot():
             "rebound_first_sell_fraction": REBOUND_FIRST_SELL_FRACTION,
             "rebound_final_sell_price": REBOUND_FINAL_SELL_PRICE,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
+            "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "entry_after": ENTRY_AFTER,
