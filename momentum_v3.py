@@ -825,21 +825,13 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
     cut_loss_price = round(entry_price * cut_loss_pct, 4)
 
-    rebound_first_shares = round(net_shares * REBOUND_FIRST_SELL_FRACTION, 3) if is_rebound else 0.0
-    rebound_final_shares = round(max(net_shares - rebound_first_shares, 0.0), 3) if is_rebound else 0.0
     rebound_tranches = []
     if is_rebound:
         rebound_tranches = [
             {
-                "name": "5X",
+                "name": "REBOUND",
                 "target": min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE),
-                "shares": rebound_first_shares,
-                "sold": False,
-            },
-            {
-                "name": "FINAL",
-                "target": REBOUND_FINAL_SELL_PRICE,
-                "shares": rebound_final_shares,
+                "shares": net_shares,
                 "sold": False,
             },
         ]
@@ -895,9 +887,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     )
     if is_rebound:
         log.info(
-            "[REBOUND-TARGETS] %s  %.0f%% @ %.4f  %.0f%% @ %.4f",
-            key, REBOUND_FIRST_SELL_FRACTION * 100, rebound_tranches[0]["target"],
-            (1 - REBOUND_FIRST_SELL_FRACTION) * 100, rebound_tranches[1]["target"],
+            "[REBOUND-TARGET] %s  100%% @ %.4f",
+            key, rebound_tranches[0]["target"],
         )
 
 
@@ -2314,10 +2305,9 @@ def main():
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info(
         "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
-        "stop-buy=%ds, sell %.0f%% at x%.2f and %.0f%% at %.0f¢",
+        "stop-buy=%ds, single-sell 100%% at x%.2f (target capped by %.0f¢)",
         REBOUND_CUTLOSS_MULT, REBOUND_CUTLOSS_CAP * 100, REBOUND_CUTLOSS_DEAD_ZONE * 100,
-        REBOUND_STOP_BUY_AT, REBOUND_FIRST_SELL_FRACTION * 100, REBOUND_SELL_MULTIPLIER,
-        (1 - REBOUND_FIRST_SELL_FRACTION) * 100, REBOUND_FINAL_SELL_PRICE * 100,
+        REBOUND_STOP_BUY_AT, REBOUND_SELL_MULTIPLIER, REBOUND_MAX_TARGET_PRICE * 100,
     )
     log.info("  Gap guard: swing=%s  magnitude=%s  wait=%s",
              {k: f"{v*100:.2f}%" for k, v in GAP_SWING.items()}, GAP_MAGNITUDE, GAP_WAIT_SECS)
