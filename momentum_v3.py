@@ -279,6 +279,7 @@ rebound_cutloss_tracker = {}       # key asset_side -> rebound tracking state af
 pnl_history        = []
 asset_history      = {}
 trade_log          = []
+oppo_trigger_log   = []
 last_pnl_snapshot  = 0
 
 _skip_first_window = False
@@ -325,11 +326,12 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
+    oppo_trigger_log = []
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -388,6 +390,7 @@ def save_state():
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
+        "oppo_trigger_log": list(oppo_trigger_log),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -451,6 +454,19 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
     trade_log.insert(0, record)
     if len(trade_log) > 200:
         trade_log.pop()
+
+
+def _record_oppo_trigger(asset, side, price, status, reason):
+    oppo_trigger_log.insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "asset": asset.upper(),
+        "side": side.upper(),
+        "price": round(float(price), 4) if price is not None else None,
+        "status": status,
+        "reason": reason,
+    })
+    if len(oppo_trigger_log) > 50:
+        oppo_trigger_log.pop()
 
 # ── CLOB helpers ──────────────────────────────────────────────────────────────
 
@@ -1575,6 +1591,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 oppo_rebound_tracker.pop(opp_key, None)
                 log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f",
                          opp_key, opp_price, OPPO_DEAD_ZONE)
+                _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone")
                 continue
 
             trough = oppo_rebound_tracker.get(opp_key)
@@ -1582,17 +1599,21 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 oppo_rebound_tracker[opp_key] = opp_price
                 log.info("[OPPO-WAIT] %s start trough=%.4f wait %.2fx rebound",
                          opp_key, opp_price, OPPO_REBOUND_MULT)
+                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-start")
                 continue
             if opp_price < trough:
                 oppo_rebound_tracker[opp_key] = opp_price
                 log.info("[OPPO-WAIT] %s new trough=%.4f", opp_key, opp_price)
+                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-lower")
                 continue
             rebound_ratio = opp_price / trough if trough > 0 else 0.0
             if rebound_ratio < OPPO_REBOUND_MULT:
                 log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
                          opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                 continue
             if f"{opp_asset}_{side}_oppo" in open_positions:
+                _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "already-open")
                 continue
             if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
                 log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
@@ -1603,6 +1624,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             if spread is not None and spread > MAX_BOOK_SPREAD:
                 log.info("[OPPO-DISCARD] %s_%s spread=%.4f > %.4f",
                          opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
+                _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "spread-too-wide")
                 continue
 
             c_open = candle_open.get(opp_asset, 0.0)
@@ -1613,6 +1635,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 if actual_gap >= oppo_gap_threshold:
                     log.info("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                              opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                     continue
 
             label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
@@ -1626,6 +1649,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 oppo_bought_windows.add(window_start)
                 oppo_rebound_tracker.pop(opp_key, None)
                 log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
+                _record_oppo_trigger(opp_asset, side, opp_price, "BOUGHT", "success")
+            else:
+                _record_oppo_trigger(opp_asset, side, opp_price, "FAILED", "buy-failed")
             break
 
     for asset in ASSETS:
@@ -1790,6 +1816,7 @@ def _build_state_snapshot():
         "pnl_history":   list(pnl_history),
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
+        "oppo_trigger_log": list(oppo_trigger_log),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -1974,6 +2001,7 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
+  const oppoLog=s.oppo_trigger_log||[];
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -2023,6 +2051,18 @@ function render(s){
     </div>`;
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
+  const oppoRows=oppoLog.slice(0,10).map(o=>{
+    const statusCls=o.status==='BOUGHT'?'green':'amber';
+    const priceTxt=o.price!=null?fmt(o.price,2):'—';
+    return `<tr>
+      <td>${o.time||'—'}</td>
+      <td><strong>${o.asset||'—'}-${o.side||'—'}</strong></td>
+      <td>${priceTxt}</td>
+      <td class="${statusCls}" style="font-weight:600">${o.status||'—'}</td>
+      <td>${o.reason||'—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" class="dim">No OPPO triggers yet</td></tr>';
+
   document.getElementById('root').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <div><strong style="font-size:18px">Momentum<span class="green">Bot_v3</span></strong> &nbsp; ${mode}</div>
@@ -2063,6 +2103,12 @@ function render(s){
     </div>
 
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
+
+    <div class="section">
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows trigger attempts, even if buy fails)</span></h2>
+      <table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>${oppoRows}</tbody></table>
+    </div>
 
     <div class="section">
       <h2>Trade Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(${tLog.length} closed)</span></h2>
