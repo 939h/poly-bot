@@ -766,6 +766,15 @@ def build_slug(bracket: int, target_date: date) -> str:
     date_str = target_date.strftime("%B-%-d").lower()
     return f"ethereum-above-{bracket}-on-{date_str}"
 
+def build_eth_event_slug(target_date: date) -> str:
+    """
+    Build the newer ETH daily event slug:
+      ethereum-above-on-{month}-{day}-{year}
+    Example: ethereum-above-on-may-22-2026
+    """
+    date_str = target_date.strftime("%B-%-d-%Y").lower()
+    return f"ethereum-above-on-{date_str}"
+
 
 def build_xrp_slug(bracket: float, target_date: date) -> str:
     """Build Polymarket slug for an XRP daily bracket market.
@@ -843,6 +852,37 @@ def fetch_market(slug: str) -> dict | None:
         return None
     except Exception as e:
         log.error(f"Gamma API error ({slug}): {e}")
+        return None
+
+def fetch_eth_market_for_bracket(bracket: int, target_date: date) -> dict | None:
+    """
+    ETH market lookup with backward-compatible fallback:
+    1) try legacy per-strike slug (ethereum-above-2400-on-may-22)
+    2) try event slug (ethereum-above-on-may-22-2026), then select matching strike market
+    """
+    legacy_slug = build_slug(bracket, target_date)
+    market = fetch_market(legacy_slug)
+    if market is not None:
+        return market
+
+    event_slug = build_eth_event_slug(target_date)
+    try:
+        r = requests.get(f"{GAMMA_API}/events", params={"slug": event_slug}, timeout=10)
+        r.raise_for_status()
+        events = r.json()
+        if not isinstance(events, list) or not events:
+            return None
+
+        nested = events[0].get("markets", []) or []
+        bracket_str = str(bracket)
+        for m in nested:
+            m_slug = str(m.get("slug", "")).lower()
+            m_q = str(m.get("question", "")).lower()
+            if f"above {bracket_str}" in m_q or f"-{bracket_str}-" in m_slug:
+                return m
+        return None
+    except Exception as e:
+        log.error(f"Gamma API error (event {event_slug}): {e}")
         return None
 
 
@@ -1950,7 +1990,10 @@ def place_for_date(
             log.info(f"  Already placed: {side_label} {slug} — skipping")
             continue
 
-        market = fetch_market(slug)
+        if slug_fn == build_slug and isinstance(bracket, int):
+            market = fetch_eth_market_for_bracket(bracket, target_date)
+        else:
+            market = fetch_market(slug)
         if market is None:
             log.warning(f"  Market not found: {slug} — skipping")
             continue
