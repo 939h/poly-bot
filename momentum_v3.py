@@ -348,9 +348,11 @@ def reset_state():
 def reset_oppo_log():
     global oppo_log_suppressed_until
     oppo_last_trigger.clear()
+    oppo_trigger_log.clear()
     # Prevent immediate re-population from the very next scan cycle.
     oppo_log_suppressed_until = time.time() + max(2.0, POLL_SECS * 3)
     log.info("[STATE] OPPO trigger log reset by user")
+    save_state()
 
 
 def save_state():
