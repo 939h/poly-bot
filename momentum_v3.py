@@ -1678,6 +1678,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     oppo_bought_windows.add(window_start)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
+                    _record_oppo_trigger(opp_asset, side, opp_price, "BOUGHT", "entry-filled")
                     log.info("[OPPO-BUY] %s_%s triggered oppo setup", opp_asset.upper(), side.upper())
                 else:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
