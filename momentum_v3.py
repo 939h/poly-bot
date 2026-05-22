@@ -86,7 +86,7 @@ class _ColorFormatter(logging.Formatter):
             return msg
         if any(t in msg for t in ("[BUY]", "[OPEN]", "[SELL]", "[WIN]", "[FORCE-SELL]")):
             return Fore.GREEN + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[REBOUND-DEAD]", "[REBOUND-CAP]", "[OPPO-DISCARD]")):
+        if any(t in msg for t in ("[CUT-LOSS]", "[LOSS]", "[REBOUND-DEAD]", "[REBOUND-CAP]", "[-DISCARD]")):
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
         if any(t in msg for t in ("[FLIP]", "[REBOUND-FLIP]",  "[FORCE-STOP]")):
             return Fore.CYAN + Style.BRIGHT + msg + Style.RESET_ALL
@@ -100,7 +100,7 @@ class _ColorFormatter(logging.Formatter):
             return Fore.MAGENTA + msg + Style.RESET_ALL
         if record.levelno >= logging.ERROR:
             return Fore.RED + Style.BRIGHT + msg + Style.RESET_ALL
-        if any(t in msg for t in ("[OPPO-WAIT]",)):
+        if any(t in msg for t in ("[-WAIT]",)):
             return Fore.YELLOW + msg + Style.RESET_ALL
         if record.levelno >= logging.WARNING:
             return Fore.YELLOW + msg + Style.RESET_ALL
@@ -187,7 +187,7 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
-OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.75"))
+OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.35"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
