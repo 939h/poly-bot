@@ -480,9 +480,7 @@ def _record_oppo_trigger(asset, side, price, status, reason):
         "status": status,
         "reason": reason,
     })
-    if len(oppo_trigger_log) > 50:
-        oppo_trigger_log.pop()
-
+    
 # ── CLOB helpers ──────────────────────────────────────────────────────────────
 
 def build_client():
@@ -1904,6 +1902,7 @@ td:first-child{font-family:system-ui;font-weight:500;color:#e8edf5}
 .pos-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .pos-meta{display:flex;gap:16px;font-size:12px;color:#5a6a85;font-family:monospace;margin-top:6px;flex-wrap:wrap}
 .chart-wrap{height:180px;margin-top:4px}
+.oppo-log-wrap{max-height:320px;overflow-y:auto;overflow-x:hidden;border:1px solid #252d3d;border-radius:6px;padding:0 8px 0 0}
 canvas{display:block;width:100%!important;height:180px!important}
 .asset-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
 .asset-card{background:#1e2533;border:1px solid #2a3347;border-radius:8px;padding:12px}
@@ -1918,6 +1917,7 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bo
 <div id="root"><p style="color:#5a6a85;padding:40px;text-align:center">Loading...</p></div>
 <script>
 let oppoResetConfirmOpen=false;
+let oppoLogScrollTop=0;
 function fmt(v,d=4){return v!=null?'$'+parseFloat(v).toFixed(d):'—'}
 function fmtPct(v){return v!=null?(parseFloat(v)*100).toFixed(0)+'%':'—'}
 function fmtPnl(v){
@@ -2028,6 +2028,8 @@ function renderAssetHistory(assetHist,assets){
 }
 
 function render(s){
+  const prevOppoLogWrap=document.getElementById('oppoLogWrap');
+  if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{};
   const assetStatus=s.asset_status||{};
@@ -2089,7 +2091,7 @@ function render(s){
     </div>`;
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
-  const oppoRows=oppoLog.slice(0,10).map(o=>{
+  const oppoRows=oppoLog.map(o=>{
     const statusCls=o.status==='BOUGHT'?'green':'amber';
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
     return `<tr>
@@ -2150,9 +2152,9 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows trigger attempts, even if buy fails)</span></h2>
-      <table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
-      <tbody>${oppoRows}</tbody></table>
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows all trigger attempts, even if buy fails)</span></h2>
+      <div class="oppo-log-wrap" id="oppoLogWrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>${oppoRows}</tbody></table></div>
     </div>
 
     <div class="section">
@@ -2179,6 +2181,10 @@ function render(s){
 
   const wrap=document.getElementById('chartWrap');
   if(wrap)drawChart(pnlHist,wrap);
+  const oppoLogWrap=document.getElementById('oppoLogWrap');
+  if(oppoLogWrap){
+    oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
+  }
 }
 
 function startReset(){document.getElementById('resetConfirm').style.display='inline-flex';}
