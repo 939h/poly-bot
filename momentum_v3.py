@@ -1593,91 +1593,89 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
             side_values["no"][asset] = (round(1.0 - yes_price, 4), no_token)
 
         for side in ("yes", "no"):
-            high_assets, low_assets = [], []
+            low_assets = []
             for asset, (price, token) in side_values[side].items():
-                if price > OPPO_PRICE_HIGH:
-                    high_assets.append((asset, price))
                 if OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
                     low_assets.append((asset, price, token))
-            if len(high_assets) != 1 or len(low_assets) != 3:
+            if not low_assets:
                 continue
 
-            opp_asset, opp_price, opp_token = low_assets[0]
-            opp_key = f"{opp_asset}_{side}"
+            for opp_asset, opp_price, opp_token in low_assets:
+                opp_key = f"{opp_asset}_{side}"
 
-            if opp_price <= OPPO_DEAD_ZONE:
-                oppo_rebound_tracker.pop(opp_key, None)
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}")
-                log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f",
-                         opp_key, opp_price, OPPO_DEAD_ZONE)
-                _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone")
-                continue
-
-            trough = oppo_rebound_tracker.get(opp_key)
-            if trough is None:
-                oppo_rebound_tracker[opp_key] = opp_price
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"start trough {opp_price:.4f}")
-                log.info("[OPPO-WAIT] %s start trough=%.4f wait %.2fx rebound",
-                         opp_key, opp_price, OPPO_REBOUND_MULT)
-                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-start")
-                continue
-            if opp_price < trough:
-                oppo_rebound_tracker[opp_key] = opp_price
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"new trough {opp_price:.4f}")
-                log.info("[OPPO-WAIT] %s new trough=%.4f", opp_key, opp_price)
-                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-lower")
-                continue
-            rebound_ratio = opp_price / trough if trough > 0 else 0.0
-            if rebound_ratio < OPPO_REBOUND_MULT:
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
-                         opp_key, rebound_ratio, OPPO_REBOUND_MULT)
-                _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
-                continue
-            if f"{opp_asset}_{side}_oppo" in open_positions:
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "already open")
-                continue
-            if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "COOLDOWN", f"{COOLDOWN_SEC}s")
-                log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
-                         opp_asset.upper(), side.upper(), COOLDOWN_SEC)
-                continue
-
-            spread = get_spread_value(client, opp_token)
-            if spread is not None and spread > MAX_BOOK_SPREAD:
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SPREAD", f"{spread:.4f}>{MAX_BOOK_SPREAD:.4f}")
-                log.info("[OPPO-DISCARD] %s_%s spread=%.4f > %.4f",
-                         opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
-                _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "spread-too-wide")
-                continue
-
-            c_open = candle_open.get(opp_asset, 0.0)
-            c_live = live_close.get(opp_asset)
-            if c_open > 0 and c_live is not None:
-                actual_gap = abs(c_live - c_open)
-                oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
-                if actual_gap >= oppo_gap_threshold:
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
-                    log.info("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
-                             opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
-                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
+                if opp_price <= OPPO_DEAD_ZONE:
+                    oppo_rebound_tracker.pop(opp_key, None)
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}")
+                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f",
+                             opp_key, opp_price, OPPO_DEAD_ZONE)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone")
                     continue
 
-            label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
-            buy = market_buy(client, opp_token, label, price_hint=opp_price)
-            if buy["ok"]:
-                entry_px = float(buy.get("filled_price") or opp_price)
-                open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
-                              filled_shares=buy.get("filled_shares"),
-                              window_start=window_start,
-                              is_simulated=bool((buy.get("resp") or {}).get("simulated")))
-                oppo_bought_windows.add(window_start)
-                oppo_rebound_tracker.pop(opp_key, None)
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
-                log.info("[OPPO-BUY] %s_%s triggered 3v1 setup", opp_asset.upper(), side.upper())
-            else:
-                record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
-            break
+                trough = oppo_rebound_tracker.get(opp_key)
+                if trough is None:
+                    oppo_rebound_tracker[opp_key] = opp_price
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"start trough {opp_price:.4f}")
+                    log.info("[OPPO-WAIT] %s start trough=%.4f wait %.2fx rebound",
+                             opp_key, opp_price, OPPO_REBOUND_MULT)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-start")
+                    continue
+                if opp_price < trough:
+                    oppo_rebound_tracker[opp_key] = opp_price
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"new trough {opp_price:.4f}")
+                    log.info("[OPPO-WAIT] %s new trough=%.4f", opp_key, opp_price)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-lower")
+                    continue
+                rebound_ratio = opp_price / trough if trough > 0 else 0.0
+                if rebound_ratio < OPPO_REBOUND_MULT:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
+                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
+                             opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
+                    continue
+                if f"{opp_asset}_{side}_oppo" in open_positions:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "already open")
+                    continue
+                if server_ts - last_entry_ts.get(opp_asset, 0) < COOLDOWN_SEC:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "COOLDOWN", f"{COOLDOWN_SEC}s")
+                    log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
+                             opp_asset.upper(), side.upper(), COOLDOWN_SEC)
+                    continue
+
+                spread = get_spread_value(client, opp_token)
+                if spread is not None and spread > MAX_BOOK_SPREAD:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SPREAD", f"{spread:.4f}>{MAX_BOOK_SPREAD:.4f}")
+                    log.info("[OPPO-DISCARD] %s_%s spread=%.4f > %.4f",
+                             opp_asset.upper(), side.upper(), spread, MAX_BOOK_SPREAD)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "spread-too-wide")
+                    continue
+
+                c_open = candle_open.get(opp_asset, 0.0)
+                c_live = live_close.get(opp_asset)
+                if c_open > 0 and c_live is not None:
+                    actual_gap = abs(c_live - c_open)
+                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
+                    if actual_gap >= oppo_gap_threshold:
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
+                        log.info("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
+                                 opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
+                        _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
+                        continue
+
+                label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
+                buy = market_buy(client, opp_token, label, price_hint=opp_price)
+                if buy["ok"]:
+                    entry_px = float(buy.get("filled_price") or opp_price)
+                    open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
+                                  filled_shares=buy.get("filled_shares"),
+                                  window_start=window_start,
+                                  is_simulated=bool((buy.get("resp") or {}).get("simulated")))
+                    oppo_bought_windows.add(window_start)
+                    oppo_rebound_tracker.pop(opp_key, None)
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
+                    log.info("[OPPO-BUY] %s_%s triggered oppo setup", opp_asset.upper(), side.upper())
+                else:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
+                break
 
     for asset in ASSETS:
         if asset in traded_this_window:
