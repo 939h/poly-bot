@@ -997,6 +997,9 @@ def manage_oppo_target_sells(client, key, pos, current_price):
             "[OPPO-SELL-%s] %s partial finalized revenue=$%.4f remaining=%.3f",
             tranche.get("name", "TRANCHE"), key, revenue, pos["net_shares"],
         )
+        parts = key.split("_")
+        if len(parts) >= 2:
+            _record_oppo_trigger(parts[0], parts[1], current_price, "SELL", f"{tranche.get('name', 'TRANCHE').lower()}-filled")
 
     pos["closing"] = False
     update_oppo_sell_price(pos)
@@ -1008,6 +1011,9 @@ def manage_oppo_target_sells(client, key, pos, current_price):
         stats["pnl"] += pnl
         _record_closed_trade(key, pnl)
         _record_trade_log(key, pos, "OPPO-SELL", current_price, pnl)
+        parts = key.split("_")
+        if len(parts) >= 2:
+            _record_oppo_trigger(parts[0], parts[1], current_price, "SOLD", f"final pnl={pnl:+.4f}")
         return True
 
     return False
