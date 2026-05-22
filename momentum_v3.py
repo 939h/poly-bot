@@ -1599,7 +1599,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     high_assets.append((asset, price))
                 if OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
                     low_assets.append((asset, price, token))
-            if len(high_assets) != 3 or len(low_assets) != 1:
+            if len(high_assets) != 1 or len(low_assets) != 3:
                 continue
 
             opp_asset, opp_price, opp_token = low_assets[0]
