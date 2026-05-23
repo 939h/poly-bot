@@ -199,6 +199,7 @@ OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 5.0
+OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -871,6 +872,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "is_rebound":           is_rebound,
         "rebound_tranches":     rebound_tranches,
         "oppo_tranches":        oppo_tranches,
+        "oppo_tp2_peak":        0.0,
         "force_stop_triggered": None,
         "force_stop_cooldown":  None,
         "force_stop_spread_retries": 0,
@@ -1013,6 +1015,41 @@ def manage_oppo_target_sells(client, key, pos, current_price):
             _record_oppo_trigger(parts[0], parts[1], current_price, "SELL", f"{tranche.get('name', 'TRANCHE').lower()}-filled")
 
     pos["closing"] = False
+
+    first_tranche_sold = any(t.get("name") == "2X" and t.get("sold") for t in pos.get("oppo_tranches", []))
+    final_tranche = next((t for t in pos.get("oppo_tranches", []) if t.get("name") == "5X"), None)
+    if first_tranche_sold and final_tranche and not final_tranche.get("sold"):
+        prev_peak = float(pos.get("oppo_tp2_peak", 0.0) or 0.0)
+        if current_price > prev_peak:
+            pos["oppo_tp2_peak"] = current_price
+        peak = float(pos.get("oppo_tp2_peak", 0.0) or 0.0)
+        trail_stop = peak * (1.0 - OPPO_TP2_TRAIL_PCT) if peak > 0 else 0.0
+        if peak > 0 and current_price <= trail_stop:
+            available_shares = round(float(pos.get("net_shares", 0.0)), 3)
+            final_shares = round(float(final_tranche.get("shares", 0.0)), 3)
+            sell_shares = min(available_shares, final_shares)
+            if sell_shares >= MIN_SELL_SHARES:
+                log.info("[OPPO-TP2-TRAIL] %s peak=%.4f stop=%.4f price=%.4f selling %.3f shares", key, peak, trail_stop, current_price, sell_shares)
+                pos["closing"] = True
+                sell = market_sell_with_retries(
+                    client, pos["token_id"], sell_shares, current_price, key.upper(),
+                    simulate=pos.get("is_simulated", False),
+                )
+                pos["last_exit_attempt_ts"] = time.time()
+                if not sell["ok"]:
+                    pos["closing"] = False
+                    log.warning("[OPPO-TP2-TRAIL] %s sell failed — will retry on next loop", key)
+                    return False
+                filled_shares = round(float(sell.get("filled_shares") or sell_shares), 3)
+                revenue = float(sell.get("filled_quote") or round(filled_shares * current_price, 4))
+                pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                pos["net_shares"] = round(max(available_shares - filled_shares, 0.0), 3)
+                final_tranche["sold"] = True
+                parts = key.split("_")
+                if len(parts) >= 2:
+                    _record_oppo_trigger(parts[0], parts[1], current_price, "SELL", f"tp2-trail peak={peak:.4f}")
+                pos["closing"] = False
+
     update_oppo_sell_price(pos)
     all_sold = all(t.get("sold") for t in pos.get("oppo_tranches", []))
     if all_sold or float(pos.get("net_shares", 0.0)) < MIN_SELL_SHARES:
