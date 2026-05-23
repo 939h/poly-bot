@@ -131,8 +131,8 @@ BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.65   # buy if price >= this
-BUY_PRICE_MAX  = 0.80   # buy if price <= this
+BUY_PRICE_MIN  = 1.00   # buy if price >= this
+BUY_PRICE_MAX  = 1.00   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
@@ -149,7 +149,7 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 0.8,   # 0–5 min
+    "early": 1.0,   # 0–5 min
     "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
