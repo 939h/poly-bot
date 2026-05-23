@@ -188,7 +188,7 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.30"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
