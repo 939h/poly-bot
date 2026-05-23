@@ -1160,7 +1160,7 @@ def manage_positions(client, server_ts=None):
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
-                if pos.get("is_oppo"):
+                if pos.get("is_oppo") or key.endswith("_oppo"):
                     parts = key.split("_")
                     if len(parts) >= 2:
                         _record_oppo_trigger(parts[0], parts[1], current_price, "CUT-LOSS", f"pnl={pnl:+.4f}")
