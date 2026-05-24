@@ -167,6 +167,8 @@ HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 5    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 2    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
+BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "1.5"))
+BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
 FLIP_MIN       = 0.20   # flip only if opposite >= this
@@ -390,6 +392,8 @@ def save_state():
             "pct":         max(0, min(100, pct)),
             "opened_at":   p.get("opened_at", "—"),
             "rebound_buy_amount": REBOUND_BUY_AMOUNT,
+            "breakeven_armed": bool(p.get("breakeven_armed", False)),
+            "breakeven_gap_polls": int(p.get("breakeven_gap_polls", 0)),
         }
     gap_out = {}
     gap_threshold_out = {}
@@ -441,6 +445,7 @@ def save_state():
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
+            "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
         },
@@ -877,6 +882,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "force_stop_cooldown":  None,
         "force_stop_spread_retries": 0,
         "last_exit_attempt_ts": 0.0,
+        "breakeven_armed":      False,
+        "breakeven_gap_polls":  0,
         "opened_at":            datetime.now().strftime("%H:%M"),
         "opened_ts":            time.time(),
         "window_start":         window_start,
@@ -1094,8 +1101,49 @@ def manage_positions(client, server_ts=None):
         server_ts_now = server_ts if server_ts is not None else get_server_time()
         secs_into_now = server_ts_now - get_current_window_start(server_ts_now)
 
-        # ── Force sell profitable positions when Binance gap overextends ─────
         gap_hit, actual_gap, force_threshold = force_sell_gap_triggered(key.split("_")[0], secs_into_now)
+        # ── OPPO-only breakeven arm/exit when gap extends ─────────────────────
+        if pos.get("is_oppo"):
+            base_threshold = get_gap_threshold(key.split("_")[0], secs_into_now)
+            if base_threshold is not None and base_threshold > 0 and actual_gap is not None:
+                breakeven_gap_hit = actual_gap >= (base_threshold * BREAKEVEN_GAP_MULT)
+                if breakeven_gap_hit:
+                    pos["breakeven_gap_polls"] = int(pos.get("breakeven_gap_polls", 0)) + 1
+                else:
+                    pos["breakeven_gap_polls"] = 0
+
+                if (not pos.get("breakeven_armed")) and pos.get("breakeven_gap_polls", 0) >= BREAKEVEN_POLL_CONFIRMATIONS:
+                    pos["breakeven_armed"] = True
+                    pos["sell_price"] = max(pos.get("sell_price", entry), entry)
+                    for t in pos.get("oppo_tranches", []):
+                        if not t.get("sold"):
+                            t["target"] = max(float(t.get("target", entry)), entry)
+                    log.info("[BREAKEVEN-ARM] %s gap=%.4f >= %.2fx threshold(%.4f) for %d polls — arm entry exit at %.4f", key, actual_gap, BREAKEVEN_GAP_MULT, base_threshold, BREAKEVEN_POLL_CONFIRMATIONS, entry)
+
+                if pos.get("breakeven_armed") and current_price >= entry:
+                    log.info("[BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f  selling %.3f shares", key, current_price, entry, shares)
+                    pos["closing"] = True
+                    sell = market_sell_with_retries(
+                        client, pos["token_id"], shares, current_price, key.upper(),
+                        simulate=pos.get("is_simulated", False),
+                    )
+                    pos["last_exit_attempt_ts"] = time.time()
+                    if sell["ok"]:
+                        revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                        log.info("[BREAKEVEN-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                        stats["wins" if pnl > 0 else "losses"] += 1
+                        stats["pnl"] += pnl
+                        _record_closed_trade(key, pnl)
+                        _record_trade_log(key, pos, "BREAKEVEN-SELL", current_price, pnl)
+                        to_close.append(key)
+                    else:
+                        pos["closing"] = False
+                        log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
+                    continue
+
+        # ── Force sell profitable positions when Binance gap overextends ─────
         if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
             log.info(
                 "[FORCE-SELL] %s  pnl=$%.4f  price=%.4f  gap=%.4f >= force-threshold=%.4f  selling %.3f shares",
@@ -1850,6 +1898,8 @@ def _build_state_snapshot():
             "pnl":       pnl_unreal,
             "pct":       max(0, min(100, pct)),
             "opened_at": p.get("opened_at", "—"),
+            "breakeven_armed": bool(p.get("breakeven_armed", False)),
+            "breakeven_gap_polls": int(p.get("breakeven_gap_polls", 0)),
         }
     now_ts  = int(time.time())
     slot_ts = (now_ts // 900) * 900
@@ -1930,6 +1980,7 @@ def _build_state_snapshot():
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
+            "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
         },
@@ -2047,9 +2098,9 @@ function tlToggle(){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -2149,6 +2200,7 @@ function render(s){
       <div class="pos-meta">
         <span>${(p.pct||0).toFixed(0)}% to target</span>
         <span>Unrealised: ${fmtPnl(pnlV)}</span>
+        ${p.is_oppo?`<span>BE armed: <strong class="${p.breakeven_armed?'amber':'dim'}">${p.breakeven_armed?'YES':'NO'}</strong></span><span>BE polls: <strong>${p.breakeven_gap_polls||0}</strong>/${cfg.breakeven_polls||5}</span>`:''}
       </div>
     </div>`;
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
