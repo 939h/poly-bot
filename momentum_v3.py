@@ -2288,6 +2288,14 @@ poll();setInterval(poll,2000);
 
 
 class _Handler(BaseHTTPRequestHandler):
+    def _safe_write(self, data, context):
+        try:
+            self._safe_write(data, "/state")
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            log.debug("[HTTP] Client disconnected while writing %s", context)
+            return False
+
     def do_GET(self):
         if self.path == "/state":
             data = json.dumps(_build_state_snapshot(), indent=2).encode()
@@ -2295,7 +2303,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(data))
             self.end_headers()
-            self.wfile.write(data)
+            self._safe_write(data, "/")
         elif self.path in ("/", "/pnl"):
             data = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -2315,7 +2323,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(resp))
             self.end_headers()
-            self.wfile.write(resp)
+            self._safe_write(resp, "/reset")
             log.info("[HTTP] Dashboard reset by user")
         elif self.path == "/reset-oppo":
             reset_oppo_log()
@@ -2324,7 +2332,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(resp))
             self.end_headers()
-            self.wfile.write(resp)
+            self._safe_write(resp, "/reset-oppo")
             log.info("[HTTP] Dashboard OPPO log reset by user")
         else:
             self.send_response(404)
