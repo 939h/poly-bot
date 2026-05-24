@@ -2219,7 +2219,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>Trade Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(${tLog.length} closed)</span></h2>
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Trade Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(${tLog.length} closed)</span><a href="/trade-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderTradeLog(tLog)}
     </div>
 
@@ -2287,10 +2287,26 @@ poll();setInterval(poll,2000);
 </script></body></html>"""
 
 
+
+
+def _trade_log_csv_bytes():
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "pnl"])
+    for t in trade_log:
+        w.writerow([
+            t.get("time", ""), t.get("asset", ""), t.get("side", ""),
+            t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
+            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False), t.get("pnl", ""),
+        ])
+    return buf.getvalue().encode("utf-8")
+
 class _Handler(BaseHTTPRequestHandler):
     def _safe_write(self, data, context):
         try:
-            self._safe_write(data, "/state")
+            self.wfile.write(data)
             return True
         except (BrokenPipeError, ConnectionResetError):
             log.debug("[HTTP] Client disconnected while writing %s", context)
@@ -2303,14 +2319,22 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(data))
             self.end_headers()
-            self._safe_write(data, "/")
+            self._safe_write(data, "/state")
         elif self.path in ("/", "/pnl"):
             data = _DASHBOARD_HTML.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", len(data))
             self.end_headers()
-            self.wfile.write(data)
+            self._safe_write(data, "/")
+        elif self.path == "/trade-log.csv":
+            data = _trade_log_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=trade_log.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/trade-log.csv")
         else:
             self.send_response(404)
             self.end_headers()
