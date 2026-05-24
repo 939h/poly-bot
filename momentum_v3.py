@@ -1663,10 +1663,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if opp_price <= OPPO_DEAD_ZONE:
                     oppo_rebound_tracker.pop(opp_key, None)
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}")
-                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f",
+                    normal_blacklisted_assets.add(opp_asset)
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}; blacklisted this window")
+                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted this window",
                              opp_key, opp_price, OPPO_DEAD_ZONE)
-                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone")
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone-blacklisted")
                     continue
 
                 trough = oppo_rebound_tracker.get(opp_key)
