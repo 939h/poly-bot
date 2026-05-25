@@ -1740,7 +1740,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
+                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
