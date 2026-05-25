@@ -1949,6 +1949,7 @@ def _build_state_snapshot():
         "prices":        dict(live_prices),
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
+        "cvd":           cvd_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
