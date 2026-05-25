@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -202,6 +202,8 @@ OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 5.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
+CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
+CVD_OPPO_SLOPE_POLLS = int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -272,6 +274,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
@@ -1768,6 +1771,19 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                         continue
 
+                if CVD_OPPO_ENABLED:
+                    _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
+                    cvd_key = opp_key
+                    slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
+                    if slope_ok:
+                        oppo_cvd_polls[cvd_key] = int(oppo_cvd_polls.get(cvd_key, 0)) + 1
+                    else:
+                        oppo_cvd_polls[cvd_key] = 0
+                    if oppo_cvd_polls.get(cvd_key, 0) < CVD_OPPO_SLOPE_POLLS:
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-WAIT", f"polls {oppo_cvd_polls.get(cvd_key,0)}/{CVD_OPPO_SLOPE_POLLS} slope={cvd_slope:.6f} win={cvd_window:.2f}")
+                        _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "cvd-not-confirmed")
+                        continue
+
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price)
                 if buy["ok"]:
@@ -2487,6 +2503,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
