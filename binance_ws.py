@@ -2,7 +2,7 @@
 binance_ws.py
 =============
 Runs as a background thread alongside fresh_bot23.py.
-Connects to Binance Futures WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
+Connects to Binance WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
 Tracks candle open price, live close price, 15m MACD histogram, and Binance CVD per asset.
 
 Exports:
