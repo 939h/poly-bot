@@ -488,6 +488,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "exit_px":  round(close_price, 2),
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
+        "oppo_other_over_50_count": int(pos.get("oppo_other_over_50_count", 0) or 0),
         "pnl":      round(pnl, 4),
     }
     trade_log.insert(0, record)
@@ -1791,15 +1792,26 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 buy = market_buy(client, opp_token, label, price_hint=opp_price)
                 if buy["ok"]:
                     entry_px = float(buy.get("filled_price") or opp_price)
+                    other_over_50_count = 0
+                    side_snapshot = side_values.get(side, {})
+                    for other_asset, (other_price, _) in side_snapshot.items():
+                        if other_asset == opp_asset:
+                            continue
+                        if other_price is not None and float(other_price) > OPPO_PRICE_HIGH:
+                            other_over_50_count += 1
                     open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
                                   filled_shares=buy.get("filled_shares"),
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")))
+                    pos_key = f"{opp_asset}_{side}_oppo"
+                    if pos_key in open_positions:
+                        open_positions[pos_key]["oppo_other_over_50_count"] = other_over_50_count
                     oppo_bought_windows.add(window_start)
                     oppo_rebound_tracker.pop(opp_key, None)
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", f"success other3>{OPPO_PRICE_HIGH:.2f}={other_over_50_count}")
                     _record_oppo_trigger(opp_asset, side, opp_price, "BOUGHT", "entry-filled")
-                    log.info("[OPPO-BUY] %s_%s triggered oppo setup", opp_asset.upper(), side.upper())
+                    log.info("[OPPO-BUY] %s_%s triggered oppo setup | other-assets %s side > %.2f = %d",
+                             opp_asset.upper(), side.upper(), side.upper(), OPPO_PRICE_HIGH, other_over_50_count)
                 else:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
                 break
@@ -2135,6 +2147,7 @@ function renderTradeLog(log){
       <td>${fmt(t.entry, 2)}</td>
       <td>${fmt(t.target, 2)}</td>
       <td>${exitBadge(t.exit, 2)}</td>
+      <td>${Number.isFinite(Number(t.oppo_other_over_50_count)) ? Number(t.oppo_other_over_50_count) : 0}</td>
       <td>${fmt(t.exit_px, 2)}</td>
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
     </tr>`;
@@ -2142,7 +2155,7 @@ function renderTradeLog(log){
   const extra=log.length-TL_COLLAPSE;
   const btn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tlExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
   return `<div style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Other 3 &gt; $0.50</th><th>Exit $</th><th>PnL</th></tr></thead>
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
@@ -2372,12 +2385,12 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "pnl"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "oppo_other_over_50_count", "exit_px", "is_flip", "is_rebound", "pnl"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
-            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False), t.get("pnl", ""),
+            t.get("oppo_other_over_50_count", 0), t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False), t.get("pnl", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
