@@ -131,10 +131,10 @@ BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
-BUY_PRICE_MIN  = 0.65   # buy if price >= this
-BUY_PRICE_MAX  = 0.80   # buy if price <= this
+BUY_PRICE_MIN  = 1.00   # buy if price >= this
+BUY_PRICE_MAX  = 1.00   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 870    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
@@ -149,7 +149,7 @@ GAP_SWING = {
     "xrp": 0.001,    # 0.2% of XRP open
 }
 GAP_MAGNITUDE = {
-    "early": 0.8,   # 0–5 min
+    "early": 1.0,   # 0–5 min
     "mid":   0.6,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
@@ -190,17 +190,17 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.35"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.6"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
-OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.75"))
-OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.20"))
+OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
+OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.50"))
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.3"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
-OPPO_FINAL_SELL_MULTIPLIER = 5.0
+OPPO_FINAL_SELL_MULTIPLIER = 8.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
@@ -1740,7 +1740,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
+                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
