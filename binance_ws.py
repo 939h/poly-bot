@@ -70,6 +70,12 @@ cvd_slope = {
     "btc": 0.0,
     "xrp": 0.0,
 }
+cvd_last_update = {
+    "eth": 0.0,
+    "sol": 0.0,
+    "btc": 0.0,
+    "xrp": 0.0,
+}
 cvd_value_window = {
     "eth": 0.0,
     "sol": 0.0,
@@ -153,6 +159,7 @@ def _update_cvd(asset, qty, buyer_is_maker):
     cvd_value[asset] = float(cvd_value.get(asset, 0.0)) + delta
     cvd_value_window[asset] = float(cvd_value_window.get(asset, 0.0)) + delta
     now_ts = time.time()
+    cvd_last_update[asset] = now_ts
     pts = _cvd_points[asset]
     pts.append((now_ts, cvd_value[asset]))
     while pts and (now_ts - pts[0][0]) > CVD_SLOPE_WINDOW_SECS:
@@ -173,6 +180,7 @@ def get_cvd_snapshot(asset):
             float(cvd_value_window.get(asset, 0.0)),
             float(cvd_slope.get(asset, 0.0)),
             int(count),
+            float(cvd_last_update.get(asset, 0.0)),
         )
 
 def get_macd_histogram(asset):
