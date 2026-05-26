@@ -2,14 +2,18 @@
 binance_ws.py
 =============
 Runs as a background thread alongside fresh_bot23.py.
-Connects to Binance WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
-Tracks candle open price, live close price, and 15m MACD histogram per asset.
+Connects to Binance Futures WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
+Tracks candle open price, live close price, 15m MACD histogram, and Binance CVD per asset.
 
 Exports:
     candle_open   — dict {asset: float}  open price of current 15m candle
     live_close    — dict {asset: float|None}  latest tick close price
     macd_histogram — dict {asset: tuple(prior_hist, prev_hist, curr_hist)|None}
+    cvd_value — dict {asset: float} cumulative volume delta (session)
+    cvd_value_window — dict {asset: float} per-15m-window cumulative volume delta
+    cvd_slope — dict {asset: float} short-window cvd slope
     get_macd_histogram(asset) — thread-safe MACD histogram lookup
+    get_cvd_snapshot(asset) — thread-safe (cvd, slope) lookup
     start_rsi_feed() — call once on startup
 
 Usage in fresh_bot23.py:
@@ -35,7 +39,7 @@ log = logging.getLogger(__name__)
 # ── Public shared dicts — fresh_bot23 reads these every poll ──────────────────
 # candle_open: open price of the current 15m candle (set on first tick of new candle)
 # live_close:  latest tick close price (None when candle just closed / not yet received)
-# macd_histogram: latest Binance 15m MACD histogram pair (prev, current).
+# macd_histogram: latest Binance Futures 15m MACD histogram pair (prev, current).
 candle_open = {
     "eth": 0.0,
     "sol": 0.0,
@@ -54,6 +58,24 @@ macd_histogram = {
     "btc": None,
     "xrp": None,
 }
+cvd_value = {
+    "eth": 0.0,
+    "sol": 0.0,
+    "btc": 0.0,
+    "xrp": 0.0,
+}
+cvd_slope = {
+    "eth": 0.0,
+    "sol": 0.0,
+    "btc": 0.0,
+    "xrp": 0.0,
+}
+cvd_value_window = {
+    "eth": 0.0,
+    "sol": 0.0,
+    "btc": 0.0,
+    "xrp": 0.0,
+}
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SYMBOL_MAP = {
@@ -63,14 +85,16 @@ SYMBOL_MAP = {
     "xrpusdt": "xrp",
 }
 WS_URL = (
-    "wss://stream.binance.com:9443/stream"
+    "wss://fstream.binance.com/stream"
     "?streams=ethusdt@kline_15m/solusdt@kline_15m/btcusdt@kline_15m/xrpusdt@kline_15m"
+    "/ethusdt@aggTrade/solusdt@aggTrade/btcusdt@aggTrade/xrpusdt@aggTrade"
 )
-BINANCE_REST = "https://api.binance.com/api/v3/klines"
+BINANCE_REST = "https://fapi.binance.com/fapi/v1/klines"
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 MACD_REST_LIMIT = 100
+CVD_SLOPE_WINDOW_SECS = 30
 
 # ── Internal state ────────────────────────────────────────────────────────────
 # _prev_live_close tracks whether the previous state was None (candle boundary)
@@ -83,6 +107,7 @@ _prev_live_close = {
 }
 _lock = threading.Lock()
 _closed_closes = {asset: deque(maxlen=MACD_REST_LIMIT) for asset in SYMBOL_MAP.values()}
+_cvd_points = {asset: deque(maxlen=300) for asset in SYMBOL_MAP.values()}
 
 
 def _ema_series(values, period):
@@ -120,6 +145,35 @@ def _update_macd_histogram(asset, current_close=None):
         closes.append(float(current_close))
     macd_histogram[asset] = _macd_hist_pair(closes)
 
+
+
+def _update_cvd(asset, qty, buyer_is_maker):
+    # buyer_is_maker=True means taker sell; False means taker buy
+    delta = -float(qty) if buyer_is_maker else float(qty)
+    cvd_value[asset] = float(cvd_value.get(asset, 0.0)) + delta
+    cvd_value_window[asset] = float(cvd_value_window.get(asset, 0.0)) + delta
+    now_ts = time.time()
+    pts = _cvd_points[asset]
+    pts.append((now_ts, cvd_value[asset]))
+    while pts and (now_ts - pts[0][0]) > CVD_SLOPE_WINDOW_SECS:
+        pts.popleft()
+    if len(pts) >= 2:
+        dt = max(pts[-1][0] - pts[0][0], 1e-6)
+        cvd_slope[asset] = (pts[-1][1] - pts[0][1]) / dt
+    else:
+        cvd_slope[asset] = 0.0
+
+
+def get_cvd_snapshot(asset):
+    with _lock:
+        pts = _cvd_points.get(asset)
+        count = len(pts) if pts is not None else 0
+        return (
+            float(cvd_value.get(asset, 0.0)),
+            float(cvd_value_window.get(asset, 0.0)),
+            float(cvd_slope.get(asset, 0.0)),
+            int(count),
+        )
 
 def get_macd_histogram(asset):
     """Thread-safe lookup for (previous_histogram, current_histogram)."""
@@ -193,7 +247,20 @@ def _on_message(ws, message):
     try:
         outer = json.loads(message)
         data  = outer.get("data", outer)
-        k     = data.get("k")
+        event_type = data.get("e")
+
+        if event_type == "aggTrade":
+            symbol = data.get("s", "").lower()
+            asset = SYMBOL_MAP.get(symbol)
+            if not asset:
+                return
+            qty = float(data.get("q", 0.0))
+            buyer_is_maker = bool(data.get("m", False))
+            with _lock:
+                _update_cvd(asset, qty, buyer_is_maker)
+            return
+
+        k = data.get("k")
         if not k:
             return
 
@@ -216,6 +283,7 @@ def _on_message(ws, message):
                 candle_open[asset]      = 0.0   # cleared; next tick will set new open
                 _closed_closes[asset].append(close)
                 _update_macd_histogram(asset)
+                cvd_value_window[asset] = 0.0
                 log.info(
                     "[WS] %s candle closed | close=%.4f",
                     asset.upper(), close,
