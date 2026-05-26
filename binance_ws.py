@@ -2,7 +2,7 @@
 binance_ws.py
 =============
 Runs as a background thread alongside fresh_bot23.py.
-Connects to Binance WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
+Connects to Binance Futures WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
 Tracks candle open price, live close price, 15m MACD histogram, and Binance CVD per asset.
 
 Exports:
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # ── Public shared dicts — fresh_bot23 reads these every poll ──────────────────
 # candle_open: open price of the current 15m candle (set on first tick of new candle)
 # live_close:  latest tick close price (None when candle just closed / not yet received)
-# macd_histogram: latest Binance 15m MACD histogram pair (prev, current).
+# macd_histogram: latest Binance Futures 15m MACD histogram pair (prev, current).
 candle_open = {
     "eth": 0.0,
     "sol": 0.0,
@@ -85,11 +85,11 @@ SYMBOL_MAP = {
     "xrpusdt": "xrp",
 }
 WS_URL = (
-    "wss://stream.binance.com:9443/stream"
+    "wss://fstream.binance.com/stream"
     "?streams=ethusdt@kline_15m/solusdt@kline_15m/btcusdt@kline_15m/xrpusdt@kline_15m"
     "/ethusdt@aggTrade/solusdt@aggTrade/btcusdt@aggTrade/xrpusdt@aggTrade"
 )
-BINANCE_REST = "https://api.binance.com/api/v3/klines"
+BINANCE_REST = "https://fapi.binance.com/fapi/v1/klines"
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
