@@ -94,7 +94,7 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 MACD_REST_LIMIT = 100
-CVD_SLOPE_WINDOW_SECS = 60
+CVD_SLOPE_WINDOW_SECS = 30
 
 # ── Internal state ────────────────────────────────────────────────────────────
 # _prev_live_close tracks whether the previous state was None (candle boundary)
