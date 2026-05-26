@@ -166,10 +166,13 @@ def _update_cvd(asset, qty, buyer_is_maker):
 
 def get_cvd_snapshot(asset):
     with _lock:
+        pts = _cvd_points.get(asset)
+        count = len(pts) if pts is not None else 0
         return (
             float(cvd_value.get(asset, 0.0)),
             float(cvd_value_window.get(asset, 0.0)),
             float(cvd_slope.get(asset, 0.0)),
+            int(count),
         )
 
 def get_macd_histogram(asset):
