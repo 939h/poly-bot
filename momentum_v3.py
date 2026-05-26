@@ -134,7 +134,7 @@ REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # 
 BUY_PRICE_MIN  = 1.00   # buy if price >= this
 BUY_PRICE_MAX  = 1.00   # buy if price <= this
 ENTRY_AFTER    = 30    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 870    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 
@@ -190,9 +190,9 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.20"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.6"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.50"))
@@ -203,7 +203,7 @@ OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 8.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
-CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
+CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -1740,7 +1740,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
+                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
@@ -1774,7 +1774,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
 
                 if CVD_OPPO_ENABLED:
-                    _, cvd_window, cvd_slope, cvd_points, _ = get_cvd_snapshot(opp_asset)
+                    _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
                     slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
                     if slope_ok:
@@ -1782,10 +1782,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     else:
                         oppo_cvd_polls[cvd_key] = 0
                     if oppo_cvd_polls.get(cvd_key, 0) < CVD_OPPO_SLOPE_POLLS:
-                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-WAIT", f"polls {oppo_cvd_polls.get(cvd_key,0)}/{CVD_OPPO_SLOPE_POLLS} slope={cvd_slope:.6f} win={cvd_window:.2f} pts={cvd_points}")
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-WAIT", f"polls {oppo_cvd_polls.get(cvd_key,0)}/{CVD_OPPO_SLOPE_POLLS} slope={cvd_slope:.6f} win={cvd_window:.2f}")
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "cvd-not-confirmed")
                         continue
-                    log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f pts=%d", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window, cvd_points)
+                    log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
 
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price)
@@ -1939,8 +1939,8 @@ def _build_state_snapshot():
         else:
             gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
-        cvd_session, cvd_window, cvd_slope, cvd_points, cvd_last = get_cvd_snapshot(a)
-        cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6), "points": cvd_points, "last": cvd_last}
+        cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
+        cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -1949,6 +1949,7 @@ def _build_state_snapshot():
         "prices":        dict(live_prices),
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
+        "cvd":           cvd_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -2203,7 +2204,7 @@ function render(s){
     const oppoCell=oppoParts||'<span class="dim">—</span>';
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    const cvdStr=((cv.points||0)>=2)?((cv.window!=null?cv.window.toFixed(3):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(6):'—')):('0.000 / 0.000 (pts '+(cv.points||0)+')');
+    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
