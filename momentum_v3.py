@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot, get_candle_history
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +137,10 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
+EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "true"
+EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
+EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
+EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "true").lower() == "true"
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -296,6 +300,7 @@ asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
 last_pnl_snapshot  = 0
+ema_history = {a: deque(maxlen=120) for a in ASSETS}
 
 _skip_first_window = False
 _startup_window_ts = None
@@ -341,12 +346,13 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    ema_history = {a: deque(maxlen=120) for a in ASSETS}
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -1740,8 +1746,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
-                             opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
+                             opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
                 if f"{opp_asset}_{side}_oppo" in open_positions:
@@ -1772,6 +1778,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                  opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                         continue
+
+                if not _ema_confirms_side(opp_asset, side):
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
+                    continue
 
                 if CVD_OPPO_ENABLED:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
@@ -1838,6 +1848,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         triggered_side = triggered_key.split("_")[1]
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
+            continue
+        if not _ema_confirms_side(asset, triggered_side):
             continue
 
         stats["triggers"] += 1
@@ -1926,6 +1938,8 @@ def _build_state_snapshot():
     gap_out = {}
     gap_threshold_out = {}
     cvd_out = {}
+    ema_now = {}
+    candle_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
@@ -1941,6 +1955,12 @@ def _build_state_snapshot():
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
         cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
         cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
+        ema_fast, ema_slow = get_ema_snapshot(a)
+        ema_now[a] = {
+            "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
+            "ema_slow": round(float(ema_slow), 4) if ema_slow is not None else None,
+        }
+        candle_out[a] = get_candle_history(a, limit=18)
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -1950,6 +1970,9 @@ def _build_state_snapshot():
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
+        "ema_now":       ema_now,
+        "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
+        "binance_candles": candle_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -2108,6 +2131,41 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
+function drawEmaChart(candles, wrap){
+  if(!candles||candles.length<2){
+    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough candle data yet</p>';
+    return;
+  }
+  let canvas=wrap.querySelector('canvas');
+  if(!canvas){canvas=document.createElement('canvas');wrap.appendChild(canvas);}
+  const W=wrap.offsetWidth||600,H=180;
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const padT=12,padB=20,padL=48,padR=12;
+  const cW=W-padL-padR,cH=H-padT-padB;
+  const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
+  const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
+  const xStep=cW/candles.length;
+  const yOf=v=>padT+cH-((v-minV)/range)*cH;
+  ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
+  [0,.5,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
+  candles.forEach((c,i)=>{
+    const x=padL+i*xStep+xStep*0.5;
+    const yH=yOf(c.high), yL=yOf(c.low), yO=yOf(c.open), yC=yOf(c.close);
+    const up=c.close>=c.open;
+    ctx.strokeStyle=up?'#1db87a':'#e24b4a';
+    ctx.beginPath();ctx.moveTo(x,yH);ctx.lineTo(x,yL);ctx.stroke();
+    const bw=Math.max(3,xStep*0.6), by=Math.min(yO,yC), bh=Math.max(1,Math.abs(yC-yO));
+    ctx.fillStyle=up?'#1db87a':'#e24b4a';ctx.fillRect(x-bw/2,by,bw,bh);
+  });
+  const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
+  candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
+  const drawLine=(series,color)=>{ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
+  drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
+}
+
+
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
 function tlToggle(){
@@ -2173,6 +2231,7 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -2283,6 +2342,17 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2>EMA Trend (Binance 15m) <span style="font-size:11px;color:#5a6a85;font-weight:400">EMA8 <span style="color:#fbbf24">yellow</span> / EMA25 <span style="color:#ff4fd8">pink</span></span></h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${assets.map(a=>{
+        const e=emaNow[a]||{},f=e.ema_fast,s=e.ema_slow;
+        let t='—',c='dim';
+        if(f!=null && s!=null){ t=(f>=s)?'UP':'DOWN'; c=(f>=s)?'green':'red'; }
+        return `<button id="emaBtn_${a}" onclick="window.__emaAsset='${a}'" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${c}">${t}</span></button>`;
+      }).join('')}</div>
+      <div class="chart-wrap" id="emaChartWrap"></div>
+    </div>
+
+    <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
@@ -2320,6 +2390,10 @@ function render(s){
 
   const wrap=document.getElementById('chartWrap');
   if(wrap)drawChart(pnlHist,wrap);
+  const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
+  window.__emaAsset=selected;
+  const emaWrap=document.getElementById('emaChartWrap');
+  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
@@ -2549,6 +2623,14 @@ def main():
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
+            for a in ASSETS:
+                ema_fast, ema_slow = get_ema_snapshot(a)
+                if ema_fast is not None and ema_slow is not None:
+                    ema_history[a].append({
+                        "ts": datetime.now().strftime("%H:%M:%S"),
+                        "ema_fast": round(float(ema_fast), 4),
+                        "ema_slow": round(float(ema_slow), 4),
+                    })
             save_state()
 
         except KeyboardInterrupt:
@@ -2580,6 +2662,27 @@ def main():
             time.sleep(30)
         else:
             time.sleep(POLL_SECS)
+
+
+def _ema_confirms_side(asset, side):
+    if not EMA_CONFIRM_ENABLED:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
+        return True
+    ema_fast, ema_slow = get_ema_snapshot(asset)
+    if ema_fast is None or ema_slow is None:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA warmup (ema data not ready yet)", asset.upper(), side.upper())
+        return True
+    if side == "yes":
+        ok = ema_fast >= ema_slow
+    else:
+        ok = ema_fast <= ema_slow
+    if not ok:
+        log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    elif EMA_PASS_LOG_ENABLED:
+        log.info("[EMA-PASS] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    return ok
 
 
 if __name__ == "__main__":
