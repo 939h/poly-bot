@@ -13,6 +13,7 @@ Exports:
     cvd_value_window — dict {asset: float} per-15m-window cumulative volume delta
     cvd_slope — dict {asset: float} short-window cvd slope
     get_macd_histogram(asset) — thread-safe MACD histogram lookup
+    get_ema_snapshot(asset) — thread-safe EMA(8)/EMA(25) lookup
     get_cvd_snapshot(asset) — thread-safe (cvd, slope) lookup
     start_rsi_feed() — call once on startup
 
@@ -76,6 +77,12 @@ cvd_value_window = {
     "btc": 0.0,
     "xrp": 0.0,
 }
+ema_values = {
+    "eth": {"ema_fast": None, "ema_slow": None},
+    "sol": {"ema_fast": None, "ema_slow": None},
+    "btc": {"ema_fast": None, "ema_slow": None},
+    "xrp": {"ema_fast": None, "ema_slow": None},
+}
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SYMBOL_MAP = {
@@ -94,6 +101,8 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 MACD_REST_LIMIT = 100
+EMA_FAST_PERIOD = 8
+EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 30
 
 # ── Internal state ────────────────────────────────────────────────────────────
@@ -146,6 +155,21 @@ def _update_macd_histogram(asset, current_close=None):
     macd_histogram[asset] = _macd_hist_pair(closes)
 
 
+def _update_ema_values(asset, current_close=None):
+    closes = list(_closed_closes[asset])
+    if current_close is not None:
+        closes.append(float(current_close))
+    if len(closes) < 2:
+        ema_values[asset] = {"ema_fast": None, "ema_slow": None}
+        return
+    fast_series = _ema_series(closes, EMA_FAST_PERIOD)
+    slow_series = _ema_series(closes, EMA_SLOW_PERIOD)
+    ema_values[asset] = {
+        "ema_fast": float(fast_series[-1]) if fast_series else None,
+        "ema_slow": float(slow_series[-1]) if slow_series else None,
+    }
+
+
 
 def _update_cvd(asset, qty, buyer_is_maker):
     # buyer_is_maker=True means taker sell; False means taker buy
@@ -177,6 +201,12 @@ def get_macd_histogram(asset):
     with _lock:
         pair = macd_histogram.get(asset)
         return tuple(pair) if pair is not None else None
+
+
+def get_ema_snapshot(asset):
+    with _lock:
+        pair = ema_values.get(asset) or {}
+        return (pair.get("ema_fast"), pair.get("ema_slow"))
 
 
 # ── REST prefetch — seed candle_open from last closed candle on startup ───────
@@ -216,6 +246,7 @@ def _prefetch_candle_opens():
                     live_close[asset]     = close_price
                     _prev_live_close[asset] = close_price
                     _update_macd_histogram(asset, close_price)
+                    _update_ema_values(asset, close_price)
                 hist_pair = macd_histogram.get(asset)
                 if hist_pair is not None:
                     log.info(
@@ -280,6 +311,7 @@ def _on_message(ws, message):
                 candle_open[asset]      = 0.0   # cleared; next tick will set new open
                 _closed_closes[asset].append(close)
                 _update_macd_histogram(asset)
+                _update_ema_values(asset)
                 cvd_value_window[asset] = 0.0
                 log.info(
                     "[WS] %s candle closed | close=%.4f",
@@ -297,6 +329,7 @@ def _on_message(ws, message):
                 live_close[asset]       = close
                 _prev_live_close[asset] = close
                 _update_macd_histogram(asset, close)
+                _update_ema_values(asset, close)
 
     except (json.JSONDecodeError, TypeError, ValueError) as e:
         log.error("[WS] message parse error: %s", e)

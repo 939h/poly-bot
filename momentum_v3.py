@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +137,9 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
+EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "true"
+EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
+EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -1773,6 +1776,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                         continue
 
+                if not _ema_confirms_side(opp_asset, side):
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
+                    continue
+
                 if CVD_OPPO_ENABLED:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
@@ -1838,6 +1845,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         triggered_side = triggered_key.split("_")[1]
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
+            continue
+        if not _ema_confirms_side(asset, triggered_side):
             continue
 
         stats["triggers"] += 1
@@ -2580,6 +2589,21 @@ def main():
             time.sleep(30)
         else:
             time.sleep(POLL_SECS)
+
+
+def _ema_confirms_side(asset, side):
+    if not EMA_CONFIRM_ENABLED:
+        return True
+    ema_fast, ema_slow = get_ema_snapshot(asset)
+    if ema_fast is None or ema_slow is None:
+        return True
+    if side == "yes":
+        ok = ema_fast >= ema_slow
+    else:
+        ok = ema_fast <= ema_slow
+    if not ok:
+        log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    return ok
 
 
 if __name__ == "__main__":
