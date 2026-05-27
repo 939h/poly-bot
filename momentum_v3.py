@@ -122,7 +122,7 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
-ASSETS         = ["btc", "sol", "xrp"]
+ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
@@ -1746,7 +1746,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
+                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
