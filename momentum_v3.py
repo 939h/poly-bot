@@ -77,6 +77,20 @@ load_dotenv()
 
 from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
 
+
+def _safe_cvd_snapshot(asset):
+    """Backward/forward compatible CVD snapshot tuple parser."""
+    snapshot = get_cvd_snapshot(asset)
+    if not isinstance(snapshot, tuple):
+        return 0.0, 0.0, 0.0
+    if len(snapshot) >= 3:
+        return float(snapshot[0]), float(snapshot[1]), float(snapshot[2])
+    if len(snapshot) == 2:
+        return float(snapshot[0]), 0.0, float(snapshot[1])
+    if len(snapshot) == 1:
+        return float(snapshot[0]), 0.0, 0.0
+    return 0.0, 0.0, 0.0
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 class _ColorFormatter(logging.Formatter):
@@ -1774,7 +1788,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
 
                 if CVD_OPPO_ENABLED:
-                    _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
+                    _, cvd_window, cvd_slope = _safe_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
                     slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
                     if slope_ok:
@@ -1939,7 +1953,7 @@ def _build_state_snapshot():
         else:
             gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
-        cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
+        cvd_session, cvd_window, cvd_slope = _safe_cvd_snapshot(a)
         cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
