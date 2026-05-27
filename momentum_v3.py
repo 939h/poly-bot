@@ -566,22 +566,50 @@ def build_slug(asset, window_ts):
     return f"{asset}-updown-{INTERVAL}-{window_ts}"
 
 
+
+
+def _json_or_none(resp, endpoint, slug):
+    """Parse JSON safely; log concise diagnostics for empty/non-JSON responses."""
+    if resp.status_code >= 400:
+        body = (resp.text or "").strip().replace("\n", " ")[:180]
+        log.warning("Gamma API %s HTTP %d (%s)%s", endpoint, resp.status_code, slug, f": {body}" if body else "")
+        return None
+    text = (resp.text or "").strip()
+    if not text:
+        log.warning("Gamma API %s empty response (%s)", endpoint, slug)
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        sample = text.replace("\n", " ")[:180]
+        log.warning("Gamma API %s non-JSON response (%s): %s", endpoint, slug, sample)
+        return None
+
 def fetch_market_by_slug(slug):
     try:
         r = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=10)
-        data = r.json()
-        markets = data if isinstance(data, list) else data.get("markets", [])
+        data = _json_or_none(r, "/markets", slug)
+        if isinstance(data, list):
+            markets = data
+        elif isinstance(data, dict):
+            markets = data.get("markets", [])
+        else:
+            markets = []
         if markets:
             return markets[0]
+
         r2 = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=10)
-        events = r2.json()
+        events = _json_or_none(r2, "/events", slug)
         if isinstance(events, list) and events:
             nested = events[0].get("markets", [])
             if nested:
                 return nested[0]
         return None
+    except requests.RequestException as e:
+        log.warning("Gamma API request error (%s): %s", slug, e)
+        return None
     except Exception as e:
-        log.error("Gamma API error (%s): %s", slug, e)
+        log.error("Gamma API unexpected error (%s): %s", slug, e)
         return None
 
 
