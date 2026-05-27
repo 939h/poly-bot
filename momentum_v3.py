@@ -276,6 +276,7 @@ trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
+oppo_macd_block_logged = set()     # keys already logged with OPPO-MACD-BLOCK this window
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
@@ -1793,8 +1794,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 if not macd_ok:
                     normal_blacklisted_assets.add(opp_asset)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "MACD-BLOCK", macd_reason)
-                    log.info("[OPPO-MACD-BLOCK] %s_%s %s — blacklisted this window",
-                             opp_asset.upper(), side.upper(), macd_reason)
+                    if opp_key not in oppo_macd_block_logged:
+                        log.info("[OPPO-MACD-BLOCK] %s_%s %s — blacklisted this window",
+                                 opp_asset.upper(), side.upper(), macd_reason)
+                        oppo_macd_block_logged.add(opp_key)
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "macd-pattern-mismatch")
                     continue
 
@@ -1989,8 +1992,16 @@ def _build_state_snapshot():
         else:
             gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
-        cvd_session, cvd_window, cvd_slope, *_ = get_cvd_snapshot(a)
-        cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
+        cvd_session, cvd_window, cvd_slope, cvd_points, cvd_last_ts = get_cvd_snapshot(a)
+        cvd_age = (time.time() - cvd_last_ts) if cvd_last_ts > 0 else None
+        cvd_out[a] = {
+            "session": round(cvd_session, 3),
+            "window": round(cvd_window, 3),
+            "slope": round(cvd_slope, 6),
+            "points": int(cvd_points),
+            "last_update": round(cvd_last_ts, 3) if cvd_last_ts > 0 else None,
+            "age_sec": round(cvd_age, 2) if cvd_age is not None else None,
+        }
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -2254,7 +2265,9 @@ function render(s){
     const oppoCell=oppoParts||'<span class="dim">—</span>';
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
+    const age=(cv.age_sec!=null?cv.age_sec.toFixed(1)+'s':'—');
+    const stale=(cv.age_sec!=null&&cv.age_sec>10)?' <span class="red">STALE</span>':'';
+    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—')+' / '+age+stale;
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
@@ -2564,6 +2577,7 @@ def main():
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_macd_block_logged.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
