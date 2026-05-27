@@ -263,9 +263,18 @@ def _on_message(ws, message):
             if not asset:
                 return
             qty = float(data.get("q", 0.0))
+            price = float(data.get("p", 0.0))
             buyer_is_maker = bool(data.get("m", False))
             with _lock:
                 _update_cvd(asset, qty, buyer_is_maker)
+                # Keep live_close hot from trade stream too (100ms), so gap/cvd don't appear frozen
+                # when kline stream is temporarily quiet/reconnecting.
+                if price > 0:
+                    live_close[asset] = price
+                    if candle_open.get(asset, 0.0) <= 0.0:
+                        candle_open[asset] = price
+                    _prev_live_close[asset] = price
+                    _update_macd_histogram(asset, price)
             return
 
         k = data.get("k")
