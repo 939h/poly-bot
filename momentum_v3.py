@@ -122,7 +122,7 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
-ASSETS         = ["btc", "sol", "xrp"]
+ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
