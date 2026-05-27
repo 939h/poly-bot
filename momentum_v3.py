@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot, get_candle_history
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -1939,6 +1939,7 @@ def _build_state_snapshot():
     gap_threshold_out = {}
     cvd_out = {}
     ema_now = {}
+    candle_out = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
@@ -1959,6 +1960,7 @@ def _build_state_snapshot():
             "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
             "ema_slow": round(float(ema_slow), 4) if ema_slow is not None else None,
         }
+        candle_out[a] = get_candle_history(a, limit=18)
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -1970,6 +1972,7 @@ def _build_state_snapshot():
         "cvd":           cvd_out,
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
+        "binance_candles": candle_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -2128,9 +2131,9 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
-function drawEmaChart(points, wrap){
-  if(!points||points.length<2){
-    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough EMA data yet</p>';
+function drawEmaChart(candles, wrap){
+  if(!candles||candles.length<2){
+    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough candle data yet</p>';
     return;
   }
   let canvas=wrap.querySelector('canvas');
@@ -2139,26 +2142,29 @@ function drawEmaChart(points, wrap){
   canvas.width=W;canvas.height=H;
   const ctx=canvas.getContext('2d');
   ctx.clearRect(0,0,W,H);
-
-  const fast=points.map(p=>p.ema_fast).filter(v=>v!=null);
-  const slow=points.map(p=>p.ema_slow).filter(v=>v!=null);
-  if(fast.length<2 || slow.length<2){ wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough EMA data yet</p>'; return; }
-  const minV=Math.min(...fast,...slow),maxV=Math.max(...fast,...slow),range=maxV-minV||1;
-  const padT=20,padB=34,padL=56,padR=16;
+  const padT=12,padB=20,padL=48,padR=12;
   const cW=W-padL-padR,cH=H-padT-padB;
-  const xOf=i=>padL+i*(cW/(points.length-1));
-  const yOf=v=>padT+cH-(((v-minV)/range)*cH);
-
+  const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
+  const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
+  const xStep=cW/candles.length;
+  const yOf=v=>padT+cH-((v-minV)/range)*cH;
   ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
-  [0,.25,.5,.75,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
-  const drawSeries=(vals,color)=>{
-    ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;
-    vals.forEach((v,i)=>{ if(v==null) return; const x=xOf(i),y=yOf(v); ctx[(i===0||vals[i-1]==null)?'moveTo':'lineTo'](x,y);});
-    ctx.stroke();
-  };
-  drawSeries(points.map(p=>p.ema_fast),'#fbbf24'); // EMA8 yellow
-  drawSeries(points.map(p=>p.ema_slow),'#ff4fd8'); // EMA25 pink
+  [0,.5,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
+  candles.forEach((c,i)=>{
+    const x=padL+i*xStep+xStep*0.5;
+    const yH=yOf(c.high), yL=yOf(c.low), yO=yOf(c.open), yC=yOf(c.close);
+    const up=c.close>=c.open;
+    ctx.strokeStyle=up?'#1db87a':'#e24b4a';
+    ctx.beginPath();ctx.moveTo(x,yH);ctx.lineTo(x,yL);ctx.stroke();
+    const bw=Math.max(3,xStep*0.6), by=Math.min(yO,yC), bh=Math.max(1,Math.abs(yC-yO));
+    ctx.fillStyle=up?'#1db87a':'#e24b4a';ctx.fillRect(x-bw/2,by,bw,bh);
+  });
+  const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
+  candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
+  const drawLine=(series,color)=>{ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
+  drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
 }
+
 
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
@@ -2225,7 +2231,7 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
-  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{};
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -2387,7 +2393,7 @@ function render(s){
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
   const emaWrap=document.getElementById('emaChartWrap');
-  if(emaWrap)drawEmaChart(emaHistory[selected]||[], emaWrap);
+  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
