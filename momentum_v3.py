@@ -1774,7 +1774,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
 
                 if CVD_OPPO_ENABLED:
-                    _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
+                    _, cvd_window, cvd_slope, _, _ = _cvd_fields(opp_asset)
                     cvd_key = opp_key
                     slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
                     if slope_ok:
@@ -1896,6 +1896,24 @@ def print_status(secs_left=None):
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
+
+
+def _cvd_fields(asset):
+    """Backward/forward-compatible CVD snapshot parser."""
+    snap = get_cvd_snapshot(asset)
+    if isinstance(snap, (tuple, list)):
+        if len(snap) >= 5:
+            session, window, slope, points, last_update = snap[:5]
+        elif len(snap) == 3:
+            session, window, slope = snap
+            points, last_update = 0, 0.0
+        else:
+            session = window = slope = 0.0
+            points, last_update = 0, 0.0
+    else:
+        session = window = slope = 0.0
+        points, last_update = 0, 0.0
+    return float(session), float(window), float(slope), int(points), float(last_update)
 def _build_state_snapshot():
     positions_out = {}
     for k, p in open_positions.items():
@@ -1939,8 +1957,9 @@ def _build_state_snapshot():
         else:
             gap_threshold_out[a] = None
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
-        cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
-        cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
+        cvd_session, cvd_window, cvd_slope, cvd_points, cvd_last_update = _cvd_fields(a)
+        cvd_age = max(0.0, time.time() - cvd_last_update) if cvd_last_update > 0 else None
+        cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6), "points": cvd_points, "age_sec": (round(cvd_age, 1) if cvd_age is not None else None)}
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
