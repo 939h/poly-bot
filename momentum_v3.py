@@ -123,7 +123,7 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
-ASSETS         = ["btc", "eth", "sol", "xrp"]
+ASSETS         = ["btc", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
@@ -277,6 +277,7 @@ trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
+oppo_macd_block_logged = set()     # keys already logged with OPPO-MACD-BLOCK this window
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
@@ -1409,6 +1410,42 @@ def _update_prices(result):
         if current_gap > peak_gap.get(asset, 0.0):
             peak_gap[asset] = current_gap
 
+
+
+def _macd_gate_ok(asset, side):
+    """
+    Enforce 3-bar MACD histogram pattern before normal buy.
+
+    Accepted YES patterns:
+      A) 3 hollow green bars: b1>0, b2>b1, b3>b2
+      B) red->green->green: b1<0, b2>0, b3>b2
+
+    Accepted NO patterns:
+      A) 3 solid red bars: b1<0, b2<b1, b3<b2
+      B) green->red->red: b1>0, b2<0, b3<b2
+
+    Returns: (ok: bool, reason: str)
+    """
+    triplet = get_macd_histogram(asset)
+    if triplet is None or len(triplet) < 3:
+        return False, "macd-insufficient-bars"
+
+    b1, b2, b3 = [float(x) for x in triplet[-3:]]
+
+    yes_all_green = (b1 > 0.0) and (b2 > b1) and (b3 > b2)
+    yes_red_green_green = (b1 < 0.0) and (b2 > 0.0) and (b3 > b2)
+
+    no_all_red = (b1 < 0.0) and (b2 < b1) and (b3 < b2)
+    no_green_red_red = (b1 > 0.0) and (b2 < 0.0) and (b3 < b2)
+
+    if side == "yes":
+        ok = yes_all_green or yes_red_green_green
+        mode = "yes-3green" if yes_all_green else ("yes-rgg" if yes_red_green_green else "no-match")
+        return ok, f"{mode} bars={b1:.6f},{b2:.6f},{b3:.6f}"
+
+    ok = no_all_red or no_green_red_red
+    mode = "no-3red" if no_all_red else ("no-grr" if no_green_red_red else "no-match")
+    return ok, f"{mode} bars={b1:.6f},{b2:.6f},{b3:.6f}"
 def _trend_guard_ok(trigger_asset, trigger_side, results):
     confirmations = []
     for asset in ASSETS:
@@ -2242,7 +2279,9 @@ function render(s){
     const oppoCell=oppoParts||'<span class="dim">—</span>';
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
+    const age=(cv.age_sec!=null?cv.age_sec.toFixed(1)+'s':'—');
+    const stale=(cv.age_sec!=null&&cv.age_sec>10)?' <span class="red">STALE</span>':'';
+    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—')+' / '+age+stale;
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
@@ -2552,6 +2591,7 @@ def main():
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_macd_block_logged.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
