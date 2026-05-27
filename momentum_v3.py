@@ -300,6 +300,7 @@ asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
 last_pnl_snapshot  = 0
+ema_history = {a: deque(maxlen=120) for a in ASSETS}
 
 _skip_first_window = False
 _startup_window_ts = None
@@ -345,12 +346,13 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    ema_history = {a: deque(maxlen=120) for a in ASSETS}
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -1936,6 +1938,7 @@ def _build_state_snapshot():
     gap_out = {}
     gap_threshold_out = {}
     cvd_out = {}
+    ema_now = {}
     for a in ASSETS:
         c_open = candle_open.get(a, 0.0)
         c_live = live_close.get(a)
@@ -1951,6 +1954,11 @@ def _build_state_snapshot():
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
         cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
         cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
+        ema_fast, ema_slow = get_ema_snapshot(a)
+        ema_now[a] = {
+            "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
+            "ema_slow": round(float(ema_slow), 4) if ema_slow is not None else None,
+        }
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
@@ -1960,6 +1968,8 @@ def _build_state_snapshot():
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
+        "ema_now":       ema_now,
+        "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -2118,6 +2128,38 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
+function drawEmaChart(points, wrap){
+  if(!points||points.length<2){
+    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough EMA data yet</p>';
+    return;
+  }
+  let canvas=wrap.querySelector('canvas');
+  if(!canvas){canvas=document.createElement('canvas');wrap.appendChild(canvas);}
+  const W=wrap.offsetWidth||600,H=180;
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+
+  const fast=points.map(p=>p.ema_fast).filter(v=>v!=null);
+  const slow=points.map(p=>p.ema_slow).filter(v=>v!=null);
+  if(fast.length<2 || slow.length<2){ wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough EMA data yet</p>'; return; }
+  const minV=Math.min(...fast,...slow),maxV=Math.max(...fast,...slow),range=maxV-minV||1;
+  const padT=20,padB=34,padL=56,padR=16;
+  const cW=W-padL-padR,cH=H-padT-padB;
+  const xOf=i=>padL+i*(cW/(points.length-1));
+  const yOf=v=>padT+cH-(((v-minV)/range)*cH);
+
+  ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
+  [0,.25,.5,.75,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
+  const drawSeries=(vals,color)=>{
+    ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;
+    vals.forEach((v,i)=>{ if(v==null) return; const x=xOf(i),y=yOf(v); ctx[(i===0||vals[i-1]==null)?'moveTo':'lineTo'](x,y);});
+    ctx.stroke();
+  };
+  drawSeries(points.map(p=>p.ema_fast),'#fbbf24'); // EMA8 yellow
+  drawSeries(points.map(p=>p.ema_slow),'#ff4fd8'); // EMA25 pink
+}
+
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
 function tlToggle(){
@@ -2183,6 +2225,7 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -2293,6 +2336,17 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2>EMA Trend (Binance 15m) <span style="font-size:11px;color:#5a6a85;font-weight:400">EMA8 <span style="color:#fbbf24">yellow</span> / EMA25 <span style="color:#ff4fd8">pink</span></span></h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${assets.map(a=>{
+        const e=emaNow[a]||{},f=e.ema_fast,s=e.ema_slow;
+        let t='—',c='dim';
+        if(f!=null && s!=null){ t=(f>=s)?'UP':'DOWN'; c=(f>=s)?'green':'red'; }
+        return `<button id="emaBtn_${a}" onclick="window.__emaAsset='${a}'" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${c}">${t}</span></button>`;
+      }).join('')}</div>
+      <div class="chart-wrap" id="emaChartWrap"></div>
+    </div>
+
+    <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
@@ -2330,6 +2384,10 @@ function render(s){
 
   const wrap=document.getElementById('chartWrap');
   if(wrap)drawChart(pnlHist,wrap);
+  const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
+  window.__emaAsset=selected;
+  const emaWrap=document.getElementById('emaChartWrap');
+  if(emaWrap)drawEmaChart(emaHistory[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
@@ -2559,6 +2617,14 @@ def main():
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
+            for a in ASSETS:
+                ema_fast, ema_slow = get_ema_snapshot(a)
+                if ema_fast is not None and ema_slow is not None:
+                    ema_history[a].append({
+                        "ts": datetime.now().strftime("%H:%M:%S"),
+                        "ema_fast": round(float(ema_fast), 4),
+                        "ema_slow": round(float(ema_slow), 4),
+                    })
             save_state()
 
         except KeyboardInterrupt:
