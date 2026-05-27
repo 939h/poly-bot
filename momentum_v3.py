@@ -75,7 +75,8 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_macd_histogram
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
+from macd_guard import MacdGuard
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -1798,14 +1799,13 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                              opp_asset.upper(), side.upper(), COOLDOWN_SEC)
                     continue
 
-                macd_ok, macd_reason = _macd_gate_ok(opp_asset, side)
+                macd_guard.update_live(opp_asset, candle_open.get(opp_asset, 0.0), live_close.get(opp_asset))
+                macd_ok, macd_reason = macd_guard.gate_ok(opp_asset, side)
                 if not macd_ok:
                     normal_blacklisted_assets.add(opp_asset)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "MACD-BLOCK", macd_reason)
-                    if opp_key not in oppo_macd_block_logged:
-                        log.info("[OPPO-MACD-BLOCK] %s_%s %s — blacklisted this window",
-                                 opp_asset.upper(), side.upper(), macd_reason)
-                        oppo_macd_block_logged.add(opp_key)
+                    log.info("[OPPO-MACD-BLOCK] %s_%s %s — blacklisted this window",
+                             opp_asset.upper(), side.upper(), macd_reason)
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "macd-pattern-mismatch")
                     continue
 
@@ -1886,6 +1886,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         _, yes_price, yes_token, no_token = result
         no_price = round(1.0 - yes_price, 4)
 
+        macd_guard.update_live(asset, candle_open.get(asset, 0.0), live_close.get(asset))
+
         # Determine which side triggered
         triggered_key   = None
         triggered_token = None
@@ -1903,7 +1905,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if triggered_key is None:
             continue
         triggered_side = triggered_key.split("_")[1]
-        macd_ok, macd_reason = _macd_gate_ok(asset, triggered_side)
+        macd_ok, macd_reason = macd_guard.gate_ok(asset, triggered_side)
         if not macd_ok:
             normal_blacklisted_assets.add(asset)
             log.info("[MACD-BLOCK] %s_%s %s — blacklisted this window", asset.upper(), triggered_side.upper(), macd_reason)
