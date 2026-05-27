@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_macd_histogram
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -276,6 +276,7 @@ trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
+oppo_macd_block_logged = set()     # keys already logged with OPPO-MACD-BLOCK this window
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
@@ -1408,6 +1409,42 @@ def _update_prices(result):
         if current_gap > peak_gap.get(asset, 0.0):
             peak_gap[asset] = current_gap
 
+
+
+def _macd_gate_ok(asset, side):
+    """
+    Enforce 3-bar MACD histogram pattern before normal buy.
+
+    Accepted YES patterns:
+      A) 3 hollow green bars: b1>0, b2>b1, b3>b2
+      B) red->green->green: b1<0, b2>0, b3>b2
+
+    Accepted NO patterns:
+      A) 3 solid red bars: b1<0, b2<b1, b3<b2
+      B) green->red->red: b1>0, b2<0, b3<b2
+
+    Returns: (ok: bool, reason: str)
+    """
+    triplet = get_macd_histogram(asset)
+    if triplet is None or len(triplet) < 3:
+        return False, "macd-insufficient-bars"
+
+    b1, b2, b3 = [float(x) for x in triplet[-3:]]
+
+    yes_all_green = (b1 > 0.0) and (b2 > b1) and (b3 > b2)
+    yes_red_green_green = (b1 < 0.0) and (b2 > 0.0) and (b3 > b2)
+
+    no_all_red = (b1 < 0.0) and (b2 < b1) and (b3 < b2)
+    no_green_red_red = (b1 > 0.0) and (b2 < 0.0) and (b3 < b2)
+
+    if side == "yes":
+        ok = yes_all_green or yes_red_green_green
+        mode = "yes-3green" if yes_all_green else ("yes-rgg" if yes_red_green_green else "no-match")
+        return ok, f"{mode} bars={b1:.6f},{b2:.6f},{b3:.6f}"
+
+    ok = no_all_red or no_green_red_red
+    mode = "no-3red" if no_all_red else ("no-grr" if no_green_red_red else "no-match")
+    return ok, f"{mode} bars={b1:.6f},{b2:.6f},{b3:.6f}"
 def _trend_guard_ok(trigger_asset, trigger_side, results):
     confirmations = []
     for asset in ASSETS:
@@ -1761,6 +1798,17 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                              opp_asset.upper(), side.upper(), COOLDOWN_SEC)
                     continue
 
+                macd_ok, macd_reason = _macd_gate_ok(opp_asset, side)
+                if not macd_ok:
+                    normal_blacklisted_assets.add(opp_asset)
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "MACD-BLOCK", macd_reason)
+                    if opp_key not in oppo_macd_block_logged:
+                        log.info("[OPPO-MACD-BLOCK] %s_%s %s — blacklisted this window",
+                                 opp_asset.upper(), side.upper(), macd_reason)
+                        oppo_macd_block_logged.add(opp_key)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "macd-pattern-mismatch")
+                    continue
+
                 spread = get_spread_value(client, opp_token)
                 if spread is not None and spread > MAX_BOOK_SPREAD:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SPREAD", f"{spread:.4f}>{MAX_BOOK_SPREAD:.4f}")
@@ -1855,6 +1903,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if triggered_key is None:
             continue
         triggered_side = triggered_key.split("_")[1]
+        macd_ok, macd_reason = _macd_gate_ok(asset, triggered_side)
+        if not macd_ok:
+            normal_blacklisted_assets.add(asset)
+            log.info("[MACD-BLOCK] %s_%s %s — blacklisted this window", asset.upper(), triggered_side.upper(), macd_reason)
+            continue
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
             continue
@@ -2224,7 +2277,9 @@ function render(s){
     const oppoCell=oppoParts||'<span class="dim">—</span>';
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
-    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
+    const age=(cv.age_sec!=null?cv.age_sec.toFixed(1)+'s':'—');
+    const stale=(cv.age_sec!=null&&cv.age_sec>10)?' <span class="red">STALE</span>':'';
+    const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—')+' / '+age+stale;
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
@@ -2534,6 +2589,7 @@ def main():
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_macd_block_logged.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)

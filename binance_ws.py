@@ -13,7 +13,7 @@ Exports:
     cvd_value_window — dict {asset: float} per-15m-window cumulative volume delta
     cvd_slope — dict {asset: float} short-window cvd slope
     get_macd_histogram(asset) — thread-safe MACD histogram lookup
-    get_cvd_snapshot(asset) — thread-safe (cvd, slope) lookup
+    get_cvd_snapshot(asset) — thread-safe CVD snapshot lookup
     start_rsi_feed() — call once on startup
 
 Usage in fresh_bot23.py:
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # ── Public shared dicts — fresh_bot23 reads these every poll ──────────────────
 # candle_open: open price of the current 15m candle (set on first tick of new candle)
 # live_close:  latest tick close price (None when candle just closed / not yet received)
-# macd_histogram: latest Binance Futures 15m MACD histogram pair (prev, current).
+# macd_histogram: latest Binance Futures 15m MACD histogram triplet (oldest->latest).
 candle_open = {
     "eth": 0.0,
     "sol": 0.0,
@@ -129,8 +129,8 @@ def _ema_series(values, period):
     return series
 
 
-def _macd_hist_pair(closes):
-    """Calculate the previous/current MACD histogram values from closes."""
+def _macd_hist_triplet(closes):
+    """Calculate the last 3 MACD histogram values from closes."""
     if len(closes) < MACD_SLOW + MACD_SIGNAL + 1:
         return None
 
@@ -139,9 +139,9 @@ def _macd_hist_pair(closes):
     dif = [f - s for f, s in zip(fast, slow)]
     dea = _ema_series(dif, MACD_SIGNAL)
     hist = [d - signal for d, signal in zip(dif, dea)]
-    if len(hist) < 2:
+    if len(hist) < 3:
         return None
-    return (hist[-2], hist[-1])
+    return (hist[-3], hist[-2], hist[-1])
 
 
 def _update_macd_histogram(asset, current_close=None):
@@ -149,7 +149,7 @@ def _update_macd_histogram(asset, current_close=None):
     closes = list(_closed_closes[asset])
     if current_close is not None:
         closes.append(float(current_close))
-    macd_histogram[asset] = _macd_hist_pair(closes)
+    macd_histogram[asset] = _macd_hist_triplet(closes)
 
 
 
@@ -184,7 +184,7 @@ def get_cvd_snapshot(asset):
         )
 
 def get_macd_histogram(asset):
-    """Thread-safe lookup for (previous_histogram, current_histogram)."""
+    """Thread-safe lookup for (hist_1, hist_2, hist_3)."""
     with _lock:
         pair = macd_histogram.get(asset)
         return tuple(pair) if pair is not None else None
@@ -263,9 +263,14 @@ def _on_message(ws, message):
             if not asset:
                 return
             qty = float(data.get("q", 0.0))
+            price = float(data.get("p", 0.0))
             buyer_is_maker = bool(data.get("m", False))
             with _lock:
                 _update_cvd(asset, qty, buyer_is_maker)
+                # Keep live_close hot from trade stream too (100ms), so gap/cvd don't appear frozen
+                # when kline stream is temporarily quiet/reconnecting.
+                if price > 0:
+                    live_close[asset] = price
             return
 
         k = data.get("k")
