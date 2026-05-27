@@ -271,10 +271,6 @@ def _on_message(ws, message):
                 # when kline stream is temporarily quiet/reconnecting.
                 if price > 0:
                     live_close[asset] = price
-                    if candle_open.get(asset, 0.0) <= 0.0:
-                        candle_open[asset] = price
-                    _prev_live_close[asset] = price
-                    _update_macd_histogram(asset, price)
             return
 
         k = data.get("k")
