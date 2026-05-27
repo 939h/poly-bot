@@ -140,6 +140,7 @@ TREND_GUARD_MIN_CONFIRMATIONS = 2
 EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "true"
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
+EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "true").lower() == "true"
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -1743,8 +1744,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
-                             opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
+                             opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
                 if f"{opp_asset}_{side}_oppo" in open_positions:
@@ -2593,9 +2594,13 @@ def main():
 
 def _ema_confirms_side(asset, side):
     if not EMA_CONFIRM_ENABLED:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
         return True
     ema_fast, ema_slow = get_ema_snapshot(asset)
     if ema_fast is None or ema_slow is None:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA warmup (ema data not ready yet)", asset.upper(), side.upper())
         return True
     if side == "yes":
         ok = ema_fast >= ema_slow
@@ -2603,6 +2608,8 @@ def _ema_confirms_side(asset, side):
         ok = ema_fast <= ema_slow
     if not ok:
         log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    elif EMA_PASS_LOG_ENABLED:
+        log.info("[EMA-PASS] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
     return ok
 
 
