@@ -75,7 +75,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +137,10 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
+EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "true"
+EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
+EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
+EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "true").lower() == "true"
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -1740,8 +1744,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 rebound_ratio = opp_price / trough if trough > 0 else 0.0
                 if rebound_ratio < OPPO_REBOUND_MULT:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx",
-                             opp_key, rebound_ratio, OPPO_REBOUND_MULT)
+                    log.info("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
+                             opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
                 if f"{opp_asset}_{side}_oppo" in open_positions:
@@ -1772,6 +1776,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                  opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                         continue
+
+                if not _ema_confirms_side(opp_asset, side):
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
+                    continue
 
                 if CVD_OPPO_ENABLED:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
@@ -1838,6 +1846,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         triggered_side = triggered_key.split("_")[1]
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
+            continue
+        if not _ema_confirms_side(asset, triggered_side):
             continue
 
         stats["triggers"] += 1
@@ -2580,6 +2590,27 @@ def main():
             time.sleep(30)
         else:
             time.sleep(POLL_SECS)
+
+
+def _ema_confirms_side(asset, side):
+    if not EMA_CONFIRM_ENABLED:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
+        return True
+    ema_fast, ema_slow = get_ema_snapshot(asset)
+    if ema_fast is None or ema_slow is None:
+        if EMA_PASS_LOG_ENABLED:
+            log.info("[EMA-PASS] %s_%s EMA warmup (ema data not ready yet)", asset.upper(), side.upper())
+        return True
+    if side == "yes":
+        ok = ema_fast >= ema_slow
+    else:
+        ok = ema_fast <= ema_slow
+    if not ok:
+        log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    elif EMA_PASS_LOG_ENABLED:
+        log.info("[EMA-PASS] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
+    return ok
 
 
 if __name__ == "__main__":
