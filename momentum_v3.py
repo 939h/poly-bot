@@ -155,7 +155,7 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 1.0,   # 0–5 min
     "mid":   0.8,   # 5–10 min
-    "late":  0.8,   # 10–15 min
+    "late":  0.5,   # 10–15 min
 }
 GAP_WAIT_SECS = {
     "early": 300,
@@ -171,7 +171,7 @@ HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 40    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 30    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
-BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "10.0"))
+BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "1.5.0"))
 BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
@@ -194,17 +194,17 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.40"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.05"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.50"))
-OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.15"))
+OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.3"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.05"))
 OPPO_FIRST_SELL_FRACTION = 0.50
-OPPO_FIRST_SELL_MULTIPLIER = 1.5
-OPPO_FINAL_SELL_MULTIPLIER = 2.0
+OPPO_FIRST_SELL_MULTIPLIER = 2.0
+OPPO_FINAL_SELL_MULTIPLIER = 6.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
