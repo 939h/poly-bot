@@ -2166,12 +2166,18 @@ function drawEmaChart(candles, emaSeries, wrap){
   });
   const drawLine=(series,color)=>{
     if(!series||!series.length)return;
+    let drawing=false;
     ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;
-    series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+    series.forEach((v,i)=>{
+      if(typeof v!=='number' || !Number.isFinite(v)){ drawing=false; return; }
+      const x=padL+i*xStep+xStep*0.5,y=yOf(v);
+      if(!drawing){ ctx.moveTo(x,y); drawing=true; }
+      else{ ctx.lineTo(x,y); }
+    });
     ctx.stroke();
   };
-  const sFast=(emaSeries||[]).map(r=>r&&r.ema_fast).filter(v=>typeof v==='number');
-  const sSlow=(emaSeries||[]).map(r=>r&&r.ema_slow).filter(v=>typeof v==='number');
+  const sFast=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_fast==='number')?Number(r.ema_fast):null);
+  const sSlow=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_slow==='number')?Number(r.ema_slow):null);
   if(sFast.length===candles.length && sSlow.length===candles.length){
     drawLine(sFast,'#fbbf24');
     drawLine(sSlow,'#ff4fd8');
@@ -2367,6 +2373,7 @@ function render(s){
         if(f!=null && s!=null){ t=(f>=s)?'UP':'DOWN'; c=(f>=s)?'green':'red'; }
         return `<button id="emaBtn_${a}" onclick="window.__emaAsset='${a}'" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${c}">${t}</span></button>`;
       }).join('')}</div>
+      <div id="emaLegend" style="font-size:11px;color:#9fb0cf;margin:0 0 6px 2px"></div>
       <div class="chart-wrap" id="emaChartWrap"></div>
     </div>
 
@@ -2410,6 +2417,13 @@ function render(s){
   if(wrap)drawChart(pnlHist,wrap);
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
+  const eSel=emaNow[selected]||{};
+  const legend=document.getElementById('emaLegend');
+  if(legend){
+    const f=(typeof eSel.ema_fast==='number')?eSel.ema_fast.toFixed(4):'—';
+    const sl=(typeof eSel.ema_slow==='number')?eSel.ema_slow.toFixed(4):'—';
+    legend.innerHTML=`<strong>${selected.toUpperCase()}</strong> &nbsp; EMA8: <span style="color:#fbbf24">${f}</span> &nbsp; EMA25: <span style="color:#ff4fd8">${sl}</span>`;
+  }
   const emaWrap=document.getElementById('emaChartWrap');
   if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaHistory[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
