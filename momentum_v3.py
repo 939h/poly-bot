@@ -278,6 +278,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+oppo_blacklisted_assets = set()    # assets blacklisted for oppo tracking this window
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
@@ -1702,6 +1703,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
         side_values = {"yes": {}, "no": {}}
         for asset in ASSETS:
+            if asset in oppo_blacklisted_assets:
+                continue
             result = results.get(asset)
             if result is None:
                 continue
@@ -1721,10 +1724,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 opp_key = f"{opp_asset}_{side}"
 
                 if opp_price <= OPPO_DEAD_ZONE:
-                    oppo_rebound_tracker.pop(opp_key, None)
+                    oppo_rebound_tracker.pop(f"{opp_asset}_yes", None)
+                    oppo_rebound_tracker.pop(f"{opp_asset}_no", None)
+                    oppo_blacklisted_assets.add(opp_asset)
                     normal_blacklisted_assets.add(opp_asset)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}; blacklisted this window")
-                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted this window",
+                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted and tracking stopped this window",
                              opp_key, opp_price, OPPO_DEAD_ZONE)
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone-blacklisted")
                     continue
@@ -2587,6 +2592,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                oppo_blacklisted_assets.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
