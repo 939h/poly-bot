@@ -2149,13 +2149,9 @@ function drawEmaChart(candles, emaSeries, wrap){
   ctx.clearRect(0,0,W,H);
   const padT=12,padB=20,padL=48,padR=12;
   const cW=W-padL-padR,cH=H-padT-padB;
-  const xStep=cW/candles.length;
-  const sFastRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_fast==='number')?Number(r.ema_fast):null);
-  const sSlowRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_slow==='number')?Number(r.ema_slow):null);
   const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
-  sFastRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
-  sSlowRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
   const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
+  const xStep=cW/candles.length;
   const yOf=v=>padT+cH-((v-minV)/range)*cH;
   ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
   [0,.5,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
@@ -2180,8 +2176,8 @@ function drawEmaChart(candles, emaSeries, wrap){
     });
     ctx.stroke();
   };
-  const sFast=sFastRaw;
-  const sSlow=sSlowRaw;
+  const sFast=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_fast==='number')?Number(r.ema_fast):null);
+  const sSlow=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_slow==='number')?Number(r.ema_slow):null);
   if(sFast.length===candles.length && sSlow.length===candles.length){
     drawLine(sFast,'#fbbf24');
     drawLine(sSlow,'#ff4fd8');
