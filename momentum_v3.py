@@ -2136,7 +2136,7 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
-function drawEmaChart(candles, wrap){
+function drawEmaChart(candles, emaSeries, wrap){
   if(!candles||candles.length<2){
     wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough candle data yet</p>';
     return;
@@ -2164,10 +2164,23 @@ function drawEmaChart(candles, wrap){
     const bw=Math.max(3,xStep*0.6), by=Math.min(yO,yC), bh=Math.max(1,Math.abs(yC-yO));
     ctx.fillStyle=up?'#1db87a':'#e24b4a';ctx.fillRect(x-bw/2,by,bw,bh);
   });
-  const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
-  candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
-  const drawLine=(series,color)=>{ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
-  drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
+  const drawLine=(series,color)=>{
+    if(!series||!series.length)return;
+    ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;
+    series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+    ctx.stroke();
+  };
+  const sFast=(emaSeries||[]).map(r=>r&&r.ema_fast).filter(v=>typeof v==='number');
+  const sSlow=(emaSeries||[]).map(r=>r&&r.ema_slow).filter(v=>typeof v==='number');
+  if(sFast.length===candles.length && sSlow.length===candles.length){
+    drawLine(sFast,'#fbbf24');
+    drawLine(sSlow,'#ff4fd8');
+  }else{
+    const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
+    candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
+    drawLine(s8,'#fbbf24');
+    drawLine(s25,'#ff4fd8');
+  }
 }
 
 
@@ -2398,7 +2411,7 @@ function render(s){
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
   const emaWrap=document.getElementById('emaChartWrap');
-  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
+  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaHistory[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
