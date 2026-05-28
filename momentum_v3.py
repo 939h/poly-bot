@@ -2150,10 +2150,11 @@ function drawEmaChart(candles, emaSeries, wrap){
   const padT=12,padB=20,padL=48,padR=12;
   const cW=W-padL-padR,cH=H-padT-padB;
   const xStep=cW/candles.length;
+  const sFastRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_fast==='number')?Number(r.ema_fast):null);
+  const sSlowRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_slow==='number')?Number(r.ema_slow):null);
   const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
-  const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
-  candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
-  s8.forEach(v=>vals.push(v)); s25.forEach(v=>vals.push(v));
+  sFastRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
+  sSlowRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
   const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
   const yOf=v=>padT+cH-((v-minV)/range)*cH;
   ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
@@ -2179,8 +2180,17 @@ function drawEmaChart(candles, emaSeries, wrap){
     });
     ctx.stroke();
   };
-  drawLine(s8,'#fbbf24');
-  drawLine(s25,'#ff4fd8');
+  const sFast=sFastRaw;
+  const sSlow=sSlowRaw;
+  if(sFast.length===candles.length && sSlow.length===candles.length){
+    drawLine(sFast,'#fbbf24');
+    drawLine(sSlow,'#ff4fd8');
+  }else{
+    const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
+    candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
+    drawLine(s8,'#fbbf24');
+    drawLine(s25,'#ff4fd8');
+  }
 }
 
 
