@@ -278,6 +278,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+oppo_blacklisted_assets = set()    # assets blacklisted for oppo tracking this window
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
@@ -1702,6 +1703,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
         side_values = {"yes": {}, "no": {}}
         for asset in ASSETS:
+            if asset in oppo_blacklisted_assets:
+                continue
             result = results.get(asset)
             if result is None:
                 continue
@@ -1721,10 +1724,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 opp_key = f"{opp_asset}_{side}"
 
                 if opp_price <= OPPO_DEAD_ZONE:
-                    oppo_rebound_tracker.pop(opp_key, None)
+                    oppo_rebound_tracker.pop(f"{opp_asset}_yes", None)
+                    oppo_rebound_tracker.pop(f"{opp_asset}_no", None)
+                    oppo_blacklisted_assets.add(opp_asset)
                     normal_blacklisted_assets.add(opp_asset)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}; blacklisted this window")
-                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted this window",
+                    log.info("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted and tracking stopped this window",
                              opp_key, opp_price, OPPO_DEAD_ZONE)
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone-blacklisted")
                     continue
@@ -2131,7 +2136,7 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
-function drawEmaChart(candles, wrap){
+function drawEmaChart(candles, emaSeries, wrap){
   if(!candles||candles.length<2){
     wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough candle data yet</p>';
     return;
@@ -2144,9 +2149,13 @@ function drawEmaChart(candles, wrap){
   ctx.clearRect(0,0,W,H);
   const padT=12,padB=20,padL=48,padR=12;
   const cW=W-padL-padR,cH=H-padT-padB;
-  const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
-  const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
   const xStep=cW/candles.length;
+  const sFastRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_fast==='number')?Number(r.ema_fast):null);
+  const sSlowRaw=(emaSeries||[]).slice(-candles.length).map(r=>(r&&typeof r.ema_slow==='number')?Number(r.ema_slow):null);
+  const vals=[];candles.forEach(c=>vals.push(c.high,c.low));
+  sFastRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
+  sSlowRaw.forEach(v=>{ if(typeof v==='number' && Number.isFinite(v)) vals.push(v); });
+  const minV=Math.min(...vals),maxV=Math.max(...vals),range=maxV-minV||1;
   const yOf=v=>padT+cH-((v-minV)/range)*cH;
   ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
   [0,.5,1].forEach(t=>{const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();});
@@ -2159,10 +2168,29 @@ function drawEmaChart(candles, wrap){
     const bw=Math.max(3,xStep*0.6), by=Math.min(yO,yC), bh=Math.max(1,Math.abs(yC-yO));
     ctx.fillStyle=up?'#1db87a':'#e24b4a';ctx.fillRect(x-bw/2,by,bw,bh);
   });
-  const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
-  candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
-  const drawLine=(series,color)=>{ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;series.forEach((v,i)=>{const x=padL+i*xStep+xStep*0.5,y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
-  drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
+  const drawLine=(series,color)=>{
+    if(!series||!series.length)return;
+    let drawing=false;
+    ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2;
+    series.forEach((v,i)=>{
+      if(typeof v!=='number' || !Number.isFinite(v)){ drawing=false; return; }
+      const x=padL+i*xStep+xStep*0.5,y=yOf(v);
+      if(!drawing){ ctx.moveTo(x,y); drawing=true; }
+      else{ ctx.lineTo(x,y); }
+    });
+    ctx.stroke();
+  };
+  const sFast=sFastRaw;
+  const sSlow=sSlowRaw;
+  if(sFast.length===candles.length && sSlow.length===candles.length){
+    drawLine(sFast,'#fbbf24');
+    drawLine(sSlow,'#ff4fd8');
+  }else{
+    const k=2/(8+1),k2=2/(25+1); let e8=null,e25=null; const s8=[],s25=[];
+    candles.forEach(c=>{e8=e8==null?c.close:(c.close-e8)*k+e8; e25=e25==null?c.close:(c.close-e25)*k2+e25; s8.push(e8); s25.push(e25);});
+    drawLine(s8,'#fbbf24');
+    drawLine(s25,'#ff4fd8');
+  }
 }
 
 
@@ -2349,6 +2377,7 @@ function render(s){
         if(f!=null && s!=null){ t=(f>=s)?'UP':'DOWN'; c=(f>=s)?'green':'red'; }
         return `<button id="emaBtn_${a}" onclick="window.__emaAsset='${a}'" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${c}">${t}</span></button>`;
       }).join('')}</div>
+      <div id="emaLegend" style="font-size:11px;color:#9fb0cf;margin:0 0 6px 2px"></div>
       <div class="chart-wrap" id="emaChartWrap"></div>
     </div>
 
@@ -2392,8 +2421,15 @@ function render(s){
   if(wrap)drawChart(pnlHist,wrap);
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
+  const eSel=emaNow[selected]||{};
+  const legend=document.getElementById('emaLegend');
+  if(legend){
+    const f=(typeof eSel.ema_fast==='number')?eSel.ema_fast.toFixed(4):'—';
+    const sl=(typeof eSel.ema_slow==='number')?eSel.ema_slow.toFixed(4):'—';
+    legend.innerHTML=`<strong>${selected.toUpperCase()}</strong> &nbsp; EMA8: <span style="color:#fbbf24">${f}</span> &nbsp; EMA25: <span style="color:#ff4fd8">${sl}</span>`;
+  }
   const emaWrap=document.getElementById('emaChartWrap');
-  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
+  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaHistory[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
@@ -2587,6 +2623,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                oppo_blacklisted_assets.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
