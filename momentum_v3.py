@@ -171,7 +171,7 @@ HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 40    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 30    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
-BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "1.5"))
+BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "2.0"))
 BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
 
 # ── Flip ──────────────────────────────────────────────────────────────────────
