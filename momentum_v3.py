@@ -154,8 +154,8 @@ GAP_SWING = {
 }
 GAP_MAGNITUDE = {
     "early": 1.0,   # 0–5 min
-    "mid":   0.6,   # 5–10 min
-    "late":  0.6,   # 10–15 min
+    "mid":   0.7,   # 5–10 min
+    "late":  0.7,   # 10–15 min
 }
 GAP_WAIT_SECS = {
     "early": 300,
@@ -196,7 +196,7 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.22"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.6"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.7"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.50"))
@@ -2136,7 +2136,7 @@ function drawChart(history,wrap){
   const last=history.length-1;if(last%step!==0)ctx.fillText(labels[last],xOf(last),H-padB+16);
 }
 
-function drawEmaChart(candles, wrap){
+function drawEmaChart(candles, emaSeries, wrap){
   if(!candles||candles.length<2){
     wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough candle data yet</p>';
     return;
@@ -2419,7 +2419,7 @@ function render(s){
     legend.innerHTML=`<strong>${selected.toUpperCase()}</strong> &nbsp; EMA8: <span style="color:#fbbf24">${f}</span> &nbsp; EMA25: <span style="color:#ff4fd8">${sl}</span>`;
   }
   const emaWrap=document.getElementById('emaChartWrap');
-  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
+  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaHistory[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
