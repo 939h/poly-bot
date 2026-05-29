@@ -174,8 +174,8 @@ SELL_MULTIPLIER = float(os.getenv("SELL_MULTIPLIER", "1.4"))
 SELL_CAP        = float(os.getenv("SELL_CAP", "0.94"))
 CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.6"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
-HOLD_MID_SECS   = 40    # force-stop cooldown 5–10 min
-HOLD_LATE_SECS  = 30    # force-stop cooldown 10–15 min
+HOLD_MID_SECS   = 10    # force-stop cooldown 5–10 min
+HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
 BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "1.5"))
 BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
@@ -207,7 +207,7 @@ OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.20")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.3"))
-OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.05"))
+OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 6.0
@@ -215,10 +215,10 @@ OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
 OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
-OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", str(BUY_AMOUNT)))
-OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", str(SELL_MULTIPLIER)))
-OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", str(SELL_CAP)))
-OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", str(CUT_LOSS_PCT)))
+OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", "1"))
+OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", "7"))
+OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", "0.5"))
+OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
 
