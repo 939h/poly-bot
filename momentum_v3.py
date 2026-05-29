@@ -363,6 +363,7 @@ trade_log          = []
 oppo_trigger_log   = []
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
+cvd_history = {a: deque(maxlen=240) for a in ASSETS}
 
 _skip_first_window = False
 _startup_window_ts = None
@@ -408,13 +409,14 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
+    cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -2173,6 +2175,7 @@ def _build_state_snapshot():
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
+        "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
         "binance_candles": candle_out,
@@ -2375,6 +2378,52 @@ function drawEmaChart(candles, wrap){
   drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
 }
 
+function drawCvdChart(historyMap, assets, wrap){
+  const series=assets.map((a,i)=>({
+    asset:a,
+    color:['#60a5fa','#fbbf24','#4ade9f','#f472b6','#a78bfa','#fb7185'][i%6],
+    points:(historyMap&&historyMap[a]||[]).filter(p=>p&&p.window!=null)
+  })).filter(s=>s.points.length>=2);
+  if(!series.length){
+    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough CVD history yet</p>';
+    return;
+  }
+  let canvas=wrap.querySelector('canvas');
+  if(!canvas){canvas=document.createElement('canvas');wrap.appendChild(canvas);}
+  const W=wrap.offsetWidth||600,H=180;
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const padT=18,padB=34,padL=58,padR=90;
+  const cW=W-padL-padR,cH=H-padT-padB;
+  const all=[];series.forEach(s=>s.points.forEach(p=>all.push(Number(p.window)||0)));
+  const minV=Math.min(...all,0),maxV=Math.max(...all,0),range=maxV-minV||1;
+  const maxLen=Math.max(...series.map(s=>s.points.length));
+  const xOf=i=>padL+(maxLen<=1?0:i*(cW/(maxLen-1)));
+  const yOf=v=>padT+cH-(((v-minV)/range)*cH);
+  ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
+  [0,.25,.5,.75,1].forEach(t=>{
+    const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+    const lbl=(minV+(maxV-minV)*(1-t)).toFixed(1);
+    ctx.fillStyle='#5a6a85';ctx.font='10px system-ui';ctx.textAlign='right';ctx.fillText(lbl,padL-6,y+4);
+  });
+  if(minV<0&&maxV>0){
+    const yz=yOf(0);ctx.strokeStyle='#3a4560';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(padL,yz);ctx.lineTo(W-padR,yz);ctx.stroke();ctx.setLineDash([]);
+  }
+  series.forEach(s=>{
+    const pts=s.points;
+    ctx.beginPath();ctx.strokeStyle=s.color;ctx.lineWidth=2;
+    pts.forEach((p,i)=>{const x=xOf(i),y=yOf(Number(p.window)||0);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+    ctx.stroke();
+    const last=pts[pts.length-1];
+    ctx.fillStyle=s.color;ctx.font='11px system-ui';ctx.textAlign='left';
+    ctx.fillText(`${s.asset.toUpperCase()} ${Number(last.window||0).toFixed(1)} / sl ${Number(last.slope||0).toFixed(4)}`, W-padR+8, padT+12+series.indexOf(s)*17);
+  });
+  const firstSeries=series[0].points, step=Math.max(1,Math.floor(maxLen/6));
+  ctx.fillStyle='#5a6a85';ctx.font='10px system-ui';ctx.textAlign='center';
+  for(let i=0;i<maxLen;i+=step){const p=firstSeries[Math.min(i,firstSeries.length-1)]||{};ctx.fillText(p.ts||'',xOf(i),H-12);}
+}
+
 
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
@@ -2436,7 +2485,7 @@ function render(s){
   const prevOppoLogWrap=document.getElementById('oppoLogWrap');
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
@@ -2564,6 +2613,11 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2>CVD Window Chart <span style="font-size:11px;color:#5a6a85;font-weight:400">window CVD lines; legend shows latest window / slope</span></h2>
+      <div class="chart-wrap" id="cvdChartWrap"></div>
+    </div>
+
+    <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
@@ -2604,6 +2658,8 @@ function render(s){
   if(wrap)drawChart(pnlHist,wrap);
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
+  const cvdWrap=document.getElementById('cvdChartWrap');
+  if(cvdWrap)drawCvdChart(cvdHistory, assets, cvdWrap);
   const emaWrap=document.getElementById('emaChartWrap');
   if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
@@ -2848,6 +2904,13 @@ def main():
                         "ema_fast": round(float(ema_fast), 4),
                         "ema_slow": round(float(ema_slow), 4),
                     })
+                cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
+                cvd_history[a].append({
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                    "session": round(float(cvd_session), 3),
+                    "window": round(float(cvd_window), 3),
+                    "slope": round(float(cvd_slope), 6),
+                })
             save_state()
 
         except KeyboardInterrupt:
