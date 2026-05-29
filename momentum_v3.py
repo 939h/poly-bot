@@ -30,6 +30,9 @@ Requirements:
     OPPO_COUNTER_ENABLED=false
     OPPO_COUNTER_MIN_PRICE=0.05
     OPPO_COUNTER_MAX_PRICE=0.08
+    OPPO_COUNTER_SELL_MULTIPLIER=1.4
+    OPPO_COUNTER_SELL_CAP=0.94
+    OPPO_COUNTER_CUT_LOSS_PCT=0.60
 """
 
 import os
@@ -213,6 +216,9 @@ OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "tr
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
 OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
 OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", str(BUY_AMOUNT)))
+OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", str(SELL_MULTIPLIER)))
+OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", str(SELL_CAP)))
+OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", str(CUT_LOSS_PCT)))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
 
@@ -260,6 +266,12 @@ def validate_settings():
         errors.append("OPPO_COUNTER_BUY_AMOUNT must be > 0")
     if not 0 <= OPPO_COUNTER_MIN_PRICE <= OPPO_COUNTER_MAX_PRICE < 1:
         errors.append("OPPO_COUNTER_MIN_PRICE/MAX_PRICE must satisfy 0 <= min <= max < 1")
+    if OPPO_COUNTER_SELL_MULTIPLIER <= 0:
+        errors.append("OPPO_COUNTER_SELL_MULTIPLIER must be > 0")
+    if not 0 < OPPO_COUNTER_SELL_CAP < 1:
+        errors.append("OPPO_COUNTER_SELL_CAP must be between 0 and 1")
+    if not 0 < OPPO_COUNTER_CUT_LOSS_PCT < 1:
+        errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -510,6 +522,9 @@ def save_state():
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
+            "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
+            "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -550,6 +565,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "exit_px":  round(close_price, 2),
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
+        "is_counter": pos.get("is_counter", False),
         "pnl":      round(pnl, 4),
     }
     trade_log.insert(0, record)
@@ -890,8 +906,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
     is_oppo = key.endswith("_oppo")
     is_counter = key.endswith("_counter")
-    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER)
-    sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
+    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (OPPO_COUNTER_SELL_MULTIPLIER if is_counter else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER))
+    sell_cap = OPPO_SELL_CAP if is_oppo else (OPPO_COUNTER_SELL_CAP if is_counter else SELL_CAP)
     if is_rebound:
         rebound_5x_target = min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE)
         sell_price = rebound_5x_target
@@ -899,7 +915,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         sell_price = min(round(entry_price * OPPO_FIRST_SELL_MULTIPLIER, 4), OPPO_SELL_CAP)
     else:
         sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
-    cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
+    cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else (OPPO_COUNTER_CUT_LOSS_PCT if is_counter else CUT_LOSS_PCT)
     cut_loss_price = round(entry_price * cut_loss_pct, 4)
 
     rebound_tranches = []
@@ -970,6 +986,11 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         log.info(
             "[REBOUND-TARGET] %s  100%% @ %.4f",
             key, rebound_tranches[0]["target"],
+        )
+    if is_counter:
+        log.info(
+            "[OPPO-COUNTER-TARGET] %s  sell @ %.4f (x%.2f cap %.4f)  cut-loss=%.4f",
+            key, sell_price, OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP, cut_loss_price,
         )
 
 
@@ -1322,10 +1343,11 @@ def manage_positions(client, server_ts=None):
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
-                if pos.get("is_oppo") or key.endswith("_oppo"):
+                if pos.get("is_oppo") or key.endswith("_oppo") or pos.get("is_counter") or key.endswith("_counter"):
                     parts = key.split("_")
                     if len(parts) >= 2:
-                        _record_oppo_trigger(parts[0], parts[1], current_price, "CUT-LOSS", f"pnl={pnl:+.4f}")
+                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else "CUT-LOSS"
+                        _record_oppo_trigger(parts[0], parts[1], current_price, status, f"pnl={pnl:+.4f}")
                 to_close.append(key)
 
                 # ── Rebound cut-loss flip: trace opposite side trough, then buy opposite side ──
@@ -1334,7 +1356,7 @@ def manage_positions(client, server_ts=None):
                 flip_side = "no" if side == "yes" else "yes"
                 flip_key = f"{asset}_{flip_side}"
                 flip_token = get_token_for_key(asset, flip_side, pos.get("window_start"))
-                if asset not in flipped_this_window and not pos.get("is_oppo") and flip_token:
+                if asset not in flipped_this_window and not pos.get("is_oppo") and not pos.get("is_counter") and flip_token:
                     flip_price = live_prices.get(flip_key)
                     if flip_price is None or flip_price <= 0:
                         flip_price = get_midpoint(client, flip_token)
@@ -1380,7 +1402,7 @@ def manage_positions(client, server_ts=None):
 
         # ── Sell at target ────────────────────────────────────────────────────
         if current_price >= pos["sell_price"]:
-            tag = "FLIP-SELL" if is_flip else "SELL"
+            tag = "COUNTER-SELL" if pos.get("is_counter") else ("FLIP-SELL" if is_flip else "SELL")
             log.info("[%s] %s  price=%.4f  selling %.3f shares", tag, key, current_price, shares)
 
             pos["closing"] = True
@@ -1394,12 +1416,16 @@ def manage_positions(client, server_ts=None):
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
                 pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                exit_type = "FLIP-SELL" if is_flip else "SELL"
+                exit_type = "COUNTER-SELL" if pos.get("is_counter") else ("FLIP-SELL" if is_flip else "SELL")
                 log.info("[%s] %s finalized  pnl=$%.4f", exit_type, key, pnl)
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, exit_type, current_price, pnl)
+                if pos.get("is_counter") or key.endswith("_counter"):
+                    parts = key.split("_")
+                    if len(parts) >= 2:
+                        _record_oppo_trigger(parts[0], parts[1], current_price, "COUNTER-SELL", f"pnl={pnl:+.4f}")
                 to_close.append(key)
             else:
                 pos["closing"] = False
@@ -2191,6 +2217,9 @@ def _build_state_snapshot():
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
+            "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
+            "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -2346,17 +2375,18 @@ function tlToggle(){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
     const p=t.pnl||0,ps=(p>=0?'+':'')+p.toFixed(4);
     const flipTag=t.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;font-size:10px;margin-left:4px">FLIP</span>':'';
+    const counterTag=t.is_counter?'<span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca;font-size:10px;margin-left:4px">COUNTER</span>':'';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
-      <td><strong>${t.asset}-${t.side}</strong>${flipTag}</td>
+      <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}</td>
       <td>${fmt(t.entry, 2)}</td>
       <td>${fmt(t.target, 2)}</td>
       <td>${exitBadge(t.exit, 2)}</td>
@@ -2399,7 +2429,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -2549,7 +2579,7 @@ function render(s){
         <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
-        <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
+        <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
       </tbody></table>
     </div>
@@ -2614,12 +2644,13 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "pnl"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "pnl"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
-            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False), t.get("pnl", ""),
+            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
+            t.get("is_counter", False), t.get("pnl", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -2711,8 +2742,9 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
-    log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  order=$%.0f  entry %d–%ds",
+    log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
+             OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
              OPPO_COUNTER_BUY_AMOUNT, ENTRY_AFTER, STOP_BUY_AT)
     log.info(
         "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
