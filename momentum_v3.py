@@ -27,6 +27,9 @@ Requirements:
     DRY_RUN=true
     SIMULATE_NORMAL_BUY_ONLY=false
     BUY_AMOUNT=2
+    OPPO_COUNTER_ENABLED=false
+    OPPO_COUNTER_MIN_PRICE=0.05
+    OPPO_COUNTER_MAX_PRICE=0.08
 """
 
 import os
@@ -206,6 +209,10 @@ OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 6.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
+OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
+OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
+OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
+OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", str(BUY_AMOUNT)))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
 
@@ -249,6 +256,10 @@ def validate_settings():
         errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
     if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
         errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
+    if OPPO_COUNTER_BUY_AMOUNT <= 0:
+        errors.append("OPPO_COUNTER_BUY_AMOUNT must be > 0")
+    if not 0 <= OPPO_COUNTER_MIN_PRICE <= OPPO_COUNTER_MAX_PRICE < 1:
+        errors.append("OPPO_COUNTER_MIN_PRICE/MAX_PRICE must satisfy 0 <= min <= max < 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -278,9 +289,49 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
+
+def _counter_key(asset, side):
+    return f"{asset}_{side}_counter"
+
+
+def _base_price_key(key):
+    if key.endswith("_counter"):
+        return key[:-8]
+    if key.endswith("_oppo"):
+        return key[:-5]
+    return key
+
+
+def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
+    if not OPPO_COUNTER_ENABLED:
+        return
+    counter_side = "no" if oppo_side == "yes" else "yes"
+    counter_key = f"{asset}_{counter_side}"
+    if _counter_key(asset, counter_side) in open_positions:
+        return
+    if counter_key in oppo_counter_tracker:
+        return
+    token = get_token_for_key(asset, counter_side, window_start)
+    oppo_counter_tracker[counter_key] = {
+        "asset": asset,
+        "side": counter_side,
+        "token": token,
+        "window_start": window_start,
+        "armed_at": time.time(),
+        "source_price": price,
+        "reason": reason,
+    }
+    log.info(
+        "[OPPO-COUNTER-ARM] %s armed after %s at %.4f — buy %s at %.0f–%.0f¢ between %d–%ds",
+        counter_key, reason, price, counter_key, OPPO_COUNTER_MIN_PRICE * 100,
+        OPPO_COUNTER_MAX_PRICE * 100, ENTRY_AFTER, STOP_BUY_AT,
+    )
+    _record_oppo_trigger(asset, counter_side, price, "COUNTER-ARM", reason)
+
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
     if time.time() < oppo_log_suppressed_until:
@@ -371,8 +422,8 @@ def get_position_live_price(key, fallback):
     price = live_prices.get(key)
     if price is not None and price > 0:
         return price
-    if key.endswith("_oppo"):
-        base_key = key[:-5]
+    base_key = _base_price_key(key)
+    if base_key != key:
         base_price = live_prices.get(base_key)
         if base_price is not None and base_price > 0:
             return base_price
@@ -394,6 +445,7 @@ def save_state():
             "cut_loss":    round(cut, 4),
             "is_flip":     p.get("is_flip", False),
             "is_rebound":  p.get("is_rebound", False),
+            "is_counter":  p.get("is_counter", k.endswith("_counter")),
             "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
             "rebound_tranches": p.get("rebound_tranches", []),
             "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
@@ -454,6 +506,10 @@ def save_state():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
+            "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
+            "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
+            "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -833,6 +889,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
     is_oppo = key.endswith("_oppo")
+    is_counter = key.endswith("_counter")
     sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER)
     sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
     if is_rebound:
@@ -886,6 +943,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "realized_revenue":     0.0,
         "is_flip":              is_flip,
         "is_rebound":           is_rebound,
+        "is_counter":           is_counter,
         "rebound_tranches":     rebound_tranches,
         "oppo_tranches":        oppo_tranches,
         "oppo_tp2_peak":        0.0,
@@ -903,7 +961,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
     stats["buys"] += 1
-    tag = "REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else "")
+    tag = "COUNTER " if is_counter else ("REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else ""))
     log.info(
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f (%.0f%%)",
         tag, key, entry_price, net_shares, sell_price, cut_loss_price, cut_loss_pct * 100,
@@ -1024,6 +1082,11 @@ def manage_oppo_target_sells(client, key, pos, current_price):
         pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
         pos["net_shares"] = round(max(available_shares - filled_shares, 0.0), 3)
         tranche["sold"] = True
+        if tranche.get("name") == "5X" and not pos.get("oppo_counter_armed"):
+            parts = key.split("_")
+            if len(parts) >= 2:
+                _arm_oppo_counter(parts[0], parts[1], current_price, pos.get("window_start"), "oppo-tp2-target")
+                pos["oppo_counter_armed"] = True
         log.info(
             "[OPPO-SELL-%s] %s partial finalized revenue=$%.4f remaining=%.3f",
             tranche.get("name", "TRANCHE"), key, revenue, pos["net_shares"],
@@ -1065,6 +1128,9 @@ def manage_oppo_target_sells(client, key, pos, current_price):
                 final_tranche["sold"] = True
                 parts = key.split("_")
                 if len(parts) >= 2:
+                    if not pos.get("oppo_counter_armed"):
+                        _arm_oppo_counter(parts[0], parts[1], current_price, pos.get("window_start"), "oppo-tp2-trail")
+                        pos["oppo_counter_armed"] = True
                     _record_oppo_trigger(parts[0], parts[1], current_price, "SELL", f"tp2-trail peak={peak:.4f}")
                 pos["closing"] = False
 
@@ -1575,6 +1641,100 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
 
 
 
+def advance_oppo_counter_tracker(client, window_start, secs_into):
+    if not OPPO_COUNTER_ENABLED:
+        oppo_counter_tracker.clear()
+        return
+
+    for key in list(oppo_counter_tracker.keys()):
+        tracker = oppo_counter_tracker[key]
+        asset = tracker.get("asset") or key.split("_")[0]
+        side = tracker.get("side") or key.split("_")[1]
+        counter_position_key = _counter_key(asset, side)
+
+        if tracker.get("window_start") != window_start:
+            log.info("[OPPO-COUNTER-DISCARD] %s stale window", key)
+            del oppo_counter_tracker[key]
+            continue
+        if secs_into < ENTRY_AFTER:
+            log.debug("[OPPO-COUNTER-WAIT] %s secs_into=%d < entry_after=%d", key, secs_into, ENTRY_AFTER)
+            continue
+        if secs_into > STOP_BUY_AT:
+            log.info(
+                "[OPPO-COUNTER-DISCARD] %s secs_into=%d > stop_buy_at=%d",
+                key, secs_into, STOP_BUY_AT,
+            )
+            del oppo_counter_tracker[key]
+            continue
+        if counter_position_key in open_positions:
+            log.info("[OPPO-COUNTER-SKIP] %s already open", counter_position_key)
+            del oppo_counter_tracker[key]
+            continue
+        if asset in traded_this_window:
+            log.info("[OPPO-COUNTER-SKIP] %s asset already traded this window", key)
+            del oppo_counter_tracker[key]
+            continue
+
+        token = tracker.get("token") or get_token_for_key(asset, side, window_start)
+        if not token:
+            log.debug("[OPPO-COUNTER-WAIT] %s token not loaded yet", key)
+            continue
+        tracker["token"] = token
+
+        price = live_prices.get(key)
+        if price is None or price <= 0:
+            price = get_midpoint(client, token)
+        if price is None or price <= 0:
+            continue
+
+        if price < OPPO_COUNTER_MIN_PRICE:
+            log.info(
+                "[OPPO-COUNTER-WAIT] %s price=%.4f below %.4f",
+                key, price, OPPO_COUNTER_MIN_PRICE,
+            )
+            continue
+        if price > OPPO_COUNTER_MAX_PRICE:
+            log.info(
+                "[OPPO-COUNTER-WAIT] %s price=%.4f above %.4f",
+                key, price, OPPO_COUNTER_MAX_PRICE,
+            )
+            continue
+
+        spread = get_spread_value(client, token)
+        if spread is not None and spread > MAX_BOOK_SPREAD:
+            log.info(
+                "[OPPO-COUNTER-SPREAD] %s spread=%.4f > %.4f",
+                key, spread, MAX_BOOK_SPREAD,
+            )
+            continue
+
+        label = f"{asset.upper()}-{side.upper()}-OPPO-COUNTER"
+        log.info(
+            "[OPPO-COUNTER-BUY] %s buying @ %.4f in %.4f–%.4f range",
+            counter_position_key, price, OPPO_COUNTER_MIN_PRICE, OPPO_COUNTER_MAX_PRICE,
+        )
+        buy = market_buy(
+            client, token, label,
+            price_hint=price,
+            amount=OPPO_COUNTER_BUY_AMOUNT,
+        )
+        if buy["ok"]:
+            entry_px = float(buy.get("filled_price") or price)
+            open_position(
+                counter_position_key, token, entry_px,
+                filled_shares=buy.get("filled_shares"),
+                window_start=window_start,
+                buy_amount=OPPO_COUNTER_BUY_AMOUNT,
+                is_simulated=bool((buy.get("resp") or {}).get("simulated")),
+            )
+            traded_this_window.add(asset)
+            del oppo_counter_tracker[key]
+            _record_oppo_trigger(asset, side, price, "COUNTER-BOUGHT", "entry-filled")
+        else:
+            _record_oppo_trigger(asset, side, price, "COUNTER-FAIL", "order rejected")
+
+
+
 def scan_markets(client, window_start, secs_into, server_ts, executor):
     global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
 
@@ -1698,6 +1858,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     # ── Evaluate fresh buy triggers ───────────────────────────────────────────
     if secs_into < ENTRY_AFTER or secs_into > STOP_BUY_AT:
         return
+
+    advance_oppo_counter_tracker(client, window_start, secs_into)
 
     if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
         side_values = {"yes": {}, "no": {}}
@@ -1925,6 +2087,7 @@ def _build_state_snapshot():
             "cut_loss":  round(cut, 4),
             "is_flip":   p.get("is_flip", False),
             "is_rebound": p.get("is_rebound", False),
+            "is_counter": p.get("is_counter", k.endswith("_counter")),
             "rebound_tranches": p.get("rebound_tranches", []),
             "pnl":       pnl_unreal,
             "pct":       max(0, min(100, pct)),
@@ -2024,6 +2187,10 @@ def _build_state_snapshot():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
+            "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
+            "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
+            "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -2270,7 +2437,7 @@ function render(s){
   const posCards=Object.entries(pos).map(([k,p])=>{
     const [asset,side]=k.split('_');
     const col=p.current>=p.entry?'green':'red';
-    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
+    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_counter?'<span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca;margin-left:6px">COUNTER</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
     const pnlV=p.pnl||0;
     return`<div class="pos-card">
       <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${badges}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
@@ -2382,6 +2549,7 @@ function render(s){
         <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
+        <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
       </tbody></table>
     </div>
@@ -2543,6 +2711,9 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  order=$%.0f  entry %d–%ds",
+             OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
+             OPPO_COUNTER_BUY_AMOUNT, ENTRY_AFTER, STOP_BUY_AT)
     log.info(
         "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
         "stop-buy=%ds, single-sell 100%% at x%.2f (target capped by %.0f¢)",
@@ -2587,6 +2758,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
