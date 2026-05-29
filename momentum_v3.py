@@ -27,6 +27,12 @@ Requirements:
     DRY_RUN=true
     SIMULATE_NORMAL_BUY_ONLY=false
     BUY_AMOUNT=2
+    OPPO_COUNTER_ENABLED=false
+    OPPO_COUNTER_MIN_PRICE=0.05
+    OPPO_COUNTER_MAX_PRICE=0.08
+    OPPO_COUNTER_SELL_MULTIPLIER=1.4
+    OPPO_COUNTER_SELL_CAP=0.94
+    OPPO_COUNTER_CUT_LOSS_PCT=0.60
 """
 
 import os
@@ -206,6 +212,13 @@ OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 6.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
+OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
+OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
+OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
+OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", str(BUY_AMOUNT)))
+OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", str(SELL_MULTIPLIER)))
+OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", str(SELL_CAP)))
+OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", str(CUT_LOSS_PCT)))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
 
@@ -249,6 +262,16 @@ def validate_settings():
         errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
     if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
         errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
+    if OPPO_COUNTER_BUY_AMOUNT <= 0:
+        errors.append("OPPO_COUNTER_BUY_AMOUNT must be > 0")
+    if not 0 <= OPPO_COUNTER_MIN_PRICE <= OPPO_COUNTER_MAX_PRICE < 1:
+        errors.append("OPPO_COUNTER_MIN_PRICE/MAX_PRICE must satisfy 0 <= min <= max < 1")
+    if OPPO_COUNTER_SELL_MULTIPLIER <= 0:
+        errors.append("OPPO_COUNTER_SELL_MULTIPLIER must be > 0")
+    if not 0 < OPPO_COUNTER_SELL_CAP < 1:
+        errors.append("OPPO_COUNTER_SELL_CAP must be between 0 and 1")
+    if not 0 < OPPO_COUNTER_CUT_LOSS_PCT < 1:
+        errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -272,15 +295,54 @@ gap_wait            = {}   # asset -> {triggered_at, key, token, price}
 peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 last_entry_ts       = {}   # asset -> unix seconds of last buy
-oppo_bought_windows = set()  # window_start set when oppo mode already bought
 skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
 skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
+oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
 oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
+
+def _counter_key(asset, side):
+    return f"{asset}_{side}_counter"
+
+
+def _base_price_key(key):
+    if key.endswith("_counter"):
+        return key[:-8]
+    if key.endswith("_oppo"):
+        return key[:-5]
+    return key
+
+
+def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
+    if not OPPO_COUNTER_ENABLED:
+        return
+    counter_side = "no" if oppo_side == "yes" else "yes"
+    counter_key = f"{asset}_{counter_side}"
+    if _counter_key(asset, counter_side) in open_positions:
+        return
+    if counter_key in oppo_counter_tracker:
+        return
+    token = get_token_for_key(asset, counter_side, window_start)
+    oppo_counter_tracker[counter_key] = {
+        "asset": asset,
+        "side": counter_side,
+        "token": token,
+        "window_start": window_start,
+        "armed_at": time.time(),
+        "source_price": price,
+        "reason": reason,
+    }
+    log.info(
+        "[OPPO-COUNTER-ARM] %s armed after %s at %.4f — buy %s at %.0f–%.0f¢ between %d–%ds",
+        counter_key, reason, price, counter_key, OPPO_COUNTER_MIN_PRICE * 100,
+        OPPO_COUNTER_MAX_PRICE * 100, ENTRY_AFTER, STOP_BUY_AT,
+    )
+    _record_oppo_trigger(asset, counter_side, price, "COUNTER-ARM", reason)
+
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
     if time.time() < oppo_log_suppressed_until:
@@ -301,6 +363,7 @@ trade_log          = []
 oppo_trigger_log   = []
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
+cvd_history = {a: deque(maxlen=240) for a in ASSETS}
 
 _skip_first_window = False
 _startup_window_ts = None
@@ -346,13 +409,14 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
+    cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
     log.info("[STATE] Reset by user")
     save_state()
@@ -371,8 +435,8 @@ def get_position_live_price(key, fallback):
     price = live_prices.get(key)
     if price is not None and price > 0:
         return price
-    if key.endswith("_oppo"):
-        base_key = key[:-5]
+    base_key = _base_price_key(key)
+    if base_key != key:
         base_price = live_prices.get(base_key)
         if base_price is not None and base_price > 0:
             return base_price
@@ -394,6 +458,7 @@ def save_state():
             "cut_loss":    round(cut, 4),
             "is_flip":     p.get("is_flip", False),
             "is_rebound":  p.get("is_rebound", False),
+            "is_counter":  p.get("is_counter", k.endswith("_counter")),
             "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
             "rebound_tranches": p.get("rebound_tranches", []),
             "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
@@ -454,6 +519,13 @@ def save_state():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
+            "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
+            "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
+            "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
+            "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
+            "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -494,6 +566,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "exit_px":  round(close_price, 2),
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
+        "is_counter": pos.get("is_counter", False),
         "pnl":      round(pnl, 4),
     }
     trade_log.insert(0, record)
@@ -833,8 +906,9 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         fee_shares = gross_shares * CRYPTO_TAKER_FEE_RATE * (1 - entry_price)
         net_shares = round(max(gross_shares - fee_shares, 0.0), 3)
     is_oppo = key.endswith("_oppo")
-    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER)
-    sell_cap = OPPO_SELL_CAP if is_oppo else SELL_CAP
+    is_counter = key.endswith("_counter")
+    sell_mult = OPPO_SELL_MULTIPLIER if is_oppo else (OPPO_COUNTER_SELL_MULTIPLIER if is_counter else (REBOUND_SELL_MULTIPLIER if is_rebound else SELL_MULTIPLIER))
+    sell_cap = OPPO_SELL_CAP if is_oppo else (OPPO_COUNTER_SELL_CAP if is_counter else SELL_CAP)
     if is_rebound:
         rebound_5x_target = min(round(entry_price * REBOUND_SELL_MULTIPLIER, 4), REBOUND_MAX_TARGET_PRICE)
         sell_price = rebound_5x_target
@@ -842,7 +916,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         sell_price = min(round(entry_price * OPPO_FIRST_SELL_MULTIPLIER, 4), OPPO_SELL_CAP)
     else:
         sell_price = min(round(entry_price * sell_mult, 4), sell_cap)
-    cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else CUT_LOSS_PCT
+    cut_loss_pct = OPPO_CUT_LOSS_PCT if is_oppo else (OPPO_COUNTER_CUT_LOSS_PCT if is_counter else CUT_LOSS_PCT)
     cut_loss_price = round(entry_price * cut_loss_pct, 4)
 
     rebound_tranches = []
@@ -886,6 +960,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "realized_revenue":     0.0,
         "is_flip":              is_flip,
         "is_rebound":           is_rebound,
+        "is_counter":           is_counter,
         "rebound_tranches":     rebound_tranches,
         "oppo_tranches":        oppo_tranches,
         "oppo_tp2_peak":        0.0,
@@ -903,7 +978,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
     stats["buys"] += 1
-    tag = "REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else "")
+    tag = "COUNTER " if is_counter else ("REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else ""))
     log.info(
         "[OPEN] %s%s  entry=%.4f  shares=%.3f  sell=%.4f  cut-loss=%.4f (%.0f%%)",
         tag, key, entry_price, net_shares, sell_price, cut_loss_price, cut_loss_pct * 100,
@@ -912,6 +987,11 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         log.info(
             "[REBOUND-TARGET] %s  100%% @ %.4f",
             key, rebound_tranches[0]["target"],
+        )
+    if is_counter:
+        log.info(
+            "[OPPO-COUNTER-TARGET] %s  sell @ %.4f (x%.2f cap %.4f)  cut-loss=%.4f",
+            key, sell_price, OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP, cut_loss_price,
         )
 
 
@@ -980,6 +1060,10 @@ def manage_rebound_target_sells(client, key, pos, current_price):
     return False
 
 
+def _oppo_tp1_sold(pos):
+    return any(t.get("name") == "2X" and t.get("sold") for t in pos.get("oppo_tranches", []))
+
+
 def update_oppo_sell_price(pos):
     unsold_targets = [
         float(t["target"]) for t in pos.get("oppo_tranches", [])
@@ -1024,6 +1108,11 @@ def manage_oppo_target_sells(client, key, pos, current_price):
         pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
         pos["net_shares"] = round(max(available_shares - filled_shares, 0.0), 3)
         tranche["sold"] = True
+        if tranche.get("name") == "5X" and not pos.get("oppo_counter_armed"):
+            parts = key.split("_")
+            if len(parts) >= 2:
+                _arm_oppo_counter(parts[0], parts[1], current_price, pos.get("window_start"), "oppo-tp2-target")
+                pos["oppo_counter_armed"] = True
         log.info(
             "[OPPO-SELL-%s] %s partial finalized revenue=$%.4f remaining=%.3f",
             tranche.get("name", "TRANCHE"), key, revenue, pos["net_shares"],
@@ -1065,6 +1154,9 @@ def manage_oppo_target_sells(client, key, pos, current_price):
                 final_tranche["sold"] = True
                 parts = key.split("_")
                 if len(parts) >= 2:
+                    if not pos.get("oppo_counter_armed"):
+                        _arm_oppo_counter(parts[0], parts[1], current_price, pos.get("window_start"), "oppo-tp2-trail")
+                        pos["oppo_counter_armed"] = True
                     _record_oppo_trigger(parts[0], parts[1], current_price, "SELL", f"tp2-trail peak={peak:.4f}")
                 pos["closing"] = False
 
@@ -1113,46 +1205,52 @@ def manage_positions(client, server_ts=None):
         secs_into_now = server_ts_now - get_current_window_start(server_ts_now)
 
         gap_hit, actual_gap, force_threshold = force_sell_gap_triggered(key.split("_")[0], secs_into_now)
-        # ── OPPO-only breakeven arm/exit when gap extends ─────────────────────
+        # ── OPPO-only breakeven arm/exit before TP1; after TP1, hold for TP2/trail.
         if pos.get("is_oppo"):
-            base_threshold = get_gap_threshold(key.split("_")[0], secs_into_now)
-            if base_threshold is not None and base_threshold > 0 and actual_gap is not None:
-                breakeven_gap_hit = actual_gap >= (base_threshold * BREAKEVEN_GAP_MULT)
-                if breakeven_gap_hit:
-                    pos["breakeven_gap_polls"] = int(pos.get("breakeven_gap_polls", 0)) + 1
-                else:
-                    pos["breakeven_gap_polls"] = 0
-
-                if (not pos.get("breakeven_armed")) and pos.get("breakeven_gap_polls", 0) >= BREAKEVEN_POLL_CONFIRMATIONS:
-                    pos["breakeven_armed"] = True
-                    pos["sell_price"] = max(pos.get("sell_price", entry), entry)
-                    for t in pos.get("oppo_tranches", []):
-                        if not t.get("sold"):
-                            t["target"] = max(float(t.get("target", entry)), entry)
-                    log.info("[BREAKEVEN-ARM] %s gap=%.4f >= %.2fx threshold(%.4f) for %d polls — arm entry exit at %.4f", key, actual_gap, BREAKEVEN_GAP_MULT, base_threshold, BREAKEVEN_POLL_CONFIRMATIONS, entry)
-
-                if pos.get("breakeven_armed") and current_price >= entry:
-                    log.info("[BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f  selling %.3f shares", key, current_price, entry, shares)
-                    pos["closing"] = True
-                    sell = market_sell_with_retries(
-                        client, pos["token_id"], shares, current_price, key.upper(),
-                        simulate=pos.get("is_simulated", False),
-                    )
-                    pos["last_exit_attempt_ts"] = time.time()
-                    if sell["ok"]:
-                        revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
-                        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
-                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                        log.info("[BREAKEVEN-SELL] %s finalized  pnl=$%.4f", key, pnl)
-                        stats["wins" if pnl > 0 else "losses"] += 1
-                        stats["pnl"] += pnl
-                        _record_closed_trade(key, pnl)
-                        _record_trade_log(key, pos, "BREAKEVEN-SELL", current_price, pnl)
-                        to_close.append(key)
+            if _oppo_tp1_sold(pos):
+                if pos.get("breakeven_armed") or pos.get("breakeven_gap_polls", 0):
+                    log.info("[BREAKEVEN-DISABLED] %s TP1 already sold — skipping breakeven for remaining OPPO shares", key)
+                pos["breakeven_armed"] = False
+                pos["breakeven_gap_polls"] = 0
+            else:
+                base_threshold = get_gap_threshold(key.split("_")[0], secs_into_now)
+                if base_threshold is not None and base_threshold > 0 and actual_gap is not None:
+                    breakeven_gap_hit = actual_gap >= (base_threshold * BREAKEVEN_GAP_MULT)
+                    if breakeven_gap_hit:
+                        pos["breakeven_gap_polls"] = int(pos.get("breakeven_gap_polls", 0)) + 1
                     else:
-                        pos["closing"] = False
-                        log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
-                    continue
+                        pos["breakeven_gap_polls"] = 0
+
+                    if (not pos.get("breakeven_armed")) and pos.get("breakeven_gap_polls", 0) >= BREAKEVEN_POLL_CONFIRMATIONS:
+                        pos["breakeven_armed"] = True
+                        pos["sell_price"] = max(pos.get("sell_price", entry), entry)
+                        for t in pos.get("oppo_tranches", []):
+                            if not t.get("sold"):
+                                t["target"] = max(float(t.get("target", entry)), entry)
+                        log.info("[BREAKEVEN-ARM] %s gap=%.4f >= %.2fx threshold(%.4f) for %d polls — arm entry exit at %.4f", key, actual_gap, BREAKEVEN_GAP_MULT, base_threshold, BREAKEVEN_POLL_CONFIRMATIONS, entry)
+
+                    if pos.get("breakeven_armed") and current_price >= entry:
+                        log.info("[BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f  selling %.3f shares", key, current_price, entry, shares)
+                        pos["closing"] = True
+                        sell = market_sell_with_retries(
+                            client, pos["token_id"], shares, current_price, key.upper(),
+                            simulate=pos.get("is_simulated", False),
+                        )
+                        pos["last_exit_attempt_ts"] = time.time()
+                        if sell["ok"]:
+                            revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                            pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                            pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                            log.info("[BREAKEVEN-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                            stats["wins" if pnl > 0 else "losses"] += 1
+                            stats["pnl"] += pnl
+                            _record_closed_trade(key, pnl)
+                            _record_trade_log(key, pos, "BREAKEVEN-SELL", current_price, pnl)
+                            to_close.append(key)
+                        else:
+                            pos["closing"] = False
+                            log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
+                        continue
 
         # ── Force sell profitable positions when Binance gap overextends ─────
         if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
@@ -1256,10 +1354,11 @@ def manage_positions(client, server_ts=None):
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
-                if pos.get("is_oppo") or key.endswith("_oppo"):
+                if pos.get("is_oppo") or key.endswith("_oppo") or pos.get("is_counter") or key.endswith("_counter"):
                     parts = key.split("_")
                     if len(parts) >= 2:
-                        _record_oppo_trigger(parts[0], parts[1], current_price, "CUT-LOSS", f"pnl={pnl:+.4f}")
+                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else "CUT-LOSS"
+                        _record_oppo_trigger(parts[0], parts[1], current_price, status, f"pnl={pnl:+.4f}")
                 to_close.append(key)
 
                 # ── Rebound cut-loss flip: trace opposite side trough, then buy opposite side ──
@@ -1268,7 +1367,7 @@ def manage_positions(client, server_ts=None):
                 flip_side = "no" if side == "yes" else "yes"
                 flip_key = f"{asset}_{flip_side}"
                 flip_token = get_token_for_key(asset, flip_side, pos.get("window_start"))
-                if asset not in flipped_this_window and not pos.get("is_oppo") and flip_token:
+                if asset not in flipped_this_window and not pos.get("is_oppo") and not pos.get("is_counter") and flip_token:
                     flip_price = live_prices.get(flip_key)
                     if flip_price is None or flip_price <= 0:
                         flip_price = get_midpoint(client, flip_token)
@@ -1314,7 +1413,7 @@ def manage_positions(client, server_ts=None):
 
         # ── Sell at target ────────────────────────────────────────────────────
         if current_price >= pos["sell_price"]:
-            tag = "FLIP-SELL" if is_flip else "SELL"
+            tag = "COUNTER-SELL" if pos.get("is_counter") else ("FLIP-SELL" if is_flip else "SELL")
             log.info("[%s] %s  price=%.4f  selling %.3f shares", tag, key, current_price, shares)
 
             pos["closing"] = True
@@ -1328,12 +1427,16 @@ def manage_positions(client, server_ts=None):
                 revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
                 pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
                 pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                exit_type = "FLIP-SELL" if is_flip else "SELL"
+                exit_type = "COUNTER-SELL" if pos.get("is_counter") else ("FLIP-SELL" if is_flip else "SELL")
                 log.info("[%s] %s finalized  pnl=$%.4f", exit_type, key, pnl)
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
                 _record_trade_log(key, pos, exit_type, current_price, pnl)
+                if pos.get("is_counter") or key.endswith("_counter"):
+                    parts = key.split("_")
+                    if len(parts) >= 2:
+                        _record_oppo_trigger(parts[0], parts[1], current_price, "COUNTER-SELL", f"pnl={pnl:+.4f}")
                 to_close.append(key)
             else:
                 pos["closing"] = False
@@ -1575,6 +1678,100 @@ def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
 
 
 
+def advance_oppo_counter_tracker(client, window_start, secs_into):
+    if not OPPO_COUNTER_ENABLED:
+        oppo_counter_tracker.clear()
+        return
+
+    for key in list(oppo_counter_tracker.keys()):
+        tracker = oppo_counter_tracker[key]
+        asset = tracker.get("asset") or key.split("_")[0]
+        side = tracker.get("side") or key.split("_")[1]
+        counter_position_key = _counter_key(asset, side)
+
+        if tracker.get("window_start") != window_start:
+            log.info("[OPPO-COUNTER-DISCARD] %s stale window", key)
+            del oppo_counter_tracker[key]
+            continue
+        if secs_into < ENTRY_AFTER:
+            log.debug("[OPPO-COUNTER-WAIT] %s secs_into=%d < entry_after=%d", key, secs_into, ENTRY_AFTER)
+            continue
+        if secs_into > STOP_BUY_AT:
+            log.info(
+                "[OPPO-COUNTER-DISCARD] %s secs_into=%d > stop_buy_at=%d",
+                key, secs_into, STOP_BUY_AT,
+            )
+            del oppo_counter_tracker[key]
+            continue
+        if counter_position_key in open_positions:
+            log.info("[OPPO-COUNTER-SKIP] %s already open", counter_position_key)
+            del oppo_counter_tracker[key]
+            continue
+        if asset in traded_this_window:
+            log.info("[OPPO-COUNTER-SKIP] %s asset already traded this window", key)
+            del oppo_counter_tracker[key]
+            continue
+
+        token = tracker.get("token") or get_token_for_key(asset, side, window_start)
+        if not token:
+            log.debug("[OPPO-COUNTER-WAIT] %s token not loaded yet", key)
+            continue
+        tracker["token"] = token
+
+        price = live_prices.get(key)
+        if price is None or price <= 0:
+            price = get_midpoint(client, token)
+        if price is None or price <= 0:
+            continue
+
+        if price < OPPO_COUNTER_MIN_PRICE:
+            log.info(
+                "[OPPO-COUNTER-WAIT] %s price=%.4f below %.4f",
+                key, price, OPPO_COUNTER_MIN_PRICE,
+            )
+            continue
+        if price > OPPO_COUNTER_MAX_PRICE:
+            log.info(
+                "[OPPO-COUNTER-WAIT] %s price=%.4f above %.4f",
+                key, price, OPPO_COUNTER_MAX_PRICE,
+            )
+            continue
+
+        spread = get_spread_value(client, token)
+        if spread is not None and spread > MAX_BOOK_SPREAD:
+            log.info(
+                "[OPPO-COUNTER-SPREAD] %s spread=%.4f > %.4f",
+                key, spread, MAX_BOOK_SPREAD,
+            )
+            continue
+
+        label = f"{asset.upper()}-{side.upper()}-OPPO-COUNTER"
+        log.info(
+            "[OPPO-COUNTER-BUY] %s buying @ %.4f in %.4f–%.4f range",
+            counter_position_key, price, OPPO_COUNTER_MIN_PRICE, OPPO_COUNTER_MAX_PRICE,
+        )
+        buy = market_buy(
+            client, token, label,
+            price_hint=price,
+            amount=OPPO_COUNTER_BUY_AMOUNT,
+        )
+        if buy["ok"]:
+            entry_px = float(buy.get("filled_price") or price)
+            open_position(
+                counter_position_key, token, entry_px,
+                filled_shares=buy.get("filled_shares"),
+                window_start=window_start,
+                buy_amount=OPPO_COUNTER_BUY_AMOUNT,
+                is_simulated=bool((buy.get("resp") or {}).get("simulated")),
+            )
+            traded_this_window.add(asset)
+            del oppo_counter_tracker[key]
+            _record_oppo_trigger(asset, side, price, "COUNTER-BOUGHT", "entry-filled")
+        else:
+            _record_oppo_trigger(asset, side, price, "COUNTER-FAIL", "order rejected")
+
+
+
 def scan_markets(client, window_start, secs_into, server_ts, executor):
     global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
 
@@ -1699,7 +1896,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     if secs_into < ENTRY_AFTER or secs_into > STOP_BUY_AT:
         return
 
-    if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
+    advance_oppo_counter_tracker(client, window_start, secs_into)
+
+    if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC:
         side_values = {"yes": {}, "no": {}}
         for asset in ASSETS:
             result = results.get(asset)
@@ -1719,6 +1918,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             for opp_asset, opp_price, opp_token in low_assets:
                 opp_key = f"{opp_asset}_{side}"
+
+                if opp_asset in traded_this_window:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
+                    continue
 
                 if opp_price <= OPPO_DEAD_ZONE:
                     oppo_rebound_tracker.pop(opp_key, None)
@@ -1805,14 +2008,15 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   filled_shares=buy.get("filled_shares"),
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")))
-                    oppo_bought_windows.add(window_start)
+                    traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
                     _record_oppo_trigger(opp_asset, side, opp_price, "BOUGHT", "entry-filled")
-                    log.info("[OPPO-BUY] %s_%s triggered oppo setup", opp_asset.upper(), side.upper())
+                    log.info("[OPPO-BUY] %s_%s triggered oppo setup — continuing to scan other assets", opp_asset.upper(), side.upper())
+                    continue
                 else:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
-                break
+                    continue
 
     for asset in ASSETS:
         if asset in traded_this_window:
@@ -1925,6 +2129,7 @@ def _build_state_snapshot():
             "cut_loss":  round(cut, 4),
             "is_flip":   p.get("is_flip", False),
             "is_rebound": p.get("is_rebound", False),
+            "is_counter": p.get("is_counter", k.endswith("_counter")),
             "rebound_tranches": p.get("rebound_tranches", []),
             "pnl":       pnl_unreal,
             "pct":       max(0, min(100, pct)),
@@ -1970,6 +2175,7 @@ def _build_state_snapshot():
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
+        "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
         "binance_candles": candle_out,
@@ -2024,6 +2230,13 @@ def _build_state_snapshot():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
+            "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
+            "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
+            "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
+            "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
+            "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -2165,6 +2378,50 @@ function drawEmaChart(candles, wrap){
   drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
 }
 
+function drawCvdChart(historyMap, asset, wrap){
+  const points=(historyMap&&historyMap[asset]||[]).filter(p=>p&&p.window!=null);
+  if(points.length<2){
+    wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough CVD history yet</p>';
+    return;
+  }
+  let canvas=wrap.querySelector('canvas');
+  if(!canvas){canvas=document.createElement('canvas');wrap.appendChild(canvas);}
+  const W=wrap.offsetWidth||600,H=180;
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const padT=18,padB=34,padL=58,padR=140;
+  const cW=W-padL-padR,cH=H-padT-padB;
+  const vals=points.map(p=>Number(p.window)||0);
+  const minV=Math.min(...vals,0),maxV=Math.max(...vals,0),range=maxV-minV||1;
+  const xOf=i=>padL+(points.length<=1?0:i*(cW/(points.length-1)));
+  const yOf=v=>padT+cH-(((v-minV)/range)*cH);
+  ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
+  [0,.25,.5,.75,1].forEach(t=>{
+    const y=padT+cH*t;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+    const lbl=(minV+(maxV-minV)*(1-t)).toFixed(1);
+    ctx.fillStyle='#5a6a85';ctx.font='10px system-ui';ctx.textAlign='right';ctx.fillText(lbl,padL-6,y+4);
+  });
+  if(minV<0&&maxV>0){
+    const yz=yOf(0);ctx.strokeStyle='#3a4560';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(padL,yz);ctx.lineTo(W-padR,yz);ctx.stroke();ctx.setLineDash([]);
+  }
+  ctx.beginPath();ctx.strokeStyle='#60a5fa';ctx.lineWidth=2;
+  vals.forEach((v,i)=>{const x=xOf(i),y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.stroke();
+  vals.forEach((v,i)=>{ctx.beginPath();ctx.arc(xOf(i),yOf(v),2.5,0,Math.PI*2);ctx.fillStyle='#60a5fa';ctx.fill();});
+  const last=points[points.length-1];
+  ctx.fillStyle='#60a5fa';ctx.font='12px system-ui';ctx.textAlign='left';
+  ctx.fillText(`${asset.toUpperCase()} window ${Number(last.window||0).toFixed(1)}`, W-padR+8, padT+14);
+  ctx.fillStyle='#fbbf24';
+  ctx.fillText(`slope ${Number(last.slope||0).toFixed(4)}`, W-padR+8, padT+32);
+  ctx.fillStyle='#5a6a85';
+  ctx.fillText(`session ${Number(last.session||0).toFixed(1)}`, W-padR+8, padT+50);
+  const step=Math.max(1,Math.floor(points.length/6));
+  ctx.fillStyle='#5a6a85';ctx.font='10px system-ui';ctx.textAlign='center';
+  for(let i=0;i<points.length;i+=step)ctx.fillText(points[i].ts||'',xOf(i),H-12);
+  if((points.length-1)%step!==0)ctx.fillText(points[points.length-1].ts||'',xOf(points.length-1),H-12);
+}
+
 
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
@@ -2179,17 +2436,18 @@ function tlToggle(){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
     const p=t.pnl||0,ps=(p>=0?'+':'')+p.toFixed(4);
     const flipTag=t.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;font-size:10px;margin-left:4px">FLIP</span>':'';
+    const counterTag=t.is_counter?'<span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca;font-size:10px;margin-left:4px">COUNTER</span>':'';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
-      <td><strong>${t.asset}-${t.side}</strong>${flipTag}</td>
+      <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}</td>
       <td>${fmt(t.entry, 2)}</td>
       <td>${fmt(t.target, 2)}</td>
       <td>${exitBadge(t.exit, 2)}</td>
@@ -2225,14 +2483,14 @@ function render(s){
   const prevOppoLogWrap=document.getElementById('oppoLogWrap');
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -2270,7 +2528,7 @@ function render(s){
   const posCards=Object.entries(pos).map(([k,p])=>{
     const [asset,side]=k.split('_');
     const col=p.current>=p.entry?'green':'red';
-    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
+    const badges=[p.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;margin-left:6px">FLIP</span>':'',p.is_rebound?'<span class="badge" style="background:#082a1b;color:#34d399;border:1px solid #065f46;margin-left:6px">REBOUND</span>':'',p.is_counter?'<span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca;margin-left:6px">COUNTER</span>':'',p.is_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;margin-left:6px">OPPO</span>':''].join('');
     const pnlV=p.pnl||0;
     return`<div class="pos-card">
       <div class="pos-hdr"><strong>${asset.toUpperCase()}-${side.toUpperCase()}</strong>${badges}<span style="font-size:12px;color:#5a6a85">opened ${p.opened_at||'—'}</span></div>
@@ -2353,6 +2611,16 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2>CVD Window Chart <span style="font-size:11px;color:#5a6a85;font-weight:400">select one asset; legend shows latest window / slope / session</span></h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${assets.map(a=>{
+        const c=cvd[a]||{},active=(window.__cvdAsset||assets[0])===a;
+        const slope=c.slope!=null?Number(c.slope).toFixed(4):'—';
+        return `<button id="cvdBtn_${a}" onclick="window.__cvdAsset='${a}'" style="padding:4px 10px;background:${active?'#0d1e2a':'#1e2533'};border:1px solid ${active?'#60a5fa':'#2a3347'};color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${(c.slope||0)>0?'green':(c.slope||0)<0?'red':'dim'}">${slope}</span></button>`;
+      }).join('')}</div>
+      <div class="chart-wrap" id="cvdChartWrap"></div>
+    </div>
+
+    <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
@@ -2382,6 +2650,7 @@ function render(s){
         <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
+        <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
       </tbody></table>
     </div>
@@ -2392,6 +2661,10 @@ function render(s){
   if(wrap)drawChart(pnlHist,wrap);
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
+  const selectedCvd=(window.__cvdAsset && assets.includes(window.__cvdAsset))?window.__cvdAsset:assets[0];
+  window.__cvdAsset=selectedCvd;
+  const cvdWrap=document.getElementById('cvdChartWrap');
+  if(cvdWrap)drawCvdChart(cvdHistory, selectedCvd, cvdWrap);
   const emaWrap=document.getElementById('emaChartWrap');
   if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
@@ -2446,12 +2719,13 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "pnl"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "pnl"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
-            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False), t.get("pnl", ""),
+            t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
+            t.get("is_counter", False), t.get("pnl", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -2543,6 +2817,10 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
+             OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
+             OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
+             OPPO_COUNTER_BUY_AMOUNT, ENTRY_AFTER, STOP_BUY_AT)
     log.info(
         "  Rebound cutloss: buy same side after %.2fx rebound, cap < %.0f¢, discard <= %.0f¢, "
         "stop-buy=%ds, single-sell 100%% at x%.2f (target capped by %.0f¢)",
@@ -2583,10 +2861,10 @@ def main():
                 flipped_this_window.clear()
                 gap_wait.clear()
                 peak_gap.clear()
-                oppo_bought_windows.clear()
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
+                oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
@@ -2631,6 +2909,13 @@ def main():
                         "ema_fast": round(float(ema_fast), 4),
                         "ema_slow": round(float(ema_slow), 4),
                     })
+                cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
+                cvd_history[a].append({
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                    "session": round(float(cvd_session), 3),
+                    "window": round(float(cvd_window), 3),
+                    "slope": round(float(cvd_slope), 6),
+                })
             save_state()
 
         except KeyboardInterrupt:
