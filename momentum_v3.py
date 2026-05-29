@@ -295,7 +295,6 @@ gap_wait            = {}   # asset -> {triggered_at, key, token, price}
 peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 last_entry_ts       = {}   # asset -> unix seconds of last buy
-oppo_bought_windows = set()  # window_start set when oppo mode already bought
 skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
 skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
@@ -1059,6 +1058,10 @@ def manage_rebound_target_sells(client, key, pos, current_price):
     return False
 
 
+def _oppo_tp1_sold(pos):
+    return any(t.get("name") == "2X" and t.get("sold") for t in pos.get("oppo_tranches", []))
+
+
 def update_oppo_sell_price(pos):
     unsold_targets = [
         float(t["target"]) for t in pos.get("oppo_tranches", [])
@@ -1200,46 +1203,52 @@ def manage_positions(client, server_ts=None):
         secs_into_now = server_ts_now - get_current_window_start(server_ts_now)
 
         gap_hit, actual_gap, force_threshold = force_sell_gap_triggered(key.split("_")[0], secs_into_now)
-        # ── OPPO-only breakeven arm/exit when gap extends ─────────────────────
+        # ── OPPO-only breakeven arm/exit before TP1; after TP1, hold for TP2/trail.
         if pos.get("is_oppo"):
-            base_threshold = get_gap_threshold(key.split("_")[0], secs_into_now)
-            if base_threshold is not None and base_threshold > 0 and actual_gap is not None:
-                breakeven_gap_hit = actual_gap >= (base_threshold * BREAKEVEN_GAP_MULT)
-                if breakeven_gap_hit:
-                    pos["breakeven_gap_polls"] = int(pos.get("breakeven_gap_polls", 0)) + 1
-                else:
-                    pos["breakeven_gap_polls"] = 0
-
-                if (not pos.get("breakeven_armed")) and pos.get("breakeven_gap_polls", 0) >= BREAKEVEN_POLL_CONFIRMATIONS:
-                    pos["breakeven_armed"] = True
-                    pos["sell_price"] = max(pos.get("sell_price", entry), entry)
-                    for t in pos.get("oppo_tranches", []):
-                        if not t.get("sold"):
-                            t["target"] = max(float(t.get("target", entry)), entry)
-                    log.info("[BREAKEVEN-ARM] %s gap=%.4f >= %.2fx threshold(%.4f) for %d polls — arm entry exit at %.4f", key, actual_gap, BREAKEVEN_GAP_MULT, base_threshold, BREAKEVEN_POLL_CONFIRMATIONS, entry)
-
-                if pos.get("breakeven_armed") and current_price >= entry:
-                    log.info("[BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f  selling %.3f shares", key, current_price, entry, shares)
-                    pos["closing"] = True
-                    sell = market_sell_with_retries(
-                        client, pos["token_id"], shares, current_price, key.upper(),
-                        simulate=pos.get("is_simulated", False),
-                    )
-                    pos["last_exit_attempt_ts"] = time.time()
-                    if sell["ok"]:
-                        revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
-                        pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
-                        pnl = round(pos["realized_revenue"] - pos["cost"], 4)
-                        log.info("[BREAKEVEN-SELL] %s finalized  pnl=$%.4f", key, pnl)
-                        stats["wins" if pnl > 0 else "losses"] += 1
-                        stats["pnl"] += pnl
-                        _record_closed_trade(key, pnl)
-                        _record_trade_log(key, pos, "BREAKEVEN-SELL", current_price, pnl)
-                        to_close.append(key)
+            if _oppo_tp1_sold(pos):
+                if pos.get("breakeven_armed") or pos.get("breakeven_gap_polls", 0):
+                    log.info("[BREAKEVEN-DISABLED] %s TP1 already sold — skipping breakeven for remaining OPPO shares", key)
+                pos["breakeven_armed"] = False
+                pos["breakeven_gap_polls"] = 0
+            else:
+                base_threshold = get_gap_threshold(key.split("_")[0], secs_into_now)
+                if base_threshold is not None and base_threshold > 0 and actual_gap is not None:
+                    breakeven_gap_hit = actual_gap >= (base_threshold * BREAKEVEN_GAP_MULT)
+                    if breakeven_gap_hit:
+                        pos["breakeven_gap_polls"] = int(pos.get("breakeven_gap_polls", 0)) + 1
                     else:
-                        pos["closing"] = False
-                        log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
-                    continue
+                        pos["breakeven_gap_polls"] = 0
+
+                    if (not pos.get("breakeven_armed")) and pos.get("breakeven_gap_polls", 0) >= BREAKEVEN_POLL_CONFIRMATIONS:
+                        pos["breakeven_armed"] = True
+                        pos["sell_price"] = max(pos.get("sell_price", entry), entry)
+                        for t in pos.get("oppo_tranches", []):
+                            if not t.get("sold"):
+                                t["target"] = max(float(t.get("target", entry)), entry)
+                        log.info("[BREAKEVEN-ARM] %s gap=%.4f >= %.2fx threshold(%.4f) for %d polls — arm entry exit at %.4f", key, actual_gap, BREAKEVEN_GAP_MULT, base_threshold, BREAKEVEN_POLL_CONFIRMATIONS, entry)
+
+                    if pos.get("breakeven_armed") and current_price >= entry:
+                        log.info("[BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f  selling %.3f shares", key, current_price, entry, shares)
+                        pos["closing"] = True
+                        sell = market_sell_with_retries(
+                            client, pos["token_id"], shares, current_price, key.upper(),
+                            simulate=pos.get("is_simulated", False),
+                        )
+                        pos["last_exit_attempt_ts"] = time.time()
+                        if sell["ok"]:
+                            revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                            pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                            pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                            log.info("[BREAKEVEN-SELL] %s finalized  pnl=$%.4f", key, pnl)
+                            stats["wins" if pnl > 0 else "losses"] += 1
+                            stats["pnl"] += pnl
+                            _record_closed_trade(key, pnl)
+                            _record_trade_log(key, pos, "BREAKEVEN-SELL", current_price, pnl)
+                            to_close.append(key)
+                        else:
+                            pos["closing"] = False
+                            log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
+                        continue
 
         # ── Force sell profitable positions when Binance gap overextends ─────
         if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
@@ -1887,7 +1896,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     advance_oppo_counter_tracker(client, window_start, secs_into)
 
-    if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC and window_start not in oppo_bought_windows:
+    if OPPO_MODE_ENABLED and secs_into >= OPPO_WINDOW_START_SEC:
         side_values = {"yes": {}, "no": {}}
         for asset in ASSETS:
             result = results.get(asset)
@@ -1907,6 +1916,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             for opp_asset, opp_price, opp_token in low_assets:
                 opp_key = f"{opp_asset}_{side}"
+
+                if opp_asset in traded_this_window:
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
+                    continue
 
                 if opp_price <= OPPO_DEAD_ZONE:
                     oppo_rebound_tracker.pop(opp_key, None)
@@ -1993,14 +2006,15 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   filled_shares=buy.get("filled_shares"),
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")))
-                    oppo_bought_windows.add(window_start)
+                    traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
                     _record_oppo_trigger(opp_asset, side, opp_price, "BOUGHT", "entry-filled")
-                    log.info("[OPPO-BUY] %s_%s triggered oppo setup", opp_asset.upper(), side.upper())
+                    log.info("[OPPO-BUY] %s_%s triggered oppo setup — continuing to scan other assets", opp_asset.upper(), side.upper())
+                    continue
                 else:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BUY-FAIL", "order rejected")
-                break
+                    continue
 
     for asset in ASSETS:
         if asset in traded_this_window:
@@ -2786,7 +2800,6 @@ def main():
                 flipped_this_window.clear()
                 gap_wait.clear()
                 peak_gap.clear()
-                oppo_bought_windows.clear()
                 normal_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
