@@ -2378,13 +2378,9 @@ function drawEmaChart(candles, wrap){
   drawLine(s8,'#fbbf24'); drawLine(s25,'#ff4fd8');
 }
 
-function drawCvdChart(historyMap, assets, wrap){
-  const series=assets.map((a,i)=>({
-    asset:a,
-    color:['#60a5fa','#fbbf24','#4ade9f','#f472b6','#a78bfa','#fb7185'][i%6],
-    points:(historyMap&&historyMap[a]||[]).filter(p=>p&&p.window!=null)
-  })).filter(s=>s.points.length>=2);
-  if(!series.length){
+function drawCvdChart(historyMap, asset, wrap){
+  const points=(historyMap&&historyMap[asset]||[]).filter(p=>p&&p.window!=null);
+  if(points.length<2){
     wrap.innerHTML='<p class="dim" style="padding:12px 0;font-size:12px">Not enough CVD history yet</p>';
     return;
   }
@@ -2394,12 +2390,11 @@ function drawCvdChart(historyMap, assets, wrap){
   canvas.width=W;canvas.height=H;
   const ctx=canvas.getContext('2d');
   ctx.clearRect(0,0,W,H);
-  const padT=18,padB=34,padL=58,padR=90;
+  const padT=18,padB=34,padL=58,padR=140;
   const cW=W-padL-padR,cH=H-padT-padB;
-  const all=[];series.forEach(s=>s.points.forEach(p=>all.push(Number(p.window)||0)));
-  const minV=Math.min(...all,0),maxV=Math.max(...all,0),range=maxV-minV||1;
-  const maxLen=Math.max(...series.map(s=>s.points.length));
-  const xOf=i=>padL+(maxLen<=1?0:i*(cW/(maxLen-1)));
+  const vals=points.map(p=>Number(p.window)||0);
+  const minV=Math.min(...vals,0),maxV=Math.max(...vals,0),range=maxV-minV||1;
+  const xOf=i=>padL+(points.length<=1?0:i*(cW/(points.length-1)));
   const yOf=v=>padT+cH-(((v-minV)/range)*cH);
   ctx.strokeStyle='#2a3347';ctx.lineWidth=1;
   [0,.25,.5,.75,1].forEach(t=>{
@@ -2410,18 +2405,21 @@ function drawCvdChart(historyMap, assets, wrap){
   if(minV<0&&maxV>0){
     const yz=yOf(0);ctx.strokeStyle='#3a4560';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(padL,yz);ctx.lineTo(W-padR,yz);ctx.stroke();ctx.setLineDash([]);
   }
-  series.forEach(s=>{
-    const pts=s.points;
-    ctx.beginPath();ctx.strokeStyle=s.color;ctx.lineWidth=2;
-    pts.forEach((p,i)=>{const x=xOf(i),y=yOf(Number(p.window)||0);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
-    ctx.stroke();
-    const last=pts[pts.length-1];
-    ctx.fillStyle=s.color;ctx.font='11px system-ui';ctx.textAlign='left';
-    ctx.fillText(`${s.asset.toUpperCase()} ${Number(last.window||0).toFixed(1)} / sl ${Number(last.slope||0).toFixed(4)}`, W-padR+8, padT+12+series.indexOf(s)*17);
-  });
-  const firstSeries=series[0].points, step=Math.max(1,Math.floor(maxLen/6));
+  ctx.beginPath();ctx.strokeStyle='#60a5fa';ctx.lineWidth=2;
+  vals.forEach((v,i)=>{const x=xOf(i),y=yOf(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.stroke();
+  vals.forEach((v,i)=>{ctx.beginPath();ctx.arc(xOf(i),yOf(v),2.5,0,Math.PI*2);ctx.fillStyle='#60a5fa';ctx.fill();});
+  const last=points[points.length-1];
+  ctx.fillStyle='#60a5fa';ctx.font='12px system-ui';ctx.textAlign='left';
+  ctx.fillText(`${asset.toUpperCase()} window ${Number(last.window||0).toFixed(1)}`, W-padR+8, padT+14);
+  ctx.fillStyle='#fbbf24';
+  ctx.fillText(`slope ${Number(last.slope||0).toFixed(4)}`, W-padR+8, padT+32);
+  ctx.fillStyle='#5a6a85';
+  ctx.fillText(`session ${Number(last.session||0).toFixed(1)}`, W-padR+8, padT+50);
+  const step=Math.max(1,Math.floor(points.length/6));
   ctx.fillStyle='#5a6a85';ctx.font='10px system-ui';ctx.textAlign='center';
-  for(let i=0;i<maxLen;i+=step){const p=firstSeries[Math.min(i,firstSeries.length-1)]||{};ctx.fillText(p.ts||'',xOf(i),H-12);}
+  for(let i=0;i<points.length;i+=step)ctx.fillText(points[i].ts||'',xOf(i),H-12);
+  if((points.length-1)%step!==0)ctx.fillText(points[points.length-1].ts||'',xOf(points.length-1),H-12);
 }
 
 
@@ -2613,7 +2611,12 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>CVD Window Chart <span style="font-size:11px;color:#5a6a85;font-weight:400">window CVD lines; legend shows latest window / slope</span></h2>
+      <h2>CVD Window Chart <span style="font-size:11px;color:#5a6a85;font-weight:400">select one asset; legend shows latest window / slope / session</span></h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${assets.map(a=>{
+        const c=cvd[a]||{},active=(window.__cvdAsset||assets[0])===a;
+        const slope=c.slope!=null?Number(c.slope).toFixed(4):'—';
+        return `<button id="cvdBtn_${a}" onclick="window.__cvdAsset='${a}'" style="padding:4px 10px;background:${active?'#0d1e2a':'#1e2533'};border:1px solid ${active?'#60a5fa':'#2a3347'};color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${(c.slope||0)>0?'green':(c.slope||0)<0?'red':'dim'}">${slope}</span></button>`;
+      }).join('')}</div>
       <div class="chart-wrap" id="cvdChartWrap"></div>
     </div>
 
@@ -2658,8 +2661,10 @@ function render(s){
   if(wrap)drawChart(pnlHist,wrap);
   const selected=(window.__emaAsset && assets.includes(window.__emaAsset))?window.__emaAsset:assets[0];
   window.__emaAsset=selected;
+  const selectedCvd=(window.__cvdAsset && assets.includes(window.__cvdAsset))?window.__cvdAsset:assets[0];
+  window.__cvdAsset=selectedCvd;
   const cvdWrap=document.getElementById('cvdChartWrap');
-  if(cvdWrap)drawCvdChart(cvdHistory, assets, cvdWrap);
+  if(cvdWrap)drawCvdChart(cvdHistory, selectedCvd, cvdWrap);
   const emaWrap=document.getElementById('emaChartWrap');
   if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
