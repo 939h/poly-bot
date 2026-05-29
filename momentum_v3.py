@@ -363,7 +363,7 @@ trade_log          = []
 oppo_trigger_log   = []
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
-cvd_history = {a: deque(maxlen=240) for a in ASSETS}
+cvd_history = {a: deque(maxlen=120) for a in ASSETS}
 
 _skip_first_window = False
 _startup_window_ts = None
