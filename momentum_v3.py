@@ -1774,7 +1774,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
                     if actual_gap >= oppo_gap_threshold:
                         record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
-                        log.info("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
+                        log.debug("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                                  opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
                         _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
                         continue
