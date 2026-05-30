@@ -3,7 +3,7 @@ binance_ws.py
 =============
 Runs as a background thread alongside fresh_bot23.py.
 Connects to Binance WebSocket — ETHUSDT + SOLUSDT + BTCUSDT + XRPUSDT 15m candles.
-Tracks candle open price, live close price, 15m MACD histogram, and Binance CVD per asset.
+Tracks candle open price, live close price, 15m MACD histogram, Binance CVD, and RVOL per asset.
 
 Exports:
     candle_open   — dict {asset: float}  open price of current 15m candle
@@ -15,6 +15,7 @@ Exports:
     get_macd_histogram(asset) — thread-safe MACD histogram lookup
     get_ema_snapshot(asset) — thread-safe EMA(8)/EMA(25) lookup
     get_cvd_snapshot(asset) — thread-safe (cvd, slope) lookup
+    get_volume_snapshot(asset, period=20, rvol_min=1.5) — current quote volume vs average
     start_rsi_feed() — call once on startup
 
 Usage in fresh_bot23.py:
@@ -211,6 +212,42 @@ def get_ema_snapshot(asset):
         return (pair.get("ema_fast"), pair.get("ema_slow"))
 
 
+def get_volume_snapshot(asset, period=20, rvol_min=1.5):
+    """Return current quote-volume RVOL against the previous N candles."""
+    period = max(1, int(period))
+    with _lock:
+        rows = list(candle_history.get(asset, []))
+
+    if len(rows) < period + 1:
+        return {
+            "current": None,
+            "average": None,
+            "rvol": None,
+            "above_average": False,
+            "confirmed": False,
+            "period": period,
+            "rvol_min": float(rvol_min),
+            "ready": False,
+        }
+
+    current = rows[-1]
+    previous = rows[-period - 1:-1]
+    current_volume = float(current.get("quote_volume", current.get("volume", 0.0)) or 0.0)
+    volumes = [float(r.get("quote_volume", r.get("volume", 0.0)) or 0.0) for r in previous]
+    avg_volume = sum(volumes) / len(volumes) if volumes else 0.0
+    rvol = current_volume / avg_volume if avg_volume > 0 else 0.0
+    return {
+        "current": current_volume,
+        "average": avg_volume,
+        "rvol": rvol,
+        "above_average": current_volume > avg_volume if avg_volume > 0 else False,
+        "confirmed": rvol >= float(rvol_min) if avg_volume > 0 else False,
+        "period": period,
+        "rvol_min": float(rvol_min),
+        "ready": True,
+    }
+
+
 def get_candle_history(asset, limit=18):
     with _lock:
         rows = list(candle_history.get(asset, []))
@@ -259,6 +296,11 @@ def _prefetch_candle_opens():
                             "high": float(c[2]),
                             "low": float(c[3]),
                             "close": float(c[4]),
+                            "volume": float(c[5]),
+                            "quote_volume": float(c[7]),
+                            "trades": int(c[8]),
+                            "taker_buy_volume": float(c[9]),
+                            "taker_buy_quote_volume": float(c[10]),
                             "closed": bool(int(c[6]) <= int(time.time() * 1000)),
                         })
                     candle_open[asset]    = open_price
@@ -333,7 +375,19 @@ def _on_message(ws, message):
                 _update_ema_values(asset)
                 cvd_value_window[asset] = 0.0
                 k_ts = int(k.get("t", 0))
-                row = {"ts": k_ts, "open": open_, "high": float(k.get("h", 0)), "low": float(k.get("l", 0)), "close": close, "closed": True}
+                row = {
+                    "ts": k_ts,
+                    "open": open_,
+                    "high": float(k.get("h", 0)),
+                    "low": float(k.get("l", 0)),
+                    "close": close,
+                    "volume": float(k.get("v", 0)),
+                    "quote_volume": float(k.get("q", 0)),
+                    "trades": int(k.get("n", 0)),
+                    "taker_buy_volume": float(k.get("V", 0)),
+                    "taker_buy_quote_volume": float(k.get("Q", 0)),
+                    "closed": True,
+                }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
                     candle_history[asset][-1] = row
                 else:
@@ -356,7 +410,19 @@ def _on_message(ws, message):
                 _update_macd_histogram(asset, close)
                 _update_ema_values(asset, close)
                 k_ts = int(k.get("t", 0))
-                row = {"ts": k_ts, "open": open_, "high": float(k.get("h", 0)), "low": float(k.get("l", 0)), "close": close, "closed": False}
+                row = {
+                    "ts": k_ts,
+                    "open": open_,
+                    "high": float(k.get("h", 0)),
+                    "low": float(k.get("l", 0)),
+                    "close": close,
+                    "volume": float(k.get("v", 0)),
+                    "quote_volume": float(k.get("q", 0)),
+                    "trades": int(k.get("n", 0)),
+                    "taker_buy_volume": float(k.get("V", 0)),
+                    "taker_buy_quote_volume": float(k.get("Q", 0)),
+                    "closed": False,
+                }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
                     candle_history[asset][-1] = row
                 else:
