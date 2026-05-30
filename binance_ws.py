@@ -103,7 +103,7 @@ MACD_SIGNAL = 9
 MACD_REST_LIMIT = 100
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
-CVD_SLOPE_WINDOW_SECS = 15
+CVD_SLOPE_WINDOW_SECS = 20
 CANDLE_HISTORY_LIMIT = 120
 
 # ── Internal state ────────────────────────────────────────────────────────────
