@@ -706,9 +706,13 @@ def _clear_oppo_tracking_for_asset(asset):
 
 def blacklist_oppo_dead_zone_asset(asset, side, price):
     """Blacklist an asset for the current window after an OPPO dead-zone touch."""
+    first_dead_zone_hit = asset not in oppo_dead_zone_blacklisted_assets
     normal_blacklisted_assets.add(asset)
     oppo_dead_zone_blacklisted_assets.add(asset)
     _clear_oppo_tracking_for_asset(asset)
+    if not first_dead_zone_hit:
+        return
+
     opp_key = f"{asset}_{side}"
     detail = f"<= {OPPO_DEAD_ZONE:.4f}; asset blacklisted this window"
     record_oppo_trigger(opp_key, asset, side, price, "DEAD-ZONE", detail)
@@ -2060,7 +2064,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if opp_asset in oppo_dead_zone_blacklisted_assets:
                     _clear_oppo_tracking_for_asset(opp_asset)
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BLACKLISTED", "dead-zone hit earlier this window")
                     continue
 
                 if opp_price <= OPPO_DEAD_ZONE:
