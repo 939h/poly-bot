@@ -224,6 +224,8 @@ CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN = float(os.getenv("RVOL_MIN", "0.5"))
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
+OPPO_PUMP_CONFIRM_ENABLED = os.getenv("OPPO_PUMP_CONFIRM_ENABLED", "true").lower() == "true"
+OPPO_PUMP_MIN_MULTIPLE = float(os.getenv("OPPO_PUMP_MIN_MULTIPLE", "2.0"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -284,6 +286,8 @@ def validate_settings():
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     if RVOL_MIN <= 0:
         errors.append("RVOL_MIN must be > 0")
+    if OPPO_PUMP_MIN_MULTIPLE < 1.0:
+        errors.append("OPPO_PUMP_MIN_MULTIPLE must be >= 1.0")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -576,6 +580,8 @@ def save_state():
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_pump_confirm_enabled": OPPO_PUMP_CONFIRM_ENABLED,
+            "oppo_pump_min_multiple": OPPO_PUMP_MIN_MULTIPLE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -644,6 +650,32 @@ def _get_pump_binance_snapshot(asset):
 
 def _update_pump_binance_snapshot(tracker):
     tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
+
+
+def _oppo_pump_confirm_ok(asset, side, price, window_start):
+    """Require the OPPO side to have proven pump momentum before entry."""
+    if not OPPO_PUMP_CONFIRM_ENABLED:
+        return True
+
+    key = f"{asset}_{side}"
+    tracker = pump_tracker.get(key)
+    if not tracker or tracker.get("window_start") != window_start:
+        record_oppo_trigger(key, asset, side, price, "PUMP-WAIT", "no same-window pump tracker")
+        return False
+
+    multiple = float(tracker.get("multiple", 0.0) or 0.0)
+    if multiple < OPPO_PUMP_MIN_MULTIPLE:
+        record_oppo_trigger(
+            key, asset, side, price, "PUMP-WAIT",
+            f"pump {multiple:.2f}x/{OPPO_PUMP_MIN_MULTIPLE:.2f}x",
+        )
+        return False
+
+    log.info(
+        "[OPPO-PUMP-PASS] %s_%s pump=%.3fx >= %.3fx",
+        asset.upper(), side.upper(), multiple, OPPO_PUMP_MIN_MULTIPLE,
+    )
+    return True
 
 
 def _record_pump_event(key, tracker, milestone):
@@ -2194,6 +2226,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                              opp_asset.upper(), side.upper(), COOLDOWN_SEC)
                     continue
 
+                if not _oppo_pump_confirm_ok(opp_asset, side, opp_price, window_start):
+                    continue
+
                 spread = get_spread_value(client, opp_token)
                 if spread is not None and spread > MAX_BOOK_SPREAD:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SPREAD", f"{spread:.4f}>{MAX_BOOK_SPREAD:.4f}")
@@ -2518,6 +2553,8 @@ def _build_state_snapshot():
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_pump_confirm_enabled": OPPO_PUMP_CONFIRM_ENABLED,
+            "oppo_pump_min_multiple": OPPO_PUMP_MIN_MULTIPLE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -3052,6 +3089,7 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>RVOL ≥ ${Number(cfg.rvol_min||1.5).toFixed(2)}x</td></tr>
+        <tr><td>OPPO pump confirm</td><td>${cfg.oppo_pump_confirm_enabled?'ON':'OFF'} — same-side pump tracker required before OPPO entry</td><td>Pass</td><td>Pump ≥ ${Number(cfg.oppo_pump_min_multiple||3).toFixed(2)}x</td></tr>
       </tbody></table>
     </div>
 
