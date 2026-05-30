@@ -649,7 +649,7 @@ def _update_pump_binance_snapshot(tracker):
 def _record_pump_event(key, tracker, milestone):
     _update_pump_binance_snapshot(tracker)
     event = {
-        "time": datetime.now().strftime("%H:%M:%S"),
+        "time": datetime.now().strftime("%H:%M"),
         "window_start": tracker.get("window_start"),
         "asset": tracker.get("asset", key.split("_")[0]).upper(),
         "side": tracker.get("side", key.split("_")[1] if "_" in key else "").upper(),
@@ -692,7 +692,7 @@ def update_pump_trackers(window_start, secs_into):
                         "asset": asset,
                         "side": side,
                         "window_start": window_start,
-                        "started_at": datetime.now().strftime("%H:%M:%S"),
+                        "started_at": datetime.now().strftime("%H:%M"),
                         "base_price": price,
                         "trough": price,
                         "current": price,
