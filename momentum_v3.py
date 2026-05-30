@@ -2417,7 +2417,7 @@ def _build_state_snapshot():
         }
         candle_out[a] = get_candle_history(a, limit=18)
     return {
-        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M"),
         "dry_run":       DRY_RUN,
         "stats":         dict(stats),
         "positions":     positions_out,
