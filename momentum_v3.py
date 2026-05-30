@@ -2570,6 +2570,13 @@ let oppoResetConfirmOpen=false;
 let oppoLogScrollTop=0;
 const pumpScrollIds=['pumpActiveWrap','pumpLogWrap'];
 const pumpScrollLeft={pumpActiveWrap:0,pumpLogWrap:0};
+const PUMP_SCROLL_HOLD_MS=2500;
+let pumpScrollHoldUntil=0;
+let pendingPumpState=null;
+function markPumpScrollActive(){pumpScrollHoldUntil=Date.now()+PUMP_SCROLL_HOLD_MS;}
+function pumpScrollIsActive(){
+  return Date.now()<pumpScrollHoldUntil && pumpScrollIds.some(id=>document.getElementById(id));
+}
 function capturePumpScroll(){
   pumpScrollIds.forEach(id=>{const el=document.getElementById(id); if(el)pumpScrollLeft[id]=el.scrollLeft;});
 }
@@ -2580,7 +2587,8 @@ function restorePumpScroll(){
     const maxLeft=Math.max(0,el.scrollWidth-el.clientWidth);
     el.scrollLeft=Math.min(pumpScrollLeft[id]||0,maxLeft);
     if(!el.dataset.pumpScrollBound){
-      el.addEventListener('scroll',()=>{pumpScrollLeft[id]=el.scrollLeft;},{passive:true});
+      el.addEventListener('scroll',()=>{pumpScrollLeft[id]=el.scrollLeft;markPumpScrollActive();},{passive:true});
+      ['wheel','pointerdown','mousedown','touchstart'].forEach(evt=>el.addEventListener(evt,markPumpScrollActive,{passive:true}));
       el.dataset.pumpScrollBound='1';
     }
   });
@@ -3067,8 +3075,15 @@ async function doOppoReset(){
   }catch(e){console.error('oppo reset failed',e)}
 }
 async function poll(){
-  try{const r=await fetch('/state');const d=await r.json();render(d);}
-  catch(e){console.error('fetch error',e);}
+  try{
+    const r=await fetch('/state');const d=await r.json();
+    if(pumpScrollIsActive()){
+      pendingPumpState=d;
+    }else{
+      render(pendingPumpState||d);
+      pendingPumpState=null;
+    }
+  }catch(e){console.error('fetch error',e);}
   const el=document.getElementById('oppoResetConfirm');
   if(el)el.style.display=oppoResetConfirmOpen?'inline-flex':'none';
 }
