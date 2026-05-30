@@ -539,6 +539,7 @@ def save_state():
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
+                "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -625,7 +626,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 def _get_pump_binance_snapshot(asset):
-    """Return the latest Binance gap and CVD slope for pump tracking."""
+    """Return the latest Binance gap, CVD slope, and RVOL for pump tracking."""
     c_open = candle_open.get(asset, 0.0)
     c_live = live_close.get(asset)
     binance_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
@@ -633,9 +634,12 @@ def _get_pump_binance_snapshot(asset):
         _, _, cvd_slope = get_cvd_snapshot(asset)
     except Exception:
         cvd_slope = None
+    vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, RVOL_MIN)
+    rvol = vol.get("rvol") if vol else None
     return {
         "binance_gap": binance_gap,
         "cvd_slope": round(float(cvd_slope), 6) if cvd_slope is not None else None,
+        "rvol": round(float(rvol), 3) if rvol is not None else None,
     }
 
 
@@ -656,6 +660,7 @@ def _record_pump_event(key, tracker, milestone):
         "multiple": round(float(tracker.get("multiple", 0.0)), 3),
         "binance_gap": tracker.get("binance_gap"),
         "cvd_slope": tracker.get("cvd_slope"),
+        "rvol": tracker.get("rvol"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
@@ -2475,6 +2480,7 @@ def _build_state_snapshot():
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
+                "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -2562,6 +2568,23 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bo
 <script>
 let oppoResetConfirmOpen=false;
 let oppoLogScrollTop=0;
+const pumpScrollIds=['pumpActiveWrap','pumpLogWrap'];
+const pumpScrollLeft={pumpActiveWrap:0,pumpLogWrap:0};
+function capturePumpScroll(){
+  pumpScrollIds.forEach(id=>{const el=document.getElementById(id); if(el)pumpScrollLeft[id]=el.scrollLeft;});
+}
+function restorePumpScroll(){
+  pumpScrollIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    const maxLeft=Math.max(0,el.scrollWidth-el.clientWidth);
+    el.scrollLeft=Math.min(pumpScrollLeft[id]||0,maxLeft);
+    if(!el.dataset.pumpScrollBound){
+      el.addEventListener('scroll',()=>{pumpScrollLeft[id]=el.scrollLeft;},{passive:true});
+      el.dataset.pumpScrollBound='1';
+    }
+  });
+}
 function fmt(v,d=4){return v!=null?'$'+parseFloat(v).toFixed(d):'—'}
 function fmtPct(v){return v!=null?(parseFloat(v)*100).toFixed(0)+'%':'—'}
 function fmtPnl(v){
@@ -2746,6 +2769,8 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
     const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
+    const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
+    const rvolCls=p.rvol!=null?'blue':'dim';
     return `<tr>
       <td><strong>${p.asset}-${p.side}</strong></td>
       <td>${p.started_at||'—'}</td>
@@ -2756,14 +2781,17 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
+      <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="10" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  }).join('') || `<tr><td colspan="11" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
   const eventRows=(log||[]).slice(0,40).map(e=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
+    const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
+    const rvolCls=e.rvol!=null?'blue':'dim';
     return `<tr>
       <td>${e.time||'—'}</td>
       <td><strong>${e.asset}-${e.side}</strong></td>
@@ -2773,14 +2801,15 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td class="${cls}" style="font-weight:600">${m.toFixed(2)}x</td>
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
+      <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="8" class="dim">No 3x+ pump milestones yet</td></tr>';
-  return `<div style="overflow-x:auto"><table>
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>Hit</th></tr></thead>
+  }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
+  return `<div id="pumpActiveWrap" style="overflow-x:auto"><table>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>
     <div style="height:10px"></div>
-    <div style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th></tr></thead>
+    <div id="pumpLogWrap" style="overflow-x:auto"><table>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>`;
 }
 
@@ -2804,6 +2833,7 @@ function renderAssetHistory(assetHist,assets){
 function render(s){
   const prevOppoLogWrap=document.getElementById('oppoLogWrap');
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
+  capturePumpScroll();
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
@@ -3003,6 +3033,8 @@ function render(s){
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
   }
+  restorePumpScroll();
+  requestAnimationFrame(restorePumpScroll);
 }
 
 function startReset(){document.getElementById('resetConfirm').style.display='inline-flex';}
@@ -3067,29 +3099,13 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "rvol", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("binance_gap", ""),
-            e.get("cvd_slope", ""), e.get("milestone", ""),
-        ])
-    return buf.getvalue().encode("utf-8")
-
-
-def _pump_log_csv_bytes():
-    import io
-    import csv
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "milestone"])
-    for e in pump_log:
-        w.writerow([
-            e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
-            e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
-            e.get("current", ""), e.get("multiple", ""), e.get("binance_gap", ""),
-            e.get("cvd_slope", ""), e.get("milestone", ""),
+            e.get("cvd_slope", ""), e.get("rvol", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
