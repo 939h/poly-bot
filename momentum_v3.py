@@ -225,7 +225,7 @@ VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN = float(os.getenv("RVOL_MIN", "0.5"))
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
 OPPO_PUMP_CONFIRM_ENABLED = os.getenv("OPPO_PUMP_CONFIRM_ENABLED", "true").lower() == "true"
-OPPO_PUMP_MIN_MULTIPLE = float(os.getenv("OPPO_PUMP_MIN_MULTIPLE", "3.0"))
+OPPO_PUMP_MIN_MULTIPLE = float(os.getenv("OPPO_PUMP_MIN_MULTIPLE", "2.0"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -2452,7 +2452,7 @@ def _build_state_snapshot():
         }
         candle_out[a] = get_candle_history(a, limit=18)
     return {
-        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated":       datetime.now().strftime("%Y-%m-%d %H:%M"),
         "dry_run":       DRY_RUN,
         "stats":         dict(stats),
         "positions":     positions_out,
