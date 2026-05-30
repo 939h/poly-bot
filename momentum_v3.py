@@ -3389,7 +3389,7 @@ def main():
 def _ema_confirms_side(asset, side):
     if not EMA_CONFIRM_ENABLED:
         if EMA_PASS_LOG_ENABLED:
-            log.info("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
+            log.debug("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
         return True
     ema_fast, ema_slow = get_ema_snapshot(asset)
     if ema_fast is None or ema_slow is None:
