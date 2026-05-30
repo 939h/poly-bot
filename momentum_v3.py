@@ -224,6 +224,8 @@ CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN = float(os.getenv("RVOL_MIN", "0.5"))
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
+OPPO_PUMP_CONFIRM_ENABLED = os.getenv("OPPO_PUMP_CONFIRM_ENABLED", "true").lower() == "true"
+OPPO_PUMP_MIN_MULTIPLE = float(os.getenv("OPPO_PUMP_MIN_MULTIPLE", "3.0"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -246,7 +248,6 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.20"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.03"))
 PUMP_TRACK_MILESTONES = (3, 4, 5)
-PUMP_LOG_MAX_ROWS = int(os.getenv("PUMP_LOG_MAX_ROWS", "300"))
 gap_mag_vol = 1.0
 
 
@@ -285,6 +286,8 @@ def validate_settings():
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     if RVOL_MIN <= 0:
         errors.append("RVOL_MIN must be > 0")
+    if OPPO_PUMP_MIN_MULTIPLE < 1.0:
+        errors.append("OPPO_PUMP_MIN_MULTIPLE must be >= 1.0")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -537,6 +540,9 @@ def save_state():
                 "multiple": round(float(v.get("multiple", 0.0)), 3),
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
+                "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
+                "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
+                "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -574,6 +580,8 @@ def save_state():
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_pump_confirm_enabled": OPPO_PUMP_CONFIRM_ENABLED,
+            "oppo_pump_min_multiple": OPPO_PUMP_MIN_MULTIPLE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -622,9 +630,58 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 
+def _get_pump_binance_snapshot(asset):
+    """Return the latest Binance gap, CVD slope, and RVOL for pump tracking."""
+    c_open = candle_open.get(asset, 0.0)
+    c_live = live_close.get(asset)
+    binance_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
+    try:
+        _, _, cvd_slope = get_cvd_snapshot(asset)
+    except Exception:
+        cvd_slope = None
+    vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, RVOL_MIN)
+    rvol = vol.get("rvol") if vol else None
+    return {
+        "binance_gap": binance_gap,
+        "cvd_slope": round(float(cvd_slope), 6) if cvd_slope is not None else None,
+        "rvol": round(float(rvol), 3) if rvol is not None else None,
+    }
+
+
+def _update_pump_binance_snapshot(tracker):
+    tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
+
+
+def _oppo_pump_confirm_ok(asset, side, price, window_start):
+    """Require the OPPO side to have proven pump momentum before entry."""
+    if not OPPO_PUMP_CONFIRM_ENABLED:
+        return True
+
+    key = f"{asset}_{side}"
+    tracker = pump_tracker.get(key)
+    if not tracker or tracker.get("window_start") != window_start:
+        record_oppo_trigger(key, asset, side, price, "PUMP-WAIT", "no same-window pump tracker")
+        return False
+
+    multiple = float(tracker.get("multiple", 0.0) or 0.0)
+    if multiple < OPPO_PUMP_MIN_MULTIPLE:
+        record_oppo_trigger(
+            key, asset, side, price, "PUMP-WAIT",
+            f"pump {multiple:.2f}x/{OPPO_PUMP_MIN_MULTIPLE:.2f}x",
+        )
+        return False
+
+    log.info(
+        "[OPPO-PUMP-PASS] %s_%s pump=%.3fx >= %.3fx",
+        asset.upper(), side.upper(), multiple, OPPO_PUMP_MIN_MULTIPLE,
+    )
+    return True
+
+
 def _record_pump_event(key, tracker, milestone):
+    _update_pump_binance_snapshot(tracker)
     event = {
-        "time": datetime.now().strftime("%H:%M:%S"),
+        "time": datetime.now().strftime("%H:%M"),
         "window_start": tracker.get("window_start"),
         "asset": tracker.get("asset", key.split("_")[0]).upper(),
         "side": tracker.get("side", key.split("_")[1] if "_" in key else "").upper(),
@@ -632,15 +689,19 @@ def _record_pump_event(key, tracker, milestone):
         "trough": round(float(tracker.get("trough", 0.0)), 4),
         "current": round(float(tracker.get("current", 0.0)), 4),
         "multiple": round(float(tracker.get("multiple", 0.0)), 3),
+        "binance_gap": tracker.get("binance_gap"),
+        "cvd_slope": tracker.get("cvd_slope"),
+        "rvol": tracker.get("rvol"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
-    if len(pump_log) > PUMP_LOG_MAX_ROWS:
-        del pump_log[PUMP_LOG_MAX_ROWS:]
 
 
-def update_pump_trackers(window_start):
-    """Track YES/NO prices that pump from a sub-20c trough to 3x/4x/5x+."""
+def update_pump_trackers(window_start, secs_into):
+    """Track YES/NO pumps only through the configured stop-buy cutoff."""
+    if secs_into > STOP_BUY_AT:
+        return
+
     for asset in ASSETS:
         for side in ("yes", "no"):
             key = f"{asset}_{side}"
@@ -663,7 +724,7 @@ def update_pump_trackers(window_start):
                         "asset": asset,
                         "side": side,
                         "window_start": window_start,
-                        "started_at": datetime.now().strftime("%H:%M:%S"),
+                        "started_at": datetime.now().strftime("%H:%M"),
                         "base_price": price,
                         "trough": price,
                         "current": price,
@@ -671,10 +732,12 @@ def update_pump_trackers(window_start):
                         "max_price": price,
                         "max_multiple": 1.0,
                         "highest_milestone": 1,
+                        **_get_pump_binance_snapshot(asset),
                     }
                 continue
 
             tracker["current"] = price
+            _update_pump_binance_snapshot(tracker)
             if price < float(tracker.get("trough", price)):
                 tracker["trough"] = price
                 tracker["base_price"] = price
@@ -1995,7 +2058,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     for asset in ASSETS:
         _update_prices(results.get(asset))
-    update_pump_trackers(window_start)
+    update_pump_trackers(window_start, secs_into)
 
     if not can_open_new_trades(server_ts):
         return
@@ -2161,6 +2224,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "COOLDOWN", f"{COOLDOWN_SEC}s")
                     log.info("[OPPO-COOLDOWN] %s_%s cooling down (%ds)",
                              opp_asset.upper(), side.upper(), COOLDOWN_SEC)
+                    continue
+
+                if not _oppo_pump_confirm_ok(opp_asset, side, opp_price, window_start):
                     continue
 
                 spread = get_spread_value(client, opp_token)
@@ -2447,6 +2513,9 @@ def _build_state_snapshot():
                 "multiple": round(float(v.get("multiple", 0.0)), 3),
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
+                "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
+                "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
+                "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -2484,6 +2553,8 @@ def _build_state_snapshot():
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_pump_confirm_enabled": OPPO_PUMP_CONFIRM_ENABLED,
+            "oppo_pump_min_multiple": OPPO_PUMP_MIN_MULTIPLE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -2508,6 +2579,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:#5a6a85;font-weight:500;padding:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
 td{padding:7px 0;border-top:1px solid #2a3347;font-family:monospace;font-size:13px}
 td:first-child{font-family:system-ui;font-weight:500;color:#e8edf5}
+.pump-table th,.pump-table td{padding-left:2px;padding-right:2px}
 .bar-bg{height:6px;background:#2a3347;border-radius:3px;overflow:hidden;margin-top:4px}
 .bar-fill{height:100%;border-radius:3px;transition:width .5s}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
@@ -2534,7 +2606,33 @@ footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bo
 <script>
 let oppoResetConfirmOpen=false;
 let oppoLogScrollTop=0;
+const pumpScrollIds=['pumpActiveWrap','pumpLogWrap'];
+const pumpScrollLeft={pumpActiveWrap:0,pumpLogWrap:0};
+const PUMP_SCROLL_HOLD_MS=2500;
+let pumpScrollHoldUntil=0;
+let pendingPumpState=null;
+function markPumpScrollActive(){pumpScrollHoldUntil=Date.now()+PUMP_SCROLL_HOLD_MS;}
+function pumpScrollIsActive(){
+  return Date.now()<pumpScrollHoldUntil && pumpScrollIds.some(id=>document.getElementById(id));
+}
+function capturePumpScroll(){
+  pumpScrollIds.forEach(id=>{const el=document.getElementById(id); if(el)pumpScrollLeft[id]=el.scrollLeft;});
+}
+function restorePumpScroll(){
+  pumpScrollIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    const maxLeft=Math.max(0,el.scrollWidth-el.clientWidth);
+    el.scrollLeft=Math.min(pumpScrollLeft[id]||0,maxLeft);
+    if(!el.dataset.pumpScrollBound){
+      el.addEventListener('scroll',()=>{pumpScrollLeft[id]=el.scrollLeft;markPumpScrollActive();},{passive:true});
+      ['wheel','pointerdown','mousedown','touchstart'].forEach(evt=>el.addEventListener(evt,markPumpScrollActive,{passive:true}));
+      el.dataset.pumpScrollBound='1';
+    }
+  });
+}
 function fmt(v,d=4){return v!=null?'$'+parseFloat(v).toFixed(d):'—'}
+function fmtCents(v,d=0){return v!=null?(parseFloat(v)*100).toFixed(d)+'c':'—'}
 function fmtPct(v){return v!=null?(parseFloat(v)*100).toFixed(0)+'%':'—'}
 function fmtPnl(v){
   const n=parseFloat(v)||0;
@@ -2669,12 +2767,38 @@ function drawCvdChart(historyMap, asset, wrap){
 
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
+let _pumpActiveExpanded=false;
+let _pumpLogExpanded=false;
+const PUMP_ACTIVE_COLLAPSE=8;
+const PUMP_LOG_COLLAPSE=40;
 function tlToggle(){
   _tlExpanded=!_tlExpanded;
   document.querySelectorAll('.tl-row').forEach((r,i)=>{if(i>=TL_COLLAPSE)r.style.display=_tlExpanded?'':'none';});
   const btn=document.getElementById('tlToggle');
   if(btn){const h=Array.from(document.querySelectorAll('.tl-row')).filter(r=>r.style.display==='none').length;
     btn.textContent=_tlExpanded?'▲ Show less':'▼ Show '+h+' more';}
+}
+function pumpToggle(kind){
+  const isActive=kind==='active';
+  const cls=isActive?'.pump-active-row':'.pump-log-row';
+  const limit=isActive?PUMP_ACTIVE_COLLAPSE:PUMP_LOG_COLLAPSE;
+  if(isActive)_pumpActiveExpanded=!_pumpActiveExpanded; else _pumpLogExpanded=!_pumpLogExpanded;
+  const expanded=isActive?_pumpActiveExpanded:_pumpLogExpanded;
+  document.querySelectorAll(cls).forEach((r,i)=>{if(i>=limit)r.style.display=expanded?'':'none';});
+  const btn=document.getElementById(isActive?'pumpActiveToggle':'pumpLogToggle');
+  if(btn){const h=Array.from(document.querySelectorAll(cls)).filter(r=>r.style.display==='none').length;
+    btn.textContent=expanded?'▲ Show less':'▼ Show '+h+' more';}
+}
+function pumpAssetLabel(asset,side){
+  const colors={BTC:['#f59e0b','#2a1f08','#5c3d08'],ETH:['#60a5fa','#0d1a2a','#1a3a5c'],SOL:['#a78bfa','#21133f','#4c1d95'],XRP:['#94a3b8','#172033','#334155']};
+  const a=String(asset||'—').toUpperCase(),s=String(side||'—').toUpperCase();
+  const c=colors[a]||['#e8edf5','#1e2533','#2a3347'];
+  const sideStyle=s==='YES'?'background:#0d2a1e;color:#4ade80;border-color:#166534':(s==='NO'?'background:#2a0d0d;color:#f87171;border-color:#7f1d1d':'background:#1e2533;color:#8a9ab5;border-color:#2a3347');
+  return `<span class="badge" style="background:${c[1]};color:${c[0]};border:1px solid ${c[2]};font-size:10px">${a}</span><span class="badge" style="${sideStyle};font-size:10px;margin-left:4px">${s}</span>`;
+}
+function showMoreButton(id,onclick,total,limit,expanded){
+  const extra=total-limit;
+  return extra>0?`<button id="${id}" onclick="${onclick}" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${expanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
 }
 
 function renderTradeLog(log){
@@ -2712,38 +2836,56 @@ function renderTradeLog(log){
 
 function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
-  const activeRows=active.map(p=>{
+  const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
     const cls=maxMult>=5?'green':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
-    return `<tr>
-      <td><strong>${p.asset}-${p.side}</strong></td>
+    const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
+    const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
+    const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
+    const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
+    const rvolCls=p.rvol!=null?'blue':'dim';
+    return `<tr class="pump-active-row" style="${i>=PUMP_ACTIVE_COLLAPSE&&!_pumpActiveExpanded?'display:none':''}">
+      <td><strong>${pumpAssetLabel(p.asset,p.side)}</strong></td>
       <td>${p.started_at||'—'}</td>
-      <td>${fmt(p.base_price,4)}</td>
-      <td>${fmt(p.trough,4)}</td>
-      <td>${fmt(p.current,4)}</td>
+      <td>${fmtCents(p.base_price,1)}</td>
+      <td>${fmtCents(p.trough,1)}</td>
+      <td>${fmtCents(p.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${mult.toFixed(2)}x</td>
       <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
+      <td style="font-family:monospace">${gap}</td>
+      <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
+      <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="8" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
-  const eventRows=(log||[]).slice(0,40).map(e=>{
+  }).join('') || `<tr><td colspan="11" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
-    return `<tr>
+    const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
+    const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
+    const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
+    const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
+    const rvolCls=e.rvol!=null?'blue':'dim';
+    return `<tr class="pump-log-row" style="${i>=PUMP_LOG_COLLAPSE&&!_pumpLogExpanded?'display:none':''}">
       <td>${e.time||'—'}</td>
-      <td><strong>${e.asset}-${e.side}</strong></td>
+      <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
-      <td>${fmt(e.base_price,4)}</td>
-      <td>${fmt(e.current,4)}</td>
+      <td>${fmtCents(e.base_price,1)}</td>
+      <td>${fmtCents(e.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${m.toFixed(2)}x</td>
+      <td style="font-family:monospace">${gap}</td>
+      <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
+      <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" class="dim">No 3x+ pump milestones yet</td></tr>';
-  return `<div style="overflow-x:auto"><table>
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Hit</th></tr></thead>
-    <tbody>${activeRows}</tbody></table></div>
+  }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
+  const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
+  const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
+  return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
+    <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
-    <div style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th></tr></thead>
-    <tbody>${eventRows}</tbody></table></div>`;
+    <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
+    <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
 function renderAssetHistory(assetHist,assets){
@@ -2766,6 +2908,7 @@ function renderAssetHistory(assetHist,assets){
 function render(s){
   const prevOppoLogWrap=document.getElementById('oppoLogWrap');
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
+  capturePumpScroll();
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
@@ -2928,7 +3071,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ and milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ until stop-buy ${cfg.stop_buy||840}s, milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2,cfg.pump_track_dead_zone_price||0.05)}
     </div>
 
@@ -2946,6 +3089,7 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>RVOL ≥ ${Number(cfg.rvol_min||1.5).toFixed(2)}x</td></tr>
+        <tr><td>OPPO pump confirm</td><td>${cfg.oppo_pump_confirm_enabled?'ON':'OFF'} — same-side pump tracker required before OPPO entry</td><td>Pass</td><td>Pump ≥ ${Number(cfg.oppo_pump_min_multiple||3).toFixed(2)}x</td></tr>
       </tbody></table>
     </div>
 
@@ -2965,6 +3109,8 @@ function render(s){
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
   }
+  restorePumpScroll();
+  requestAnimationFrame(restorePumpScroll);
 }
 
 function startReset(){document.getElementById('resetConfirm').style.display='inline-flex';}
@@ -2997,8 +3143,15 @@ async function doOppoReset(){
   }catch(e){console.error('oppo reset failed',e)}
 }
 async function poll(){
-  try{const r=await fetch('/state');const d=await r.json();render(d);}
-  catch(e){console.error('fetch error',e);}
+  try{
+    const r=await fetch('/state');const d=await r.json();
+    if(pumpScrollIsActive()){
+      pendingPumpState=d;
+    }else{
+      render(pendingPumpState||d);
+      pendingPumpState=null;
+    }
+  }catch(e){console.error('fetch error',e);}
   const el=document.getElementById('oppoResetConfirm');
   if(el)el.style.display=oppoResetConfirmOpen?'inline-flex':'none';
 }
@@ -3029,27 +3182,13 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "rvol", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
-            e.get("current", ""), e.get("multiple", ""), e.get("milestone", ""),
-        ])
-    return buf.getvalue().encode("utf-8")
-
-
-def _pump_log_csv_bytes():
-    import io
-    import csv
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "milestone"])
-    for e in pump_log:
-        w.writerow([
-            e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
-            e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
-            e.get("current", ""), e.get("multiple", ""), e.get("milestone", ""),
+            e.get("current", ""), e.get("multiple", ""), e.get("binance_gap", ""),
+            e.get("cvd_slope", ""), e.get("rvol", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
