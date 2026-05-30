@@ -241,6 +241,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 
 # ── Pump tracker ─────────────────────────────────────────────────────────────
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.20"))
+PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", str(OPPO_MIN_PRICE)))
 PUMP_TRACK_MILESTONES = (3, 4, 5)
 PUMP_LOG_MAX_ROWS = int(os.getenv("PUMP_LOG_MAX_ROWS", "300"))
 gap_mag_vol = 1.0
@@ -404,7 +405,10 @@ def load_state():
         pnl_history   = saved.get("pnl_history", [])
         asset_history = saved.get("asset_history", {})
         trade_log     = saved.get("trade_log", [])
-        pump_tracker  = saved.get("pump_tracker", {})
+        pump_tracker  = {
+            k: v for k, v in saved.get("pump_tracker", {}).items()
+            if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
+        }
         pump_log      = saved.get("pump_log", [])
         if pnl_history:
             last_pnl_snapshot = time.time()
@@ -560,6 +564,7 @@ def save_state():
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
     }
     try:
@@ -634,9 +639,13 @@ def update_pump_trackers(window_start):
             if tracker and tracker.get("window_start") != window_start:
                 del pump_tracker[key]
                 tracker = None
+            if price < PUMP_TRACK_DEAD_ZONE_PRICE:
+                if tracker:
+                    del pump_tracker[key]
+                continue
 
             if tracker is None:
-                if price < PUMP_TRACK_START_PRICE:
+                if PUMP_TRACK_DEAD_ZONE_PRICE <= price < PUMP_TRACK_START_PRICE:
                     pump_tracker[key] = {
                         "asset": asset,
                         "side": side,
@@ -2398,6 +2407,7 @@ def _build_state_snapshot():
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
     }
 
@@ -2618,7 +2628,7 @@ function renderTradeLog(log){
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
-function renderPumpTracker(trackers,log,startPrice){
+function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
   const activeRows=active.map(p=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
@@ -2633,7 +2643,7 @@ function renderPumpTracker(trackers,log,startPrice){
       <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="8" class="dim">No active sub-${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  }).join('') || `<tr><td colspan="8" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
   const eventRows=(log||[]).slice(0,40).map(e=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
     return `<tr>
@@ -2832,8 +2842,8 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices starting below ${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ and milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
-      ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2)}
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ and milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
+      ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2,cfg.pump_track_dead_zone_price||0.05)}
     </div>
 
     <div class="section">
