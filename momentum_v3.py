@@ -725,7 +725,7 @@ def update_pump_trackers(window_start, secs_into):
             if max_whole_multiple >= first_milestone and max_whole_multiple > highest:
                 for milestone in range(max(first_milestone, highest + 1), max_whole_multiple + 1):
                     _record_pump_event(key, tracker, milestone)
-                    log.info(
+                    log.debug(
                         "[PUMP-%dX] %s base=%.4f current=%.4f multiple=%.3fx",
                         milestone, key, trough, price, multiple,
                     )
