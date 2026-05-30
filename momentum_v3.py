@@ -668,8 +668,11 @@ def _record_pump_event(key, tracker, milestone):
         del pump_log[PUMP_LOG_MAX_ROWS:]
 
 
-def update_pump_trackers(window_start):
-    """Track YES/NO prices that pump from a sub-20c trough to 3x/4x/5x+."""
+def update_pump_trackers(window_start, secs_into):
+    """Track YES/NO pumps only through the configured stop-buy cutoff."""
+    if secs_into > STOP_BUY_AT:
+        return
+
     for asset in ASSETS:
         for side in ("yes", "no"):
             key = f"{asset}_{side}"
@@ -2026,7 +2029,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     for asset in ASSETS:
         _update_prices(results.get(asset))
-    update_pump_trackers(window_start)
+    update_pump_trackers(window_start, secs_into)
 
     if not can_open_new_trades(server_ts):
         return
@@ -3004,7 +3007,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ and milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ until stop-buy ${cfg.stop_buy||840}s, milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2,cfg.pump_track_dead_zone_price||0.05)}
     </div>
 
