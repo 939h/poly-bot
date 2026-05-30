@@ -2542,6 +2542,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:#5a6a85;font-weight:500;padding:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
 td{padding:7px 0;border-top:1px solid #2a3347;font-family:monospace;font-size:13px}
 td:first-child{font-family:system-ui;font-weight:500;color:#e8edf5}
+.pump-table th,.pump-table td{padding-left:2px;padding-right:2px}
 .bar-bg{height:6px;background:#2a3347;border-radius:3px;overflow:hidden;margin-top:4px}
 .bar-fill{height:100%;border-radius:3px;transition:width .5s}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
@@ -2841,11 +2842,11 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
-  return `<div id="pumpActiveWrap" style="overflow-x:auto"><table>
+  return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
     <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
-    <div id="pumpLogWrap" style="overflow-x:auto"><table>
+    <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
     <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
