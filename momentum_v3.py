@@ -2594,6 +2594,7 @@ function restorePumpScroll(){
   });
 }
 function fmt(v,d=4){return v!=null?'$'+parseFloat(v).toFixed(d):'—'}
+function fmtCents(v,d=0){return v!=null?(parseFloat(v)*100).toFixed(d)+'c':'—'}
 function fmtPct(v){return v!=null?(parseFloat(v)*100).toFixed(0)+'%':'—'}
 function fmtPnl(v){
   const n=parseFloat(v)||0;
@@ -2808,9 +2809,9 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     return `<tr class="pump-active-row" style="${i>=PUMP_ACTIVE_COLLAPSE&&!_pumpActiveExpanded?'display:none':''}">
       <td><strong>${pumpAssetLabel(p.asset,p.side)}</strong></td>
       <td>${p.started_at||'—'}</td>
-      <td>${fmt(p.base_price,4)}</td>
-      <td>${fmt(p.trough,4)}</td>
-      <td>${fmt(p.current,4)}</td>
+      <td>${fmtCents(p.base_price,1)}</td>
+      <td>${fmtCents(p.trough,1)}</td>
+      <td>${fmtCents(p.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${mult.toFixed(2)}x</td>
       <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
       <td style="font-family:monospace">${gap}</td>
@@ -2830,8 +2831,8 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td>${e.time||'—'}</td>
       <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
-      <td>${fmt(e.base_price,4)}</td>
-      <td>${fmt(e.current,4)}</td>
+      <td>${fmtCents(e.base_price,1)}</td>
+      <td>${fmtCents(e.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${m.toFixed(2)}x</td>
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
