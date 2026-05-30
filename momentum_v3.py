@@ -81,7 +81,7 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot, get_candle_history
+from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot, get_candle_history, get_volume_snapshot
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -221,6 +221,8 @@ OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", "0.5"))
 OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
+VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
+RVOL_MIN = float(os.getenv("RVOL_MIN", "1.5"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -278,6 +280,10 @@ def validate_settings():
         errors.append("OPPO_COUNTER_SELL_CAP must be between 0 and 1")
     if not 0 < OPPO_COUNTER_CUT_LOSS_PCT < 1:
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
+    if VOLUME_AVG_PERIOD <= 0:
+        errors.append("VOLUME_AVG_PERIOD must be > 0")
+    if RVOL_MIN <= 0:
+        errors.append("RVOL_MIN must be > 0")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -563,6 +569,8 @@ def save_state():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "volume_avg_period": VOLUME_AVG_PERIOD,
+            "rvol_min": RVOL_MIN,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -2290,6 +2298,7 @@ def _build_state_snapshot():
     gap_out = {}
     gap_threshold_out = {}
     cvd_out = {}
+    volume_out = {}
     ema_now = {}
     candle_out = {}
     for a in ASSETS:
@@ -2307,6 +2316,17 @@ def _build_state_snapshot():
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
         cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
         cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
+        vol = get_volume_snapshot(a, VOLUME_AVG_PERIOD, RVOL_MIN)
+        volume_out[a] = {
+            "current": round(float(vol["current"]), 2) if vol.get("current") is not None else None,
+            "average": round(float(vol["average"]), 2) if vol.get("average") is not None else None,
+            "rvol": round(float(vol["rvol"]), 3) if vol.get("rvol") is not None else None,
+            "above_average": bool(vol.get("above_average", False)),
+            "confirmed": bool(vol.get("confirmed", False)),
+            "period": int(vol.get("period", VOLUME_AVG_PERIOD)),
+            "rvol_min": float(vol.get("rvol_min", RVOL_MIN)),
+            "ready": bool(vol.get("ready", False)),
+        }
         ema_fast, ema_slow = get_ema_snapshot(a)
         ema_now[a] = {
             "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
@@ -2322,6 +2342,7 @@ def _build_state_snapshot():
         "gap":           gap_out,
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
+        "volume":        volume_out,
         "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
@@ -2406,6 +2427,8 @@ def _build_state_snapshot():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "volume_avg_period": VOLUME_AVG_PERIOD,
+            "rvol_min": RVOL_MIN,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
         },
@@ -2685,7 +2708,7 @@ function render(s){
   const prevOppoLogWrap=document.getElementById('oppoLogWrap');
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},cvdHistory=s.cvd_history||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
@@ -2717,6 +2740,7 @@ function render(s){
     const holdingCell=[holding,flags].filter(Boolean).join(' <span class="dim">|</span> ');
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const cv=cvd[a]||{};
+    const vol=volumes[a]||{};
     const oppYes=oppoLastTrigger[a+'_yes'];
     const oppNo=oppoLastTrigger[a+'_no'];
     const oppoParts=[oppYes,oppNo].filter(Boolean).map(o=>`${(o.side||'').toUpperCase()}: ${o.status||'—'}`).join(' <span class="dim">|</span> ');
@@ -2724,7 +2748,10 @@ function render(s){
     const gStr=gv!=null?gv.toFixed(4):'—';
     const tStr=gt!=null?gt.toFixed(4):'—';
     const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
-    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
+    const rv=vol.rvol!=null?Number(vol.rvol):null;
+    const rvCls=vol.confirmed?'green':(vol.above_average?'amber':'dim');
+    const volStr=rv!=null?`${rv.toFixed(2)}x ${vol.confirmed?'✓':(vol.above_average?'↑':'')}`:'—';
+    return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td class="${rvCls}" style="font-family:monospace">${volStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
   const posCards=Object.entries(pos).map(([k,p])=>{
@@ -2823,8 +2850,8 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢</span></h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
+      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass ≥${Number(cfg.rvol_min||1.5).toFixed(2)}x</span></h2>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
@@ -2859,6 +2886,7 @@ function render(s){
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
+        <tr><td>Volume RVOL</td><td>Current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>RVOL ≥ ${Number(cfg.rvol_min||1.5).toFixed(2)}x</td></tr>
       </tbody></table>
     </div>
 
@@ -3047,6 +3075,7 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  Volume RVOL: avg_period=%d  pass>=%.2fx", VOLUME_AVG_PERIOD, RVOL_MIN)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
