@@ -238,6 +238,11 @@ SELL_MAX_ATTEMPTS        = 5
 SELL_RETRY_DELAY_SECS    = 0.5
 MIN_SELL_SHARES          = 0.001
 CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
+
+# ── Pump tracker ─────────────────────────────────────────────────────────────
+PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.20"))
+PUMP_TRACK_MILESTONES = (3, 4, 5)
+PUMP_LOG_MAX_ROWS = int(os.getenv("PUMP_LOG_MAX_ROWS", "300"))
 gap_mag_vol = 1.0
 
 
@@ -298,6 +303,7 @@ last_entry_ts       = {}   # asset -> unix seconds of last buy
 skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
 skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
+oppo_dead_zone_blacklisted_assets = set()  # assets whose OPPO price hit dead-zone this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
@@ -361,6 +367,8 @@ pnl_history        = []
 asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
+pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
+pump_log           = []  # historical pump milestone events
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
 cvd_history = {a: deque(maxlen=120) for a in ASSETS}
@@ -382,7 +390,7 @@ STATE_FILE = "bot_state.json"
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, last_pnl_snapshot
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -396,25 +404,29 @@ def load_state():
         pnl_history   = saved.get("pnl_history", [])
         asset_history = saved.get("asset_history", {})
         trade_log     = saved.get("trade_log", [])
+        pump_tracker  = saved.get("pump_tracker", {})
+        pump_log      = saved.get("pump_log", [])
         if pnl_history:
             last_pnl_snapshot = time.time()
         log.info(
             "[STATE] Restored — buys=%d  wins=%d  losses=%d  pnl=$%.4f  "
-            "trades=%d  pnl_pts=%d",
+            "trades=%d  pumps=%d  pnl_pts=%d",
             stats["buys"], stats["wins"], stats["losses"], stats["pnl"],
-            len(trade_log), len(pnl_history),
+            len(trade_log), len(pump_log), len(pnl_history),
         )
     except Exception as e:
         log.warning("[STATE] Load failed: %s — starting fresh", e)
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    pump_tracker = {}
+    pump_log = []
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
     cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
@@ -501,6 +513,22 @@ def save_state():
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
         "oppo_trigger_log": list(oppo_trigger_log),
+        "pump_tracker": {
+            k: {
+                "asset": v.get("asset", k.split("_")[0]).upper(),
+                "side": v.get("side", k.split("_")[1] if "_" in k else "").upper(),
+                "window_start": v.get("window_start"),
+                "started_at": v.get("started_at", ""),
+                "base_price": round(float(v.get("base_price", 0.0)), 4),
+                "trough": round(float(v.get("trough", 0.0)), 4),
+                "current": round(float(v.get("current", 0.0)), 4),
+                "multiple": round(float(v.get("multiple", 0.0)), 3),
+                "max_price": round(float(v.get("max_price", 0.0)), 4),
+                "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
+                "highest_milestone": int(v.get("highest_milestone", 1)),
+            } for k, v in pump_tracker.items()
+        },
+        "pump_log":       list(pump_log),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -531,6 +559,7 @@ def save_state():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "pump_track_start_price": PUMP_TRACK_START_PRICE,
         },
     }
     try:
@@ -574,6 +603,81 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         trade_log.pop()
 
 
+
+def _record_pump_event(key, tracker, milestone):
+    event = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "window_start": tracker.get("window_start"),
+        "asset": tracker.get("asset", key.split("_")[0]).upper(),
+        "side": tracker.get("side", key.split("_")[1] if "_" in key else "").upper(),
+        "base_price": round(float(tracker.get("base_price", 0.0)), 4),
+        "trough": round(float(tracker.get("trough", 0.0)), 4),
+        "current": round(float(tracker.get("current", 0.0)), 4),
+        "multiple": round(float(tracker.get("multiple", 0.0)), 3),
+        "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
+    }
+    pump_log.insert(0, event)
+    if len(pump_log) > PUMP_LOG_MAX_ROWS:
+        del pump_log[PUMP_LOG_MAX_ROWS:]
+
+
+def update_pump_trackers(window_start):
+    """Track YES/NO prices that pump from a sub-20c trough to 3x/4x/5x+."""
+    for asset in ASSETS:
+        for side in ("yes", "no"):
+            key = f"{asset}_{side}"
+            price = live_prices.get(key)
+            if price is None or price <= 0:
+                continue
+
+            tracker = pump_tracker.get(key)
+            if tracker and tracker.get("window_start") != window_start:
+                del pump_tracker[key]
+                tracker = None
+
+            if tracker is None:
+                if price < PUMP_TRACK_START_PRICE:
+                    pump_tracker[key] = {
+                        "asset": asset,
+                        "side": side,
+                        "window_start": window_start,
+                        "started_at": datetime.now().strftime("%H:%M:%S"),
+                        "base_price": price,
+                        "trough": price,
+                        "current": price,
+                        "multiple": 1.0,
+                        "max_price": price,
+                        "max_multiple": 1.0,
+                        "highest_milestone": 1,
+                    }
+                continue
+
+            tracker["current"] = price
+            if price < float(tracker.get("trough", price)):
+                tracker["trough"] = price
+                tracker["base_price"] = price
+                tracker["highest_milestone"] = 1
+
+            trough = float(tracker.get("trough", 0.0))
+            multiple = price / trough if trough > 0 else 0.0
+            tracker["multiple"] = multiple
+            if price > float(tracker.get("max_price", 0.0)):
+                tracker["max_price"] = price
+            if multiple > float(tracker.get("max_multiple", 0.0)):
+                tracker["max_multiple"] = multiple
+
+            max_whole_multiple = int(math.floor(multiple))
+            first_milestone = min(PUMP_TRACK_MILESTONES)
+            highest = int(tracker.get("highest_milestone", 1))
+            if max_whole_multiple >= first_milestone and max_whole_multiple > highest:
+                for milestone in range(max(first_milestone, highest + 1), max_whole_multiple + 1):
+                    _record_pump_event(key, tracker, milestone)
+                    log.info(
+                        "[PUMP-%dX] %s base=%.4f current=%.4f multiple=%.3fx",
+                        milestone, key, trough, price, multiple,
+                    )
+                tracker["highest_milestone"] = max_whole_multiple
+
 def _record_oppo_trigger(asset, side, price, status, reason):
     oppo_trigger_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
@@ -583,6 +687,40 @@ def _record_oppo_trigger(asset, side, price, status, reason):
         "status": status,
         "reason": reason,
     })
+
+
+def _clear_oppo_tracking_for_asset(asset):
+    """Remove all per-window OPPO trackers for an asset."""
+    prefixes = (f"{asset}_yes", f"{asset}_no")
+    for key in list(oppo_rebound_tracker.keys()):
+        if key.startswith(prefixes):
+            del oppo_rebound_tracker[key]
+    for key in list(oppo_counter_tracker.keys()):
+        tracker_asset = oppo_counter_tracker[key].get("asset") if isinstance(oppo_counter_tracker[key], dict) else None
+        if tracker_asset == asset or key.startswith(prefixes):
+            del oppo_counter_tracker[key]
+    for key in list(oppo_cvd_polls.keys()):
+        if key.startswith(prefixes):
+            del oppo_cvd_polls[key]
+
+
+def blacklist_oppo_dead_zone_asset(asset, side, price):
+    """Blacklist an asset for the current window after an OPPO dead-zone touch."""
+    first_dead_zone_hit = asset not in oppo_dead_zone_blacklisted_assets
+    normal_blacklisted_assets.add(asset)
+    oppo_dead_zone_blacklisted_assets.add(asset)
+    _clear_oppo_tracking_for_asset(asset)
+    if not first_dead_zone_hit:
+        return
+
+    opp_key = f"{asset}_{side}"
+    detail = f"<= {OPPO_DEAD_ZONE:.4f}; asset blacklisted this window"
+    record_oppo_trigger(opp_key, asset, side, price, "DEAD-ZONE", detail)
+    _record_oppo_trigger(asset, side, price, "SKIPPED", "dead-zone-blacklisted")
+    log.info(
+        "[OPPO-DEAD-ZONE] %s price=%.4f <= %.4f — blacklisted asset for current window and cleared OPPO tracking",
+        opp_key, price, OPPO_DEAD_ZONE,
+    )
     
 # ── CLOB helpers ──────────────────────────────────────────────────────────────
 
@@ -1794,6 +1932,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
     for asset in ASSETS:
         _update_prices(results.get(asset))
+    update_pump_trackers(window_start)
 
     if not can_open_new_trades(server_ts):
         return
@@ -1911,7 +2050,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         for side in ("yes", "no"):
             low_assets = []
             for asset, (price, token) in side_values[side].items():
-                if OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
+                if price <= OPPO_DEAD_ZONE or OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
                     low_assets.append((asset, price, token))
             if not low_assets:
                 continue
@@ -1923,13 +2062,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
                     continue
 
+                if opp_asset in oppo_dead_zone_blacklisted_assets:
+                    _clear_oppo_tracking_for_asset(opp_asset)
+                    continue
+
                 if opp_price <= OPPO_DEAD_ZONE:
-                    oppo_rebound_tracker.pop(opp_key, None)
-                    normal_blacklisted_assets.add(opp_asset)
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "DEAD-ZONE", f"<= {OPPO_DEAD_ZONE:.4f}; blacklisted this window")
-                    log.debug("[OPPO-DISCARD] %s price=%.4f <= dead-zone %.4f — blacklisted this window",
-                              opp_key, opp_price, OPPO_DEAD_ZONE)
-                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "dead-zone-blacklisted")
+                    blacklist_oppo_dead_zone_asset(opp_asset, side, opp_price)
                     continue
 
                 trough = oppo_rebound_tracker.get(opp_key)
@@ -2185,6 +2323,7 @@ def _build_state_snapshot():
             "period":    "early" if secs_in < 300 else ("mid" if secs_in < 600 else "late"),
         },
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
+        "oppo_dead_zone_blacklisted_assets": sorted(list(oppo_dead_zone_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
         "rebound_cutloss_tracker": {
             k: {
@@ -2212,6 +2351,22 @@ def _build_state_snapshot():
         "asset_history": dict(asset_history),
         "trade_log":     list(trade_log),
         "oppo_trigger_log": list(oppo_trigger_log),
+        "pump_tracker": {
+            k: {
+                "asset": v.get("asset", k.split("_")[0]).upper(),
+                "side": v.get("side", k.split("_")[1] if "_" in k else "").upper(),
+                "window_start": v.get("window_start"),
+                "started_at": v.get("started_at", ""),
+                "base_price": round(float(v.get("base_price", 0.0)), 4),
+                "trough": round(float(v.get("trough", 0.0)), 4),
+                "current": round(float(v.get("current", 0.0)), 4),
+                "multiple": round(float(v.get("multiple", 0.0)), 3),
+                "max_price": round(float(v.get("max_price", 0.0)), 4),
+                "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
+                "highest_milestone": int(v.get("highest_milestone", 1)),
+            } for k, v in pump_tracker.items()
+        },
+        "pump_log":       list(pump_log),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -2242,6 +2397,7 @@ def _build_state_snapshot():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "pump_track_start_price": PUMP_TRACK_START_PRICE,
         },
     }
 
@@ -2462,6 +2618,42 @@ function renderTradeLog(log){
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
+function renderPumpTracker(trackers,log,startPrice){
+  const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
+  const activeRows=active.map(p=>{
+    const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
+    const cls=maxMult>=5?'green':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
+    return `<tr>
+      <td><strong>${p.asset}-${p.side}</strong></td>
+      <td>${p.started_at||'—'}</td>
+      <td>${fmt(p.base_price,4)}</td>
+      <td>${fmt(p.trough,4)}</td>
+      <td>${fmt(p.current,4)}</td>
+      <td class="${cls}" style="font-weight:600">${mult.toFixed(2)}x</td>
+      <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
+      <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="8" class="dim">No active sub-${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  const eventRows=(log||[]).slice(0,40).map(e=>{
+    const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
+    return `<tr>
+      <td>${e.time||'—'}</td>
+      <td><strong>${e.asset}-${e.side}</strong></td>
+      <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
+      <td>${fmt(e.base_price,4)}</td>
+      <td>${fmt(e.current,4)}</td>
+      <td class="${cls}" style="font-weight:600">${m.toFixed(2)}x</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="dim">No 3x+ pump milestones yet</td></tr>';
+  return `<div style="overflow-x:auto"><table>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Hit</th></tr></thead>
+    <tbody>${activeRows}</tbody></table></div>
+    <div style="height:10px"></div>
+    <div style="overflow-x:auto"><table>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th></tr></thead>
+    <tbody>${eventRows}</tbody></table></div>`;
+}
+
 function renderAssetHistory(assetHist,assets){
   if(!assetHist||!Object.keys(assetHist).length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   return '<div class="asset-grid">'+assets.map(a=>{
@@ -2488,7 +2680,7 @@ function render(s){
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
-  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[];
+  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
@@ -2640,6 +2832,11 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices starting below ${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ and milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
+      ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2)}
+    </div>
+
+    <div class="section">
       <h2>Per-Asset Summary</h2>
       ${renderAssetHistory(assetHist,assets)}
     </div>
@@ -2729,6 +2926,21 @@ def _trade_log_csv_bytes():
         ])
     return buf.getvalue().encode("utf-8")
 
+
+def _pump_log_csv_bytes():
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "milestone"])
+    for e in pump_log:
+        w.writerow([
+            e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
+            e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
+            e.get("current", ""), e.get("multiple", ""), e.get("milestone", ""),
+        ])
+    return buf.getvalue().encode("utf-8")
+
 class _Handler(BaseHTTPRequestHandler):
     def _safe_write(self, data, context):
         try:
@@ -2761,6 +2973,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(data))
             self.end_headers()
             self._safe_write(data, "/trade-log.csv")
+        elif self.path == "/pump-log.csv":
+            data = _pump_log_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=pump_log.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/pump-log.csv")
         else:
             self.send_response(404)
             self.end_headers()
@@ -2862,11 +3082,13 @@ def main():
                 gap_wait.clear()
                 peak_gap.clear()
                 normal_blacklisted_assets.clear()
+                oppo_dead_zone_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
+                pump_tracker.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
