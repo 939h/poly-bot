@@ -246,7 +246,6 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.20"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.03"))
 PUMP_TRACK_MILESTONES = (3, 4, 5)
-PUMP_LOG_MAX_ROWS = int(os.getenv("PUMP_LOG_MAX_ROWS", "300"))
 gap_mag_vol = 1.0
 
 
@@ -664,8 +663,6 @@ def _record_pump_event(key, tracker, milestone):
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
-    if len(pump_log) > PUMP_LOG_MAX_ROWS:
-        del pump_log[PUMP_LOG_MAX_ROWS:]
 
 
 def update_pump_trackers(window_start, secs_into):
@@ -2731,12 +2728,38 @@ function drawCvdChart(historyMap, asset, wrap){
 
 let _tlExpanded=false;
 const TL_COLLAPSE=5;
+let _pumpActiveExpanded=false;
+let _pumpLogExpanded=false;
+const PUMP_ACTIVE_COLLAPSE=8;
+const PUMP_LOG_COLLAPSE=40;
 function tlToggle(){
   _tlExpanded=!_tlExpanded;
   document.querySelectorAll('.tl-row').forEach((r,i)=>{if(i>=TL_COLLAPSE)r.style.display=_tlExpanded?'':'none';});
   const btn=document.getElementById('tlToggle');
   if(btn){const h=Array.from(document.querySelectorAll('.tl-row')).filter(r=>r.style.display==='none').length;
     btn.textContent=_tlExpanded?'▲ Show less':'▼ Show '+h+' more';}
+}
+function pumpToggle(kind){
+  const isActive=kind==='active';
+  const cls=isActive?'.pump-active-row':'.pump-log-row';
+  const limit=isActive?PUMP_ACTIVE_COLLAPSE:PUMP_LOG_COLLAPSE;
+  if(isActive)_pumpActiveExpanded=!_pumpActiveExpanded; else _pumpLogExpanded=!_pumpLogExpanded;
+  const expanded=isActive?_pumpActiveExpanded:_pumpLogExpanded;
+  document.querySelectorAll(cls).forEach((r,i)=>{if(i>=limit)r.style.display=expanded?'':'none';});
+  const btn=document.getElementById(isActive?'pumpActiveToggle':'pumpLogToggle');
+  if(btn){const h=Array.from(document.querySelectorAll(cls)).filter(r=>r.style.display==='none').length;
+    btn.textContent=expanded?'▲ Show less':'▼ Show '+h+' more';}
+}
+function pumpAssetLabel(asset,side){
+  const colors={BTC:['#f59e0b','#2a1f08','#5c3d08'],ETH:['#60a5fa','#0d1a2a','#1a3a5c'],SOL:['#a78bfa','#21133f','#4c1d95'],XRP:['#94a3b8','#172033','#334155']};
+  const a=String(asset||'—').toUpperCase(),s=String(side||'—').toUpperCase();
+  const c=colors[a]||['#e8edf5','#1e2533','#2a3347'];
+  const sideStyle=s==='YES'?'background:#0d2a1e;color:#4ade80;border-color:#166534':(s==='NO'?'background:#2a0d0d;color:#f87171;border-color:#7f1d1d':'background:#1e2533;color:#8a9ab5;border-color:#2a3347');
+  return `<span class="badge" style="background:${c[1]};color:${c[0]};border:1px solid ${c[2]};font-size:10px">${a}</span><span class="badge" style="${sideStyle};font-size:10px;margin-left:4px">${s}</span>`;
+}
+function showMoreButton(id,onclick,total,limit,expanded){
+  const extra=total-limit;
+  return extra>0?`<button id="${id}" onclick="${onclick}" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${expanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
 }
 
 function renderTradeLog(log){
@@ -2774,7 +2797,7 @@ function renderTradeLog(log){
 
 function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
-  const activeRows=active.map(p=>{
+  const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
     const cls=maxMult>=5?'green':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
     const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
@@ -2782,8 +2805,8 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
     const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
     const rvolCls=p.rvol!=null?'blue':'dim';
-    return `<tr>
-      <td><strong>${p.asset}-${p.side}</strong></td>
+    return `<tr class="pump-active-row" style="${i>=PUMP_ACTIVE_COLLAPSE&&!_pumpActiveExpanded?'display:none':''}">
+      <td><strong>${pumpAssetLabel(p.asset,p.side)}</strong></td>
       <td>${p.started_at||'—'}</td>
       <td>${fmt(p.base_price,4)}</td>
       <td>${fmt(p.trough,4)}</td>
@@ -2796,16 +2819,16 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="11" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
-  const eventRows=(log||[]).slice(0,40).map(e=>{
+  const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
     const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
     const rvolCls=e.rvol!=null?'blue':'dim';
-    return `<tr>
+    return `<tr class="pump-log-row" style="${i>=PUMP_LOG_COLLAPSE&&!_pumpLogExpanded?'display:none':''}">
       <td>${e.time||'—'}</td>
-      <td><strong>${e.asset}-${e.side}</strong></td>
+      <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
       <td>${fmt(e.base_price,4)}</td>
       <td>${fmt(e.current,4)}</td>
@@ -2815,13 +2838,15 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
+  const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
+  const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table>
     <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
-    <tbody>${activeRows}</tbody></table></div>
+    <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table>
     <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
-    <tbody>${eventRows}</tbody></table></div>`;
+    <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
 function renderAssetHistory(assetHist,assets){
