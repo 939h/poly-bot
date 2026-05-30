@@ -160,7 +160,7 @@ GAP_SWING = {
 }
 GAP_MAGNITUDE = {
     "early": 1.0,   # 0–5 min
-    "mid":   0.8,   # 5–10 min
+    "mid":   1.0,   # 5–10 min
     "late":  0.5,   # 10–15 min
 }
 GAP_WAIT_SECS = {
@@ -199,18 +199,18 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
-OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.50"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.25"))
+OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.30"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.05"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "0.5"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.90"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.3"))
-OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
+OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
-OPPO_FINAL_SELL_MULTIPLIER = 6.0
+OPPO_FINAL_SELL_MULTIPLIER = 10.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
 OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
@@ -220,9 +220,9 @@ OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", "
 OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", "0.5"))
 OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
-CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "1")))
+CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
-RVOL_MIN = float(os.getenv("RVOL_MIN", "1.5"))
+RVOL_MIN = float(os.getenv("RVOL_MIN", "0.5"))
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 
 # ── Pump tracker ─────────────────────────────────────────────────────────────
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.20"))
-PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", str(OPPO_MIN_PRICE)))
+PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.03"))
 PUMP_TRACK_MILESTONES = (3, 4, 5)
 PUMP_LOG_MAX_ROWS = int(os.getenv("PUMP_LOG_MAX_ROWS", "300"))
 gap_mag_vol = 1.0
@@ -3020,6 +3020,21 @@ def _trade_log_csv_bytes():
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
             t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
             t.get("is_counter", False), t.get("pnl", ""), t.get("entry_rvol", ""),
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
+def _pump_log_csv_bytes():
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "milestone"])
+    for e in pump_log:
+        w.writerow([
+            e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
+            e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
+            e.get("current", ""), e.get("multiple", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
