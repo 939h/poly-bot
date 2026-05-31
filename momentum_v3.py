@@ -2876,7 +2876,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
   const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
-    const cls=maxMult>=5?'green':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
+    const cls=maxMult>=5?'red':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
     const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
     const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
@@ -2903,7 +2903,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const windowColorIndex=new Map();
   let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
-    const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
+    const m=Number(e.multiple||0),cls=m>=5?'red':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
