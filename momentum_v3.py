@@ -207,6 +207,7 @@ OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "2.0"))
+OPPO_FALLING_KNIFE_MIN_MOVE = float(os.getenv("OPPO_FALLING_KNIFE_MIN_MOVE", "0.30"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
@@ -285,6 +286,8 @@ def validate_settings():
         errors.append("OPPO_COUNTER_SELL_CAP must be between 0 and 1")
     if not 0 < OPPO_COUNTER_CUT_LOSS_PCT < 1:
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
+    if OPPO_FALLING_KNIFE_MIN_MOVE <= 0:
+        errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
     if VOLUME_AVG_PERIOD <= 0:
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     for stage, threshold in RVOL_MIN_BY_STAGE.items():
@@ -561,6 +564,7 @@ def save_state():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
@@ -893,6 +897,35 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
         opp_key, stage, log_detail, rvol_min,
     )
     return False, vol
+
+
+def _oppo_pump_range(opp_key, window_start):
+    tracker = pump_tracker.get(opp_key)
+    trough = float(tracker.get("trough", 0.0) or 0.0) if isinstance(tracker, dict) else 0.0
+    peak = float(tracker.get("max_price", 0.0) or 0.0) if isinstance(tracker, dict) else 0.0
+    asset, side = opp_key.split("_", 1)
+    for event in pump_log:
+        if event.get("window_start") != window_start:
+            continue
+        if str(event.get("asset", "")).lower() != asset or str(event.get("side", "")).lower() != side:
+            continue
+        event_trough = float(event.get("trough", 0.0) or 0.0)
+        event_peak = max(float(event.get("max_price", 0.0) or 0.0), float(event.get("current", 0.0) or 0.0))
+        trough = event_trough if trough <= 0 else min(trough, event_trough)
+        peak = max(peak, event_peak)
+        break
+    return trough, peak
+
+
+def _oppo_falling_knife_blocked(opp_key, window_start, price):
+    trough, peak = _oppo_pump_range(opp_key, window_start)
+    if trough <= 0 or peak <= 0 or price <= 0:
+        return False, trough, peak, 0.0, 0.0
+    pump_move = peak - trough
+    drop = peak - price
+    blocked = pump_move >= OPPO_FALLING_KNIFE_MIN_MOVE and drop >= OPPO_FALLING_KNIFE_MIN_MOVE
+    min_ok_price = peak - OPPO_FALLING_KNIFE_MIN_MOVE
+    return blocked, trough, peak, drop, min_ok_price
     
 # ── CLOB helpers ──────────────────────────────────────────────────────────────
 
@@ -2274,6 +2307,20 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
+
+                falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
+                if falling_knife:
+                    oppo_rebound_tracker[opp_key] = opp_price
+                    pump_move = pump_peak - pump_trough
+                    detail = f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; need >= {min_ok_price:.4f}"
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
+                    log.info(
+                        "[OPPO-KNIFE-BLOCK] %s price=%.4f trough=%.4f peak=%.4f pump=+%.4f drop=-%.4f >= %.4f — reset trough and wait fresh rebound",
+                        opp_key, opp_price, pump_trough, pump_peak, pump_move, drop, OPPO_FALLING_KNIFE_MIN_MOVE,
+                    )
+                    _record_oppo_trigger(opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
+                    continue
+
                 if f"{opp_asset}_{side}_oppo" in open_positions:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "already open")
                     continue
@@ -2586,6 +2633,7 @@ def _build_state_snapshot():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
@@ -2986,7 +3034,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3048,7 +3096,9 @@ function render(s){
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
   const oppoRows=oppoLog.map(o=>{
-    const statusCls=o.status==='BOUGHT'?'green':'amber';
+    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
+    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
+    const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
     return `<tr>
       <td>${o.time||'—'}</td>
@@ -3129,7 +3179,7 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss events)</span></h2>
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss/knife-block events)</span></h2>
       <div class="oppo-log-wrap" id="oppoLogWrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody>${oppoRows}</tbody></table></div>
     </div>
@@ -3158,6 +3208,7 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Early > ${Number((cfg.rvol_min_by_stage||{}).early||0.3).toFixed(2)}x / Mid > ${Number((cfg.rvol_min_by_stage||{}).mid||0.5).toFixed(2)}x / Late > ${Number((cfg.rvol_min_by_stage||{}).late||0.8).toFixed(2)}x</td></tr>
+        <tr><td>OPPO knife guard</td><td>Blocks late dump entries after a pump peak</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
 
@@ -3357,6 +3408,7 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  OPPO falling-knife guard: block after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info(
         "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass early>%.2fx mid>%.2fx late>%.2fx",
         OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD,
