@@ -539,6 +539,7 @@ def save_state():
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -646,7 +647,16 @@ def _update_pump_binance_snapshot(tracker):
     tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
 
 
-def _record_pump_event(key, tracker, milestone):
+def _pump_result_from_tracker(tracker):
+    """Return SUCCESS when the tracker finishes within 15% of its max multiple."""
+    current_multiple = float(tracker.get("multiple", 0.0))
+    max_multiple = float(tracker.get("max_multiple", 0.0))
+    if max_multiple <= 0:
+        return "FAILED"
+    return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
+
+
+def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_binance_snapshot(tracker)
     event = {
         "time": datetime.now().strftime("%H:%M"),
@@ -657,17 +667,57 @@ def _record_pump_event(key, tracker, milestone):
         "trough": round(float(tracker.get("trough", 0.0)), 4),
         "current": round(float(tracker.get("current", 0.0)), 4),
         "multiple": round(float(tracker.get("multiple", 0.0)), 3),
+        "max_price": round(float(tracker.get("max_price", 0.0)), 4),
+        "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
         "binance_gap": tracker.get("binance_gap"),
         "cvd_slope": tracker.get("cvd_slope"),
         "rvol": tracker.get("rvol"),
+        "status": status or tracker.get("status", "TRACKING"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
+    if len(pump_log) > 500:
+        pump_log.pop()
+
+
+def _finish_pump_tracker(key, tracker, reason="END"):
+    """Record the final pump tracker result and remove it from active tracking."""
+    tracker["status"] = _pump_result_from_tracker(tracker)
+    _record_pump_event(key, tracker, reason, tracker["status"])
+    log.info(
+        "[PUMP-%s] %s now=%.3fx max=%.3fx current=%.4f max_px=%.4f",
+        tracker["status"], key, float(tracker.get("multiple", 0.0)),
+        float(tracker.get("max_multiple", 0.0)), float(tracker.get("current", 0.0)),
+        float(tracker.get("max_price", 0.0)),
+    )
+    pump_tracker.pop(key, None)
+
+
+def _refresh_pump_tracker_price(key, tracker):
+    price = live_prices.get(key)
+    if price is not None and price > 0:
+        tracker["current"] = price
+        if price < float(tracker.get("trough", price)):
+            tracker["trough"] = price
+            tracker["base_price"] = price
+            tracker["highest_milestone"] = 1
+        trough = float(tracker.get("trough", 0.0))
+        multiple = price / trough if trough > 0 else 0.0
+        tracker["multiple"] = multiple
+        if price > float(tracker.get("max_price", 0.0)):
+            tracker["max_price"] = price
+        if multiple > float(tracker.get("max_multiple", 0.0)):
+            tracker["max_multiple"] = multiple
+    _update_pump_binance_snapshot(tracker)
 
 
 def update_pump_trackers(window_start, secs_into):
-    """Track YES/NO pumps only through the configured stop-buy cutoff."""
+    """Track YES/NO pumps until stop-buy, then record final success/failure."""
     if secs_into > STOP_BUY_AT:
+        for key, tracker in list(pump_tracker.items()):
+            if tracker.get("window_start") == window_start:
+                _refresh_pump_tracker_price(key, tracker)
+                _finish_pump_tracker(key, tracker, "END")
         return
 
     for asset in ASSETS:
@@ -679,11 +729,13 @@ def update_pump_trackers(window_start, secs_into):
 
             tracker = pump_tracker.get(key)
             if tracker and tracker.get("window_start") != window_start:
-                del pump_tracker[key]
+                # Do not refresh stale trackers with a new window's live price.
+                _finish_pump_tracker(key, tracker, "END")
                 tracker = None
             if price < PUMP_TRACK_DEAD_ZONE_PRICE:
                 if tracker:
-                    del pump_tracker[key]
+                    _refresh_pump_tracker_price(key, tracker)
+                    _finish_pump_tracker(key, tracker, "DEAD-ZONE")
                 continue
 
             if tracker is None:
@@ -699,26 +751,16 @@ def update_pump_trackers(window_start, secs_into):
                         "multiple": 1.0,
                         "max_price": price,
                         "max_multiple": 1.0,
+                        "status": "TRACKING",
                         "highest_milestone": 1,
                         **_get_pump_binance_snapshot(asset),
                     }
                 continue
 
-            tracker["current"] = price
-            _update_pump_binance_snapshot(tracker)
-            if price < float(tracker.get("trough", price)):
-                tracker["trough"] = price
-                tracker["base_price"] = price
-                tracker["highest_milestone"] = 1
+            _refresh_pump_tracker_price(key, tracker)
 
+            multiple = float(tracker.get("multiple", 0.0))
             trough = float(tracker.get("trough", 0.0))
-            multiple = price / trough if trough > 0 else 0.0
-            tracker["multiple"] = multiple
-            if price > float(tracker.get("max_price", 0.0)):
-                tracker["max_price"] = price
-            if multiple > float(tracker.get("max_multiple", 0.0)):
-                tracker["max_multiple"] = multiple
-
             max_whole_multiple = int(math.floor(multiple))
             first_milestone = min(PUMP_TRACK_MILESTONES)
             highest = int(tracker.get("highest_milestone", 1))
@@ -2481,6 +2523,7 @@ def _build_state_snapshot():
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -2807,6 +2850,8 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
     const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
     const rvolCls=p.rvol!=null?'blue':'dim';
+    const status=p.status||'TRACKING';
+    const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
     return `<tr class="pump-active-row" style="${i>=PUMP_ACTIVE_COLLAPSE&&!_pumpActiveExpanded?'display:none':''}">
       <td><strong>${pumpAssetLabel(p.asset,p.side)}</strong></td>
       <td>${p.started_at||'—'}</td>
@@ -2818,9 +2863,13 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
+      <td class="${statusCls}" style="font-weight:600">${status}</td>
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="11" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  }).join('') || `<tr><td colspan="12" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  const windowTimeColors=['#e8edf5','#fbbf24'];
+  const windowColorIndex=new Map();
+  let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
@@ -2828,8 +2877,13 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
     const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
     const rvolCls=e.rvol!=null?'blue':'dim';
+    const status=e.status||'TRACKING';
+    const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
+    const windowKey=e.window_start!=null?String(e.window_start):`unknown-${e.time||i}`;
+    if(!windowColorIndex.has(windowKey))windowColorIndex.set(windowKey,nextWindowColor++%windowTimeColors.length);
+    const timeColor=windowTimeColors[windowColorIndex.get(windowKey)];
     return `<tr class="pump-log-row" style="${i>=PUMP_LOG_COLLAPSE&&!_pumpLogExpanded?'display:none':''}">
-      <td>${e.time||'—'}</td>
+      <td style="color:${timeColor};font-weight:700">${e.time||'—'}</td>
       <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
       <td>${fmtCents(e.base_price,1)}</td>
@@ -2838,16 +2892,17 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
+      <td class="${statusCls}" style="font-weight:600">${status}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
+  }).join('') || '<tr><td colspan="10" class="dim">No 3x+ pump milestones yet</td></tr>';
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
@@ -3144,13 +3199,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "rvol", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "binance_gap", "cvd_slope", "rvol", "status", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
-            e.get("current", ""), e.get("multiple", ""), e.get("binance_gap", ""),
-            e.get("cvd_slope", ""), e.get("rvol", ""), e.get("milestone", ""),
+            e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
+            e.get("max_multiple", ""), e.get("binance_gap", ""), e.get("cvd_slope", ""),
+            e.get("rvol", ""), e.get("status", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
