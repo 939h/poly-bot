@@ -377,6 +377,7 @@ trade_log          = []
 oppo_trigger_log   = []
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
+pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
 cvd_history = {a: deque(maxlen=120) for a in ASSETS}
@@ -398,7 +399,7 @@ STATE_FILE = "bot_state.json"
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -417,6 +418,7 @@ def load_state():
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
         }
         pump_log      = saved.get("pump_log", [])
+        pump_finished_tracker_keys = _finished_pump_keys_from_log(pump_log)
         if pnl_history:
             last_pnl_snapshot = time.time()
         log.info(
@@ -430,7 +432,7 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
@@ -438,6 +440,7 @@ def reset_state():
     oppo_trigger_log = []
     pump_tracker = {}
     pump_log = []
+    pump_finished_tracker_keys = set()
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
     cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
@@ -647,6 +650,28 @@ def _update_pump_binance_snapshot(tracker):
     tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
 
 
+def _pump_finished_id(window_start, key):
+    return (str(window_start), key.lower())
+
+
+def _finished_pump_keys_from_log(log_entries):
+    finished = set()
+    for event in log_entries or []:
+        if event.get("status") not in ("SUCCESS", "FAILED"):
+            continue
+        window_start = event.get("window_start")
+        asset = str(event.get("asset", "")).lower()
+        side = str(event.get("side", "")).lower()
+        if window_start is not None and asset and side:
+            finished.add(_pump_finished_id(window_start, f"{asset}_{side}"))
+    return finished
+
+
+def _pump_tracker_already_finished(window_start, key):
+    return _pump_finished_id(window_start, key) in pump_finished_tracker_keys
+
+
+
 def _pump_result_from_tracker(tracker):
     """Return SUCCESS when the tracker finishes within 15% of its max multiple."""
     current_multiple = float(tracker.get("multiple", 0.0))
@@ -682,7 +707,12 @@ def _record_pump_event(key, tracker, milestone, status=None):
 
 def _finish_pump_tracker(key, tracker, reason="END"):
     """Record the final pump tracker result and remove it from active tracking."""
+    window_start = tracker.get("window_start")
+    if _pump_tracker_already_finished(window_start, key):
+        pump_tracker.pop(key, None)
+        return
     tracker["status"] = _pump_result_from_tracker(tracker)
+    pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
     log.info(
         "[PUMP-%s] %s now=%.3fx max=%.3fx current=%.4f max_px=%.4f",
@@ -739,6 +769,8 @@ def update_pump_trackers(window_start, secs_into):
                 continue
 
             if tracker is None:
+                if _pump_tracker_already_finished(window_start, key):
+                    continue
                 if PUMP_TRACK_DEAD_ZONE_PRICE <= price < PUMP_TRACK_START_PRICE:
                     pump_tracker[key] = {
                         "asset": asset,
@@ -3360,6 +3392,7 @@ def main():
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
+                pump_finished_tracker_keys.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
