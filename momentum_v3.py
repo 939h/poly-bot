@@ -2867,6 +2867,9 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="12" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  const windowTimeColors=['#e8edf5','#fbbf24'];
+  const windowColorIndex=new Map();
+  let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
@@ -2876,8 +2879,11 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const rvolCls=e.rvol!=null?'blue':'dim';
     const status=e.status||'TRACKING';
     const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
+    const windowKey=e.window_start!=null?String(e.window_start):`unknown-${e.time||i}`;
+    if(!windowColorIndex.has(windowKey))windowColorIndex.set(windowKey,nextWindowColor++%windowTimeColors.length);
+    const timeColor=windowTimeColors[windowColorIndex.get(windowKey)];
     return `<tr class="pump-log-row" style="${i>=PUMP_LOG_COLLAPSE&&!_pumpLogExpanded?'display:none':''}">
-      <td>${e.time||'—'}</td>
+      <td style="color:${timeColor};font-weight:700">${e.time||'—'}</td>
       <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
       <td>${fmtCents(e.base_price,1)}</td>
