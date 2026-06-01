@@ -321,6 +321,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 oppo_dead_zone_blacklisted_assets = set()  # assets whose OPPO price hit dead-zone this window
 oppo_rvol_blacklisted_assets = set()  # assets blocked by OPPO RVOL guard this window
+oppo_knife_blacklisted_assets = set()  # assets blocked by OPPO falling-knife guard this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
@@ -342,6 +343,8 @@ def _base_price_key(key):
 
 def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
     if not OPPO_COUNTER_ENABLED:
+        return
+    if asset in oppo_knife_blacklisted_assets:
         return
     counter_side = "no" if oppo_side == "yes" else "yes"
     counter_key = f"{asset}_{counter_side}"
@@ -450,6 +453,11 @@ def reset_state():
     pump_tracker = {}
     pump_log = []
     pump_finished_tracker_keys = set()
+    normal_blacklisted_assets.clear()
+    oppo_dead_zone_blacklisted_assets.clear()
+    oppo_rvol_blacklisted_assets.clear()
+    oppo_knife_blacklisted_assets.clear()
+    trend_guarded_assets.clear()
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
     cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
@@ -2065,6 +2073,10 @@ def advance_oppo_counter_tracker(client, window_start, secs_into):
             log.info("[OPPO-COUNTER-SKIP] %s asset RVOL-blacklisted this window", key)
             del oppo_counter_tracker[key]
             continue
+        if asset in oppo_knife_blacklisted_assets:
+            log.info("[OPPO-COUNTER-SKIP] %s asset knife-blocked this window", key)
+            del oppo_counter_tracker[key]
+            continue
 
         token = tracker.get("token") or get_token_for_key(asset, side, window_start)
         if not token:
@@ -2278,7 +2290,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
                     continue
 
-                if opp_asset in oppo_dead_zone_blacklisted_assets or opp_asset in oppo_rvol_blacklisted_assets:
+                if (
+                    opp_asset in oppo_dead_zone_blacklisted_assets
+                    or opp_asset in oppo_rvol_blacklisted_assets
+                    or opp_asset in oppo_knife_blacklisted_assets
+                ):
                     _clear_oppo_tracking_for_asset(opp_asset)
                     continue
 
@@ -2310,15 +2326,20 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
                 if falling_knife:
-                    oppo_rebound_tracker[opp_key] = opp_price
                     pump_move = pump_peak - pump_trough
-                    detail = f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; need >= {min_ok_price:.4f}"
+                    detail = (
+                        f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; "
+                        "asset blacklisted this window"
+                    )
+                    normal_blacklisted_assets.add(opp_asset)
+                    oppo_knife_blacklisted_assets.add(opp_asset)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
                     log.info(
-                        "[OPPO-KNIFE-BLOCK] %s price=%.4f trough=%.4f peak=%.4f pump=+%.4f drop=-%.4f >= %.4f — reset trough and wait fresh rebound",
+                        "[OPPO-KNIFE-BLOCK] %s price=%.4f trough=%.4f peak=%.4f pump=+%.4f drop=-%.4f >= %.4f — asset blacklisted this window",
                         opp_key, opp_price, pump_trough, pump_peak, pump_move, drop, OPPO_FALLING_KNIFE_MIN_MOVE,
                     )
                     _record_oppo_trigger(opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
+                    _clear_oppo_tracking_for_asset(opp_asset)
                     continue
 
                 if f"{opp_asset}_{side}_oppo" in open_positions:
@@ -2577,6 +2598,7 @@ def _build_state_snapshot():
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
         "oppo_dead_zone_blacklisted_assets": sorted(list(oppo_dead_zone_blacklisted_assets)),
         "oppo_rvol_blacklisted_assets": sorted(list(oppo_rvol_blacklisted_assets)),
+        "oppo_knife_blacklisted_assets": sorted(list(oppo_knife_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
         "rebound_cutloss_tracker": {
             k: {
@@ -2598,6 +2620,7 @@ def _build_state_snapshot():
             a: {
                 "blacklisted": a in normal_blacklisted_assets,
                 "oppo_rvol_blacklisted": a in oppo_rvol_blacklisted_assets,
+                "oppo_knife_blacklisted": a in oppo_knife_blacklisted_assets,
                 "trend_guarded": a in trend_guarded_assets,
             } for a in ASSETS
         },
@@ -3031,6 +3054,7 @@ function render(s){
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
+  const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
@@ -3054,8 +3078,9 @@ function render(s){
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':'',(a+'_yes_oppo' in pos)?'<span class="amber">YES OPPO</span>':'',(a+'_no_oppo' in pos)?'<span class="amber">NO OPPO</span>':''].filter(Boolean).join(' ');
     const stAsset=assetStatus[a]||{};
     const isBlacklisted=stAsset.blacklisted===true || normalBlacklisted.has(a);
+    const isKnifeBlocked=stAsset.oppo_knife_blacklisted===true || knifeBlacklisted.has(a);
     const isTrendGuarded=stAsset.trend_guarded===true || trendGuarded.has(a);
-    const flags=[isBlacklisted?'<span class="red">BLACKLISTED</span>':'',isTrendGuarded?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
+    const flags=[isKnifeBlocked?'<span class="red">KNIFE BLOCKED</span>':(isBlacklisted?'<span class="red">BLACKLISTED</span>':''),isTrendGuarded?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
     const holdingCell=[holding,flags].filter(Boolean).join(' <span class="dim">|</span> ');
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const cv=cvd[a]||{};
@@ -3208,7 +3233,7 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Early > ${Number((cfg.rvol_min_by_stage||{}).early||0.3).toFixed(2)}x / Mid > ${Number((cfg.rvol_min_by_stage||{}).mid||0.5).toFixed(2)}x / Late > ${Number((cfg.rvol_min_by_stage||{}).late||0.8).toFixed(2)}x</td></tr>
-        <tr><td>OPPO knife guard</td><td>Blocks late dump entries after a pump peak</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
+        <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
 
@@ -3408,7 +3433,7 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
-    log.info("  OPPO falling-knife guard: block after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
+    log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info(
         "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass early>%.2fx mid>%.2fx late>%.2fx",
         OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD,
@@ -3461,6 +3486,7 @@ def main():
                 normal_blacklisted_assets.clear()
                 oppo_dead_zone_blacklisted_assets.clear()
                 oppo_rvol_blacklisted_assets.clear()
+                oppo_knife_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
