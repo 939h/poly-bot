@@ -161,7 +161,7 @@ GAP_SWING = {
 GAP_MAGNITUDE = {
     "early": 1.0,   # 0–5 min
     "mid":   1.0,   # 5–10 min
-    "late":  0.5,   # 10–15 min
+    "late":  1.0,   # 10–15 min
 }
 GAP_WAIT_SECS = {
     "early": 300,
