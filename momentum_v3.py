@@ -207,6 +207,7 @@ OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "2.0"))
+OPPO_FALLING_KNIFE_MIN_MOVE = float(os.getenv("OPPO_FALLING_KNIFE_MIN_MOVE", "0.30"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.03"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
@@ -222,7 +223,8 @@ OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
-RVOL_MIN = float(os.getenv("RVOL_MIN", "0.8"))
+RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
+RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -280,10 +282,12 @@ def validate_settings():
         errors.append("OPPO_COUNTER_SELL_CAP must be between 0 and 1")
     if not 0 < OPPO_COUNTER_CUT_LOSS_PCT < 1:
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
+    if OPPO_FALLING_KNIFE_MIN_MOVE <= 0:
+        errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
     if VOLUME_AVG_PERIOD <= 0:
         errors.append("VOLUME_AVG_PERIOD must be > 0")
-    if RVOL_MIN <= 0:
-        errors.append("RVOL_MIN must be > 0")
+    if RVOL_MIN_PER_MIN <= 0:
+        errors.append("RVOL_MIN_PER_MIN must be > 0")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -312,6 +316,7 @@ skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 oppo_dead_zone_blacklisted_assets = set()  # assets whose OPPO price hit dead-zone this window
 oppo_rvol_blacklisted_assets = set()  # assets blocked by OPPO RVOL guard this window
+oppo_knife_blacklisted_assets = set()  # assets blocked by OPPO falling-knife guard this window
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
@@ -333,6 +338,8 @@ def _base_price_key(key):
 
 def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
     if not OPPO_COUNTER_ENABLED:
+        return
+    if asset in oppo_knife_blacklisted_assets:
         return
     counter_side = "no" if oppo_side == "yes" else "yes"
     counter_key = f"{asset}_{counter_side}"
@@ -377,6 +384,7 @@ trade_log          = []
 oppo_trigger_log   = []
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
+pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
 cvd_history = {a: deque(maxlen=120) for a in ASSETS}
@@ -398,7 +406,7 @@ STATE_FILE = "bot_state.json"
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -417,6 +425,7 @@ def load_state():
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
         }
         pump_log      = saved.get("pump_log", [])
+        pump_finished_tracker_keys = _finished_pump_keys_from_log(pump_log)
         if pnl_history:
             last_pnl_snapshot = time.time()
         log.info(
@@ -430,7 +439,7 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
@@ -438,6 +447,12 @@ def reset_state():
     oppo_trigger_log = []
     pump_tracker = {}
     pump_log = []
+    pump_finished_tracker_keys = set()
+    normal_blacklisted_assets.clear()
+    oppo_dead_zone_blacklisted_assets.clear()
+    oppo_rvol_blacklisted_assets.clear()
+    oppo_knife_blacklisted_assets.clear()
+    trend_guarded_assets.clear()
     ema_history = {a: deque(maxlen=120) for a in ASSETS}
     cvd_history = {a: deque(maxlen=240) for a in ASSETS}
     last_pnl_snapshot = 0
@@ -539,6 +554,7 @@ def save_state():
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -551,6 +567,7 @@ def save_state():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
@@ -575,6 +592,7 @@ def save_state():
             "stop_buy":   STOP_BUY_AT,
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
+            "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
@@ -646,7 +664,38 @@ def _update_pump_binance_snapshot(tracker):
     tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
 
 
-def _record_pump_event(key, tracker, milestone):
+def _pump_finished_id(window_start, key):
+    return (str(window_start), key.lower())
+
+
+def _finished_pump_keys_from_log(log_entries):
+    finished = set()
+    for event in log_entries or []:
+        if event.get("status") not in ("SUCCESS", "FAILED"):
+            continue
+        window_start = event.get("window_start")
+        asset = str(event.get("asset", "")).lower()
+        side = str(event.get("side", "")).lower()
+        if window_start is not None and asset and side:
+            finished.add(_pump_finished_id(window_start, f"{asset}_{side}"))
+    return finished
+
+
+def _pump_tracker_already_finished(window_start, key):
+    return _pump_finished_id(window_start, key) in pump_finished_tracker_keys
+
+
+
+def _pump_result_from_tracker(tracker):
+    """Return SUCCESS when the tracker finishes within 15% of its max multiple."""
+    current_multiple = float(tracker.get("multiple", 0.0))
+    max_multiple = float(tracker.get("max_multiple", 0.0))
+    if max_multiple <= 0:
+        return "FAILED"
+    return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
+
+
+def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_binance_snapshot(tracker)
     event = {
         "time": datetime.now().strftime("%H:%M"),
@@ -657,17 +706,62 @@ def _record_pump_event(key, tracker, milestone):
         "trough": round(float(tracker.get("trough", 0.0)), 4),
         "current": round(float(tracker.get("current", 0.0)), 4),
         "multiple": round(float(tracker.get("multiple", 0.0)), 3),
+        "max_price": round(float(tracker.get("max_price", 0.0)), 4),
+        "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
         "binance_gap": tracker.get("binance_gap"),
         "cvd_slope": tracker.get("cvd_slope"),
         "rvol": tracker.get("rvol"),
+        "status": status or tracker.get("status", "TRACKING"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
+    if len(pump_log) > 500:
+        pump_log.pop()
+
+
+def _finish_pump_tracker(key, tracker, reason="END"):
+    """Record the final pump tracker result and remove it from active tracking."""
+    window_start = tracker.get("window_start")
+    if _pump_tracker_already_finished(window_start, key):
+        pump_tracker.pop(key, None)
+        return
+    tracker["status"] = _pump_result_from_tracker(tracker)
+    pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
+    _record_pump_event(key, tracker, reason, tracker["status"])
+    log.info(
+        "[PUMP-%s] %s now=%.3fx max=%.3fx current=%.4f max_px=%.4f",
+        tracker["status"], key, float(tracker.get("multiple", 0.0)),
+        float(tracker.get("max_multiple", 0.0)), float(tracker.get("current", 0.0)),
+        float(tracker.get("max_price", 0.0)),
+    )
+    pump_tracker.pop(key, None)
+
+
+def _refresh_pump_tracker_price(key, tracker):
+    price = live_prices.get(key)
+    if price is not None and price > 0:
+        tracker["current"] = price
+        if price < float(tracker.get("trough", price)):
+            tracker["trough"] = price
+            tracker["base_price"] = price
+            tracker["highest_milestone"] = 1
+        trough = float(tracker.get("trough", 0.0))
+        multiple = price / trough if trough > 0 else 0.0
+        tracker["multiple"] = multiple
+        if price > float(tracker.get("max_price", 0.0)):
+            tracker["max_price"] = price
+        if multiple > float(tracker.get("max_multiple", 0.0)):
+            tracker["max_multiple"] = multiple
+    _update_pump_binance_snapshot(tracker)
 
 
 def update_pump_trackers(window_start, secs_into):
-    """Track YES/NO pumps only through the configured stop-buy cutoff."""
+    """Track YES/NO pumps until stop-buy, then record final success/failure."""
     if secs_into > STOP_BUY_AT:
+        for key, tracker in list(pump_tracker.items()):
+            if tracker.get("window_start") == window_start:
+                _refresh_pump_tracker_price(key, tracker)
+                _finish_pump_tracker(key, tracker, "END")
         return
 
     for asset in ASSETS:
@@ -679,14 +773,18 @@ def update_pump_trackers(window_start, secs_into):
 
             tracker = pump_tracker.get(key)
             if tracker and tracker.get("window_start") != window_start:
-                del pump_tracker[key]
+                # Do not refresh stale trackers with a new window's live price.
+                _finish_pump_tracker(key, tracker, "END")
                 tracker = None
             if price < PUMP_TRACK_DEAD_ZONE_PRICE:
                 if tracker:
-                    del pump_tracker[key]
+                    _refresh_pump_tracker_price(key, tracker)
+                    _finish_pump_tracker(key, tracker, "DEAD-ZONE")
                 continue
 
             if tracker is None:
+                if _pump_tracker_already_finished(window_start, key):
+                    continue
                 if PUMP_TRACK_DEAD_ZONE_PRICE <= price < PUMP_TRACK_START_PRICE:
                     pump_tracker[key] = {
                         "asset": asset,
@@ -699,26 +797,16 @@ def update_pump_trackers(window_start, secs_into):
                         "multiple": 1.0,
                         "max_price": price,
                         "max_multiple": 1.0,
+                        "status": "TRACKING",
                         "highest_milestone": 1,
                         **_get_pump_binance_snapshot(asset),
                     }
                 continue
 
-            tracker["current"] = price
-            _update_pump_binance_snapshot(tracker)
-            if price < float(tracker.get("trough", price)):
-                tracker["trough"] = price
-                tracker["base_price"] = price
-                tracker["highest_milestone"] = 1
+            _refresh_pump_tracker_price(key, tracker)
 
+            multiple = float(tracker.get("multiple", 0.0))
             trough = float(tracker.get("trough", 0.0))
-            multiple = price / trough if trough > 0 else 0.0
-            tracker["multiple"] = multiple
-            if price > float(tracker.get("max_price", 0.0)):
-                tracker["max_price"] = price
-            if multiple > float(tracker.get("max_multiple", 0.0)):
-                tracker["max_multiple"] = multiple
-
             max_whole_multiple = int(math.floor(multiple))
             first_milestone = min(PUMP_TRACK_MILESTONES)
             highest = int(tracker.get("highest_milestone", 1))
@@ -776,19 +864,22 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
     )
 
 
-def _oppo_rvol_guard_ok(asset, side, price):
-    """Final OPPO buy gate: require Binance quote-volume RVOL confirmation."""
-    vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, RVOL_MIN)
+def _oppo_rvol_guard_ok(asset, side, price, secs_into):
+    """Final OPPO buy gate: require minute-scaled Binance quote-volume RVOL confirmation."""
+    minute = get_rvol_minute(secs_into)
+    rvol_min = get_rvol_min(secs_into=secs_into)
+    vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
     if not OPPO_RVOL_GUARD_ENABLED:
         return True, vol
 
     rvol = vol.get("rvol")
     avg = vol.get("average")
     current = vol.get("current")
-    if vol.get("confirmed"):
+    rvol_confirmed = rvol is not None and float(rvol) > rvol_min
+    if rvol_confirmed:
         log.info(
-            "[OPPO-RVOL-PASS] %s_%s rvol=%.3fx >= %.3fx  volume=%.2f avg=%.2f",
-            asset.upper(), side.upper(), float(rvol), RVOL_MIN, float(current or 0.0), float(avg or 0.0),
+            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f",
+            asset.upper(), side.upper(), minute, float(rvol), rvol_min, float(current or 0.0), float(avg or 0.0),
         )
         return True, vol
 
@@ -800,15 +891,44 @@ def _oppo_rvol_guard_ok(asset, side, price):
         detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles; blacklisted this window"
         log_detail = "not-ready"
     else:
-        detail = f"{float(rvol):.3f}x < {RVOL_MIN:.3f}x; blacklisted this window"
-        log_detail = f"{float(rvol):.3f}x < {RVOL_MIN:.3f}x"
+        detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x (minute {minute}); blacklisted this window"
+        log_detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x"
     record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
     _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
     log.info(
-        "[OPPO-RVOL-BLOCK] %s rvol=%s threshold=%.3fx — blacklisted asset for current window",
-        opp_key, log_detail, RVOL_MIN,
+        "[OPPO-RVOL-BLOCK] %s minute=%d rvol=%s threshold>%.3fx — blacklisted asset for current window",
+        opp_key, minute, log_detail, rvol_min,
     )
     return False, vol
+
+
+def _oppo_pump_range(opp_key, window_start):
+    tracker = pump_tracker.get(opp_key)
+    trough = float(tracker.get("trough", 0.0) or 0.0) if isinstance(tracker, dict) else 0.0
+    peak = float(tracker.get("max_price", 0.0) or 0.0) if isinstance(tracker, dict) else 0.0
+    asset, side = opp_key.split("_", 1)
+    for event in pump_log:
+        if event.get("window_start") != window_start:
+            continue
+        if str(event.get("asset", "")).lower() != asset or str(event.get("side", "")).lower() != side:
+            continue
+        event_trough = float(event.get("trough", 0.0) or 0.0)
+        event_peak = max(float(event.get("max_price", 0.0) or 0.0), float(event.get("current", 0.0) or 0.0))
+        trough = event_trough if trough <= 0 else min(trough, event_trough)
+        peak = max(peak, event_peak)
+        break
+    return trough, peak
+
+
+def _oppo_falling_knife_blocked(opp_key, window_start, price):
+    trough, peak = _oppo_pump_range(opp_key, window_start)
+    if trough <= 0 or peak <= 0 or price <= 0:
+        return False, trough, peak, 0.0, 0.0
+    pump_move = peak - trough
+    drop = peak - price
+    blocked = pump_move >= OPPO_FALLING_KNIFE_MIN_MOVE and drop >= OPPO_FALLING_KNIFE_MIN_MOVE
+    min_ok_price = peak - OPPO_FALLING_KNIFE_MIN_MOVE
+    return blocked, trough, peak, drop, min_ok_price
     
 # ── CLOB helpers ──────────────────────────────────────────────────────────────
 
@@ -1103,6 +1223,15 @@ def get_stage(secs_into):
     if secs_into < 600:
         return "mid"
     return "late"
+
+
+def get_rvol_minute(secs_into=None):
+    secs = max(0, int(secs_into if secs_into is not None else 0))
+    return max(1, min(15, (secs // 60) + 1))
+
+
+def get_rvol_min(secs_into=None):
+    return RVOL_MIN_PER_MIN * get_rvol_minute(secs_into)
 
 
 def get_binance_gap(asset):
@@ -1943,6 +2072,10 @@ def advance_oppo_counter_tracker(client, window_start, secs_into):
             log.info("[OPPO-COUNTER-SKIP] %s asset RVOL-blacklisted this window", key)
             del oppo_counter_tracker[key]
             continue
+        if asset in oppo_knife_blacklisted_assets:
+            log.info("[OPPO-COUNTER-SKIP] %s asset knife-blocked this window", key)
+            del oppo_counter_tracker[key]
+            continue
 
         token = tracker.get("token") or get_token_for_key(asset, side, window_start)
         if not token:
@@ -2156,7 +2289,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
                     continue
 
-                if opp_asset in oppo_dead_zone_blacklisted_assets or opp_asset in oppo_rvol_blacklisted_assets:
+                if (
+                    opp_asset in oppo_dead_zone_blacklisted_assets
+                    or opp_asset in oppo_rvol_blacklisted_assets
+                    or opp_asset in oppo_knife_blacklisted_assets
+                ):
                     _clear_oppo_tracking_for_asset(opp_asset)
                     continue
 
@@ -2185,6 +2322,25 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                              opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
                     continue
+
+                falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
+                if falling_knife:
+                    pump_move = pump_peak - pump_trough
+                    detail = (
+                        f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; "
+                        "asset blacklisted this window"
+                    )
+                    normal_blacklisted_assets.add(opp_asset)
+                    oppo_knife_blacklisted_assets.add(opp_asset)
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
+                    log.info(
+                        "[OPPO-KNIFE-BLOCK] %s price=%.4f trough=%.4f peak=%.4f pump=+%.4f drop=-%.4f >= %.4f — asset blacklisted this window",
+                        opp_key, opp_price, pump_trough, pump_peak, pump_move, drop, OPPO_FALLING_KNIFE_MIN_MOVE,
+                    )
+                    _record_oppo_trigger(opp_asset, side, opp_price, "KNIFE-BLOCK", detail)
+                    _clear_oppo_tracking_for_asset(opp_asset)
+                    continue
+
                 if f"{opp_asset}_{side}_oppo" in open_positions:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "already open")
                     continue
@@ -2232,7 +2388,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
                     log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
 
-                rvol_ok, rvol_snapshot = _oppo_rvol_guard_ok(opp_asset, side, opp_price)
+                rvol_ok, rvol_snapshot = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
                 if not rvol_ok:
                     continue
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
@@ -2399,15 +2555,19 @@ def _build_state_snapshot():
         gap_out[a] = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
         cvd_session, cvd_window, cvd_slope = get_cvd_snapshot(a)
         cvd_out[a] = {"session": round(cvd_session, 3), "window": round(cvd_window, 3), "slope": round(cvd_slope, 6)}
-        vol = get_volume_snapshot(a, VOLUME_AVG_PERIOD, RVOL_MIN)
+        rvol_min = get_rvol_min(secs_into=secs_in)
+        vol = get_volume_snapshot(a, VOLUME_AVG_PERIOD, rvol_min)
+        rvol_value = vol.get("rvol")
+        rvol_confirmed = rvol_value is not None and float(rvol_value) > rvol_min
         volume_out[a] = {
+            "rvol_minute": get_rvol_minute(secs_in),
             "current": round(float(vol["current"]), 2) if vol.get("current") is not None else None,
             "average": round(float(vol["average"]), 2) if vol.get("average") is not None else None,
             "rvol": round(float(vol["rvol"]), 3) if vol.get("rvol") is not None else None,
             "above_average": bool(vol.get("above_average", False)),
-            "confirmed": bool(vol.get("confirmed", False)),
+            "confirmed": bool(rvol_confirmed),
             "period": int(vol.get("period", VOLUME_AVG_PERIOD)),
-            "rvol_min": float(vol.get("rvol_min", RVOL_MIN)),
+            "rvol_min": float(vol.get("rvol_min", rvol_min)),
             "ready": bool(vol.get("ready", False)),
         }
         ema_fast, ema_slow = get_ema_snapshot(a)
@@ -2438,6 +2598,7 @@ def _build_state_snapshot():
         "normal_blacklisted_assets": sorted(list(normal_blacklisted_assets)),
         "oppo_dead_zone_blacklisted_assets": sorted(list(oppo_dead_zone_blacklisted_assets)),
         "oppo_rvol_blacklisted_assets": sorted(list(oppo_rvol_blacklisted_assets)),
+        "oppo_knife_blacklisted_assets": sorted(list(oppo_knife_blacklisted_assets)),
         "trend_guarded_assets": sorted(list(trend_guarded_assets)),
         "rebound_cutloss_tracker": {
             k: {
@@ -2459,6 +2620,7 @@ def _build_state_snapshot():
             a: {
                 "blacklisted": a in normal_blacklisted_assets,
                 "oppo_rvol_blacklisted": a in oppo_rvol_blacklisted_assets,
+                "oppo_knife_blacklisted": a in oppo_knife_blacklisted_assets,
                 "trend_guarded": a in trend_guarded_assets,
             } for a in ASSETS
         },
@@ -2481,6 +2643,7 @@ def _build_state_snapshot():
                 "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
@@ -2493,6 +2656,7 @@ def _build_state_snapshot():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
             "force_sell_gap_mult": FORCE_SELL_GAP_MULT,
@@ -2517,6 +2681,7 @@ def _build_state_snapshot():
             "stop_buy":   STOP_BUY_AT,
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
+            "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
@@ -2801,12 +2966,14 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const active=Object.values(trackers||{}).sort((a,b)=>(b.max_multiple||0)-(a.max_multiple||0));
   const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
-    const cls=maxMult>=5?'green':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
+    const cls=maxMult>=5?'red':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
     const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
     const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
     const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
     const rvolCls=p.rvol!=null?'blue':'dim';
+    const status=p.status||'TRACKING';
+    const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
     return `<tr class="pump-active-row" style="${i>=PUMP_ACTIVE_COLLAPSE&&!_pumpActiveExpanded?'display:none':''}">
       <td><strong>${pumpAssetLabel(p.asset,p.side)}</strong></td>
       <td>${p.started_at||'—'}</td>
@@ -2818,18 +2985,27 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
+      <td class="${statusCls}" style="font-weight:600">${status}</td>
       <td>${p.highest_milestone>=3?p.highest_milestone+'x':'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="11" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  }).join('') || `<tr><td colspan="12" class="dim">No active ${Math.round((deadZonePrice||0.05)*100)}–${Math.round((startPrice||0.2)*100)}¢ pump trackers yet</td></tr>`;
+  const windowTimeColors=['#e8edf5','#fbbf24'];
+  const windowColorIndex=new Map();
+  let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
-    const m=Number(e.multiple||0),cls=m>=5?'green':m>=4?'amber':'blue';
+    const m=Number(e.multiple||0),cls=m>=5?'red':m>=4?'amber':'blue';
     const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
     const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
     const rvolCls=e.rvol!=null?'blue':'dim';
+    const status=e.status||'TRACKING';
+    const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
+    const windowKey=e.window_start!=null?String(e.window_start):`unknown-${e.time||i}`;
+    if(!windowColorIndex.has(windowKey))windowColorIndex.set(windowKey,nextWindowColor++%windowTimeColors.length);
+    const timeColor=windowTimeColors[windowColorIndex.get(windowKey)];
     return `<tr class="pump-log-row" style="${i>=PUMP_LOG_COLLAPSE&&!_pumpLogExpanded?'display:none':''}">
-      <td>${e.time||'—'}</td>
+      <td style="color:${timeColor};font-weight:700">${e.time||'—'}</td>
       <td><strong>${pumpAssetLabel(e.asset,e.side)}</strong></td>
       <td><span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c">${e.milestone||'—'}</span></td>
       <td>${fmtCents(e.base_price,1)}</td>
@@ -2838,16 +3014,17 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td style="font-family:monospace">${gap}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
+      <td class="${statusCls}" style="font-weight:600">${status}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" class="dim">No 3x+ pump milestones yet</td></tr>';
+  }).join('') || '<tr><td colspan="10" class="dim">No 3x+ pump milestones yet</td></tr>';
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Hit</th></tr></thead>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
@@ -2877,10 +3054,11 @@ function render(s){
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
+  const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -2900,8 +3078,9 @@ function render(s){
     const holding=[(a+'_yes' in pos)?'<span class="green">YES</span>':'',(a+'_no' in pos)?'<span class="green">NO</span>':'',(a+'_yes_oppo' in pos)?'<span class="amber">YES OPPO</span>':'',(a+'_no_oppo' in pos)?'<span class="amber">NO OPPO</span>':''].filter(Boolean).join(' ');
     const stAsset=assetStatus[a]||{};
     const isBlacklisted=stAsset.blacklisted===true || normalBlacklisted.has(a);
+    const isKnifeBlocked=stAsset.oppo_knife_blacklisted===true || knifeBlacklisted.has(a);
     const isTrendGuarded=stAsset.trend_guarded===true || trendGuarded.has(a);
-    const flags=[isBlacklisted?'<span class="red">BLACKLISTED</span>':'',isTrendGuarded?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
+    const flags=[isKnifeBlocked?'<span class="red">KNIFE BLOCKED</span>':(isBlacklisted?'<span class="red">BLACKLISTED</span>':''),isTrendGuarded?'<span style="color:#f59e0b">TREND GUARDED</span>':''].filter(Boolean).join(' ');
     const holdingCell=[holding,flags].filter(Boolean).join(' <span class="dim">|</span> ');
     const gv=gap[a],gt=gapThreshold[a]&&w.period?gapThreshold[a][w.period]:null;
     const cv=cvd[a]||{};
@@ -2914,8 +3093,9 @@ function render(s){
     const tStr=gt!=null?gt.toFixed(4):'—';
     const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
     const rv=vol.rvol!=null?Number(vol.rvol):null;
+    const rvMin=vol.rvol_min!=null?Number(vol.rvol_min):null;
     const rvCls=vol.confirmed?'green':(vol.above_average?'amber':'dim');
-    const volStr=rv!=null?`${rv.toFixed(2)}x ${vol.confirmed?'✓':(vol.above_average?'↑':'')}`:'—';
+    const volStr=rv!=null?`${rv.toFixed(2)}x ${vol.confirmed?'✓':(vol.above_average?'↑':'')} ${rvMin!=null?`/ >${rvMin.toFixed(2)}x`:''}`:'—';
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td class="${rvCls}" style="font-family:monospace">${volStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
@@ -2942,7 +3122,9 @@ function render(s){
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
   const oppoRows=oppoLog.map(o=>{
-    const statusCls=o.status==='BOUGHT'?'green':'amber';
+    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
+    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
+    const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
     return `<tr>
       <td>${o.time||'—'}</td>
@@ -3015,7 +3197,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass ≥${Number(cfg.rvol_min||1.5).toFixed(2)}x</span></h2>
+      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass >${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × minute (1–15)</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
@@ -3023,7 +3205,7 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss events)</span></h2>
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss/knife-block events)</span></h2>
       <div class="oppo-log-wrap" id="oppoLogWrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody>${oppoRows}</tbody></table></div>
     </div>
@@ -3051,7 +3233,8 @@ function render(s){
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
-        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>RVOL ≥ ${Number(cfg.rvol_min||1.5).toFixed(2)}x</td></tr>
+        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
+        <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
 
@@ -3144,13 +3327,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "binance_gap", "cvd_slope", "rvol", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "binance_gap", "cvd_slope", "rvol", "status", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
-            e.get("current", ""), e.get("multiple", ""), e.get("binance_gap", ""),
-            e.get("cvd_slope", ""), e.get("rvol", ""), e.get("milestone", ""),
+            e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
+            e.get("max_multiple", ""), e.get("binance_gap", ""), e.get("cvd_slope", ""),
+            e.get("rvol", ""), e.get("status", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -3250,7 +3434,11 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
-    log.info("  OPPO RVOL guard: enabled=%s  avg_period=%d  pass>=%.2fx", OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN)
+    log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
+    log.info(
+        "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass >%.4fx × minute (1–15)",
+        OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
+    )
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
@@ -3298,12 +3486,14 @@ def main():
                 normal_blacklisted_assets.clear()
                 oppo_dead_zone_blacklisted_assets.clear()
                 oppo_rvol_blacklisted_assets.clear()
+                oppo_knife_blacklisted_assets.clear()
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
+                pump_finished_tracker_keys.clear()
                 log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
                          window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
