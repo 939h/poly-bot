@@ -105,7 +105,7 @@ MACD_REST_LIMIT = 100
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 20
-CANDLE_HISTORY_LIMIT = 60 #cvd display 
+CANDLE_HISTORY_LIMIT = 120 #to get RVOL
 
 # ── Internal state ────────────────────────────────────────────────────────────
 # _prev_live_close tracks whether the previous state was None (candle boundary)
