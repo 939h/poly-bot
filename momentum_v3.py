@@ -223,12 +223,8 @@ OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
-RVOL_MIN_BY_STAGE = {
-    "early": float(os.getenv("RVOL_MIN_EARLY", "0.3")),
-    "mid": float(os.getenv("RVOL_MIN_MID", "0.5")),
-    "late": float(os.getenv("RVOL_MIN_LATE", "0.8")),
-}
-RVOL_MIN = RVOL_MIN_BY_STAGE["late"]
+RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
+RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -290,9 +286,8 @@ def validate_settings():
         errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
     if VOLUME_AVG_PERIOD <= 0:
         errors.append("VOLUME_AVG_PERIOD must be > 0")
-    for stage, threshold in RVOL_MIN_BY_STAGE.items():
-        if threshold <= 0:
-            errors.append(f"RVOL_MIN_{stage.upper()} must be > 0")
+    if RVOL_MIN_PER_MIN <= 0:
+        errors.append("RVOL_MIN_PER_MIN must be > 0")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -597,7 +592,7 @@ def save_state():
             "stop_buy":   STOP_BUY_AT,
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
-            "rvol_min_by_stage": dict(RVOL_MIN_BY_STAGE),
+            "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
@@ -870,9 +865,9 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
-    """Final OPPO buy gate: require staged Binance quote-volume RVOL confirmation."""
-    stage = get_stage(secs_into)
-    rvol_min = get_rvol_min(stage=stage)
+    """Final OPPO buy gate: require minute-scaled Binance quote-volume RVOL confirmation."""
+    minute = get_rvol_minute(secs_into)
+    rvol_min = get_rvol_min(secs_into=secs_into)
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
     if not OPPO_RVOL_GUARD_ENABLED:
         return True, vol
@@ -883,8 +878,8 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
     rvol_confirmed = rvol is not None and float(rvol) > rvol_min
     if rvol_confirmed:
         log.info(
-            "[OPPO-RVOL-PASS] %s_%s stage=%s rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f",
-            asset.upper(), side.upper(), stage, float(rvol), rvol_min, float(current or 0.0), float(avg or 0.0),
+            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f",
+            asset.upper(), side.upper(), minute, float(rvol), rvol_min, float(current or 0.0), float(avg or 0.0),
         )
         return True, vol
 
@@ -896,13 +891,13 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
         detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles; blacklisted this window"
         log_detail = "not-ready"
     else:
-        detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x ({stage}); blacklisted this window"
+        detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x (minute {minute}); blacklisted this window"
         log_detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x"
     record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
     _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
     log.info(
-        "[OPPO-RVOL-BLOCK] %s stage=%s rvol=%s threshold>%.3fx — blacklisted asset for current window",
-        opp_key, stage, log_detail, rvol_min,
+        "[OPPO-RVOL-BLOCK] %s minute=%d rvol=%s threshold>%.3fx — blacklisted asset for current window",
+        opp_key, minute, log_detail, rvol_min,
     )
     return False, vol
 
@@ -1230,9 +1225,13 @@ def get_stage(secs_into):
     return "late"
 
 
-def get_rvol_min(secs_into=None, stage=None):
-    stage = stage or get_stage(secs_into if secs_into is not None else 0)
-    return RVOL_MIN_BY_STAGE.get(stage, RVOL_MIN_BY_STAGE["late"])
+def get_rvol_minute(secs_into=None):
+    secs = max(0, int(secs_into if secs_into is not None else 0))
+    return max(1, min(15, (secs // 60) + 1))
+
+
+def get_rvol_min(secs_into=None):
+    return RVOL_MIN_PER_MIN * get_rvol_minute(secs_into)
 
 
 def get_binance_gap(asset):
@@ -2561,6 +2560,7 @@ def _build_state_snapshot():
         rvol_value = vol.get("rvol")
         rvol_confirmed = rvol_value is not None and float(rvol_value) > rvol_min
         volume_out[a] = {
+            "rvol_minute": get_rvol_minute(secs_in),
             "current": round(float(vol["current"]), 2) if vol.get("current") is not None else None,
             "average": round(float(vol["average"]), 2) if vol.get("average") is not None else None,
             "rvol": round(float(vol["rvol"]), 3) if vol.get("rvol") is not None else None,
@@ -2681,7 +2681,7 @@ def _build_state_snapshot():
             "stop_buy":   STOP_BUY_AT,
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
-            "rvol_min_by_stage": dict(RVOL_MIN_BY_STAGE),
+            "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
@@ -3093,8 +3093,9 @@ function render(s){
     const tStr=gt!=null?gt.toFixed(4):'—';
     const cvdStr=(cv.window!=null?cv.window.toFixed(1):'—')+' / '+(cv.slope!=null?cv.slope.toFixed(4):'—');
     const rv=vol.rvol!=null?Number(vol.rvol):null;
+    const rvMin=vol.rvol_min!=null?Number(vol.rvol_min):null;
     const rvCls=vol.confirmed?'green':(vol.above_average?'amber':'dim');
-    const volStr=rv!=null?`${rv.toFixed(2)}x ${vol.confirmed?'✓':(vol.above_average?'↑':'')}`:'—';
+    const volStr=rv!=null?`${rv.toFixed(2)}x ${vol.confirmed?'✓':(vol.above_average?'↑':'')} ${rvMin!=null?`/ >${rvMin.toFixed(2)}x`:''}`:'—';
     return`<tr><td>${a.toUpperCase()}</td><td class="${yc}" style="padding-right:3px">${fmt(yp,2)}</td><td class="${nc}" style="padding-left:3px;padding-right:18px">${fmt(np,2)}</td><td style="font-family:monospace;padding-left:18px">${gStr} / ${tStr}</td><td style="font-family:monospace">${cvdStr}</td><td class="${rvCls}" style="font-family:monospace">${volStr}</td><td>${holdingCell||'<span class="dim">—</span>'}</td><td>${oppoCell}</td></tr>`;
   }).join('');
 
@@ -3196,7 +3197,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass early>${Number((cfg.rvol_min_by_stage||{}).early||0.3).toFixed(2)}x / mid>${Number((cfg.rvol_min_by_stage||{}).mid||0.5).toFixed(2)}x / late>${Number((cfg.rvol_min_by_stage||{}).late||0.8).toFixed(2)}x</span></h2>
+      <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass >${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × minute (1–15)</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
@@ -3232,7 +3233,7 @@ function render(s){
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
-        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Early > ${Number((cfg.rvol_min_by_stage||{}).early||0.3).toFixed(2)}x / Mid > ${Number((cfg.rvol_min_by_stage||{}).mid||0.5).toFixed(2)}x / Late > ${Number((cfg.rvol_min_by_stage||{}).late||0.8).toFixed(2)}x</td></tr>
+        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -3435,9 +3436,8 @@ def main():
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info(
-        "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass early>%.2fx mid>%.2fx late>%.2fx",
-        OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD,
-        RVOL_MIN_BY_STAGE["early"], RVOL_MIN_BY_STAGE["mid"], RVOL_MIN_BY_STAGE["late"],
+        "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass >%.4fx × minute (1–15)",
+        OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
     )
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
