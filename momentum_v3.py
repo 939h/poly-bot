@@ -248,6 +248,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.15"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.035"))
 PUMP_TRACK_MILESTONES = (3, 4, 5)
+PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
 gap_mag_vol = 1.0
 
 
@@ -284,6 +285,8 @@ def validate_settings():
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
     if OPPO_FALLING_KNIFE_MIN_MOVE <= 0:
         errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
+    if PUMP_TRACK_SUCCESS_MIN_MULTIPLE <= 0:
+        errors.append("PUMP_TRACK_SUCCESS_MIN_MULTIPLE must be > 0")
     if VOLUME_AVG_PERIOD <= 0:
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     if RVOL_MIN_PER_MIN <= 0:
@@ -596,6 +599,7 @@ def save_state():
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
+            "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
     }
     try:
@@ -687,10 +691,12 @@ def _pump_tracker_already_finished(window_start, key):
 
 
 def _pump_result_from_tracker(tracker):
-    """Return SUCCESS when the tracker finishes within 15% of its max multiple."""
+    """Return SUCCESS only when the final pump is at least the configured minimum and near its max."""
     current_multiple = float(tracker.get("multiple", 0.0))
     max_multiple = float(tracker.get("max_multiple", 0.0))
     if max_multiple <= 0:
+        return "FAILED"
+    if current_multiple < PUMP_TRACK_SUCCESS_MIN_MULTIPLE:
         return "FAILED"
     return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
 
@@ -2685,6 +2691,7 @@ def _build_state_snapshot():
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
+            "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
     }
 
