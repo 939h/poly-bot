@@ -135,6 +135,8 @@ SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower(
 SIMULATE_REBOUND_MODE_ENABLED = os.getenv("SIMULATE_REBOUND_MODE_ENABLED", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
+FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for low-RVOL OPPO flex orders
+FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "true").lower() == "true"
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 1.00   # buy if price >= this
@@ -257,6 +259,8 @@ def validate_settings():
     errors = []
     if REBOUND_BUY_AMOUNT <= 0:
         errors.append("REBOUND_BUY_AMOUNT must be > 0")
+    if FLEXI_RVOL_BUY_AMOUNT <= 0:
+        errors.append("FLEXI_RVOL_BUY_AMOUNT must be > 0")
     if FORCE_SELL_GAP_MULT <= 0:
         errors.append("FORCE_SELL_GAP_MULT must be > 0")
     if REBOUND_CUTLOSS_MULT <= 1.0:
@@ -588,6 +592,8 @@ def save_state():
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
+            "flexi_rvol_buy_amount": FLEXI_RVOL_BUY_AMOUNT,
+            "flexi_rvol_enabled": FLEXI_RVOL_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -871,41 +877,54 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
-    """Final OPPO buy gate: require minute-scaled Binance quote-volume RVOL confirmation."""
+    """Final OPPO buy gate: select normal or flexi size from minute-scaled Binance quote-volume RVOL."""
     minute = get_rvol_minute(secs_into)
     rvol_min = get_rvol_min(secs_into=secs_into)
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
     if not OPPO_RVOL_GUARD_ENABLED:
-        return True, vol
+        return True, vol, BUY_AMOUNT
 
     rvol = vol.get("rvol")
     avg = vol.get("average")
     current = vol.get("current")
-    rvol_confirmed = rvol is not None and float(rvol) > rvol_min
-    if rvol_confirmed:
-        log.info(
-            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f",
-            asset.upper(), side.upper(), minute, float(rvol), rvol_min, float(current or 0.0), float(avg or 0.0),
-        )
-        return True, vol
-
-    normal_blacklisted_assets.add(asset)
-    oppo_rvol_blacklisted_assets.add(asset)
-    _clear_oppo_tracking_for_asset(asset)
     opp_key = f"{asset}_{side}"
     if rvol is None:
-        detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles; blacklisted this window"
-        log_detail = "not-ready"
-    else:
-        detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x (minute {minute}); blacklisted this window"
-        log_detail = f"{float(rvol):.3f}x <= {rvol_min:.3f}x"
-    record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
-    _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
+        detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles"
+        record_oppo_trigger(opp_key, asset, side, price, "RVOL-WAIT", detail)
+        _record_oppo_trigger(asset, side, price, "SKIPPED", "rvol-not-ready")
+        log.info(
+            "[OPPO-RVOL-WAIT] %s minute=%d rvol=not-ready threshold>%.3fx",
+            opp_key, minute, rvol_min,
+        )
+        return False, vol, None
+
+    rvol = float(rvol)
+    rvol_confirmed = rvol > rvol_min
+    if rvol_confirmed:
+        log.info(
+            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f order=$%.2f",
+            asset.upper(), side.upper(), minute, rvol, rvol_min, float(current or 0.0), float(avg or 0.0), BUY_AMOUNT,
+        )
+        return True, vol, BUY_AMOUNT
+
+    if not FLEXI_RVOL_ENABLED:
+        detail = f"{rvol:.3f}x <= {rvol_min:.3f}x (minute {minute}); flexi disabled"
+        record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
+        _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
+        log.info(
+            "[OPPO-RVOL-BLOCK] %s minute=%d rvol=%.3fx threshold>%.3fx — flexi disabled",
+            opp_key, minute, rvol, rvol_min,
+        )
+        return False, vol, None
+
+    detail = f"{rvol:.3f}x <= {rvol_min:.3f}x; using ${FLEXI_RVOL_BUY_AMOUNT:g} order"
+    record_oppo_trigger(opp_key, asset, side, price, "RVOL-FLEXI", detail)
+    _record_oppo_trigger(asset, side, price, "RVOL-FLEXI", detail)
     log.info(
-        "[OPPO-RVOL-BLOCK] %s minute=%d rvol=%s threshold>%.3fx — blacklisted asset for current window",
-        opp_key, minute, log_detail, rvol_min,
+        "[OPPO-RVOL-FLEXI] %s minute=%d rvol=%.3fx <= %.3fx  volume=%.2f avg=%.2f order=$%.2f",
+        opp_key, minute, rvol, rvol_min, float(current or 0.0), float(avg or 0.0), FLEXI_RVOL_BUY_AMOUNT,
     )
-    return False, vol
+    return True, vol, FLEXI_RVOL_BUY_AMOUNT
 
 
 def _oppo_pump_range(opp_key, window_start):
@@ -2394,19 +2413,20 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
                     log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
 
-                rvol_ok, rvol_snapshot = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
+                rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
                 if not rvol_ok:
                     continue
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
 
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
-                buy = market_buy(client, opp_token, label, price_hint=opp_price)
+                buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
                 if buy["ok"]:
                     entry_px = float(buy.get("filled_price") or opp_price)
                     open_position(f"{opp_asset}_{side}_oppo", opp_token, entry_px,
                                   filled_shares=buy.get("filled_shares"),
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")),
+                                  buy_amount=oppo_buy_amount,
                                   entry_rvol=entry_rvol)
                     traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
@@ -2680,6 +2700,8 @@ def _build_state_snapshot():
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
+            "flexi_rvol_buy_amount": FLEXI_RVOL_BUY_AMOUNT,
+            "flexi_rvol_enabled": FLEXI_RVOL_ENABLED,
             "order":      BUY_AMOUNT,
             "poll":       POLL_SECS,
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
@@ -3240,7 +3262,7 @@ function render(s){
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
-        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
+        <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass / flexi</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15); below threshold → $${cfg.flexi_rvol_buy_amount||1} flexi order</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -3443,8 +3465,8 @@ def main():
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info(
-        "  OPPO RVOL guard: enabled=%s  avg_period=%d  pass >%.4fx × minute (1–15)",
-        OPPO_RVOL_GUARD_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
+        "  OPPO RVOL guard: enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
+        OPPO_RVOL_GUARD_ENABLED, FLEXI_RVOL_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN, FLEXI_RVOL_BUY_AMOUNT,
     )
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
