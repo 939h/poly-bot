@@ -24,6 +24,7 @@ Usage in fresh_bot23.py:
 """
 
 import json
+import os
 import threading
 import time
 import logging
@@ -92,12 +93,35 @@ SYMBOL_MAP = {
     "btcusdt": "btc",
     "xrpusdt": "xrp",
 }
-WS_URL = (
-    "wss://stream.binance.com:9443/stream"
-    "?streams=ethusdt@kline_15m/solusdt@kline_15m/btcusdt@kline_15m/xrpusdt@kline_15m"
+STREAMS = (
+    "ethusdt@kline_15m/solusdt@kline_15m/btcusdt@kline_15m/xrpusdt@kline_15m"
     "/ethusdt@aggTrade/solusdt@aggTrade/btcusdt@aggTrade/xrpusdt@aggTrade"
 )
-BINANCE_REST = "https://api.binance.com/api/v3/klines"
+_RUNNING_ON_RAILWAY = any(name.startswith("RAILWAY_") for name in os.environ)
+_DEFAULT_DATA_PROVIDER = "binance_us" if _RUNNING_ON_RAILWAY else "auto"
+BINANCE_DATA_PROVIDER = os.getenv("BINANCE_DATA_PROVIDER", _DEFAULT_DATA_PROVIDER).strip().lower()
+BINANCE_WS_BASE_URL = os.getenv("BINANCE_WS_BASE_URL", "").strip().rstrip("/")
+BINANCE_REST_BASE_URL = os.getenv("BINANCE_REST_BASE_URL", "").strip().rstrip("/")
+_ENDPOINT_PRESETS = {
+    "binance": {
+        "name": "Binance.com",
+        "ws_base": "wss://stream.binance.com:9443/stream",
+        "rest_base": "https://api.binance.com/api/v3",
+    },
+    "binance_us": {
+        "name": "Binance.US",
+        "ws_base": "wss://stream.binance.us:9443/stream",
+        "rest_base": "https://api.binance.us/api/v3",
+    },
+}
+_PROVIDER_ALIASES = {
+    "global": "binance",
+    "binance.com": "binance",
+    "com": "binance",
+    "us": "binance_us",
+    "binance.us": "binance_us",
+    "binanceus": "binance_us",
+}
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
@@ -105,6 +129,8 @@ MACD_REST_LIMIT = 100
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 20
+CVD_SOURCE = os.getenv("CVD_SOURCE", "auto").strip().lower()
+CVD_KLINE_FALLBACK_AFTER_SECS = max(0.0, float(os.getenv("CVD_KLINE_FALLBACK_AFTER_SECS", "10")))
 CANDLE_HISTORY_LIMIT = 120 #to get RVOL
 
 # ── Internal state ────────────────────────────────────────────────────────────
@@ -119,7 +145,70 @@ _prev_live_close = {
 _lock = threading.Lock()
 _closed_closes = {asset: deque(maxlen=MACD_REST_LIMIT) for asset in SYMBOL_MAP.values()}
 _cvd_points = {asset: deque(maxlen=300) for asset in SYMBOL_MAP.values()}
+_last_agg_trade_ts = {asset: None for asset in SYMBOL_MAP.values()}
+_last_kline_cvd_totals = {asset: None for asset in SYMBOL_MAP.values()}
+_cvd_source_active = {asset: None for asset in SYMBOL_MAP.values()}
 candle_history = {asset: deque(maxlen=CANDLE_HISTORY_LIMIT) for asset in SYMBOL_MAP.values()}
+_endpoint_lock = threading.Lock()
+_endpoint_index = 0
+_restricted_location_seen = threading.Event()
+
+
+def _configured_endpoints():
+    if BINANCE_WS_BASE_URL or BINANCE_REST_BASE_URL:
+        ws_base = BINANCE_WS_BASE_URL or _ENDPOINT_PRESETS["binance"]["ws_base"]
+        rest_base = BINANCE_REST_BASE_URL or _ENDPOINT_PRESETS["binance"]["rest_base"]
+        return [{"name": "custom", "ws_base": ws_base, "rest_base": rest_base}]
+
+    provider = _PROVIDER_ALIASES.get(BINANCE_DATA_PROVIDER, BINANCE_DATA_PROVIDER)
+    if provider in _ENDPOINT_PRESETS:
+        return [dict(_ENDPOINT_PRESETS[provider])]
+    if provider != "auto":
+        log.warning(
+            "[WS] Unknown BINANCE_DATA_PROVIDER=%r; using auto fallback (Binance.com → Binance.US)",
+            BINANCE_DATA_PROVIDER,
+        )
+    return [dict(_ENDPOINT_PRESETS["binance"]), dict(_ENDPOINT_PRESETS["binance_us"])]
+
+
+_ENDPOINTS = _configured_endpoints()
+
+
+def _active_endpoint():
+    with _endpoint_lock:
+        return _ENDPOINTS[min(_endpoint_index, len(_ENDPOINTS) - 1)]
+
+
+def _active_ws_url():
+    return f"{_active_endpoint()['ws_base']}?streams={STREAMS}"
+
+
+def _active_rest_url():
+    return f"{_active_endpoint()['rest_base']}/klines"
+
+
+def _is_restricted_location_response(status_code=None, body=""):
+    text = str(body or "").lower()
+    return (
+        int(status_code or 0) == 451
+        or "restricted location" in text
+        or "service unavailable from a restricted location" in text
+    )
+
+
+def _switch_to_next_endpoint(reason):
+    global _endpoint_index
+    with _endpoint_lock:
+        if _endpoint_index + 1 >= len(_ENDPOINTS):
+            return False
+        old_endpoint = _ENDPOINTS[_endpoint_index]
+        _endpoint_index += 1
+        new_endpoint = _ENDPOINTS[_endpoint_index]
+    log.warning(
+        "[WS] %s unavailable (%s); switching market-data endpoint to %s",
+        old_endpoint["name"], reason, new_endpoint["name"],
+    )
+    return True
 
 
 def _ema_series(values, period):
@@ -174,9 +263,19 @@ def _update_ema_values(asset, current_close=None):
 
 
 
-def _update_cvd(asset, qty, buyer_is_maker):
-    # buyer_is_maker=True means taker sell; False means taker buy
-    delta = -float(qty) if buyer_is_maker else float(qty)
+def _set_cvd_source(asset, source):
+    previous = _cvd_source_active.get(asset)
+    if previous == source:
+        return
+    _cvd_source_active[asset] = source
+    log.info("[WS] %s CVD source=%s", asset.upper(), source)
+
+
+def _apply_cvd_delta(asset, delta, source):
+    delta = float(delta)
+    if delta == 0.0:
+        return
+    _set_cvd_source(asset, source)
     cvd_value[asset] = float(cvd_value.get(asset, 0.0)) + delta
     cvd_value_window[asset] = float(cvd_value_window.get(asset, 0.0)) + delta
     now_ts = time.time()
@@ -189,6 +288,40 @@ def _update_cvd(asset, qty, buyer_is_maker):
         cvd_slope[asset] = (pts[-1][1] - pts[0][1]) / dt
     else:
         cvd_slope[asset] = 0.0
+
+
+def _update_cvd(asset, qty, buyer_is_maker):
+    # buyer_is_maker=True means taker sell; False means taker buy
+    delta = -float(qty) if buyer_is_maker else float(qty)
+    _last_agg_trade_ts[asset] = time.time()
+    _apply_cvd_delta(asset, delta, "aggTrade")
+
+
+def _should_apply_kline_cvd(asset):
+    if CVD_SOURCE == "kline":
+        return True
+    if CVD_SOURCE in ("aggtrade", "agg_trade"):
+        return False
+    last_trade_ts = _last_agg_trade_ts.get(asset)
+    return last_trade_ts is None or (time.time() - float(last_trade_ts)) >= CVD_KLINE_FALLBACK_AFTER_SECS
+
+
+def _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume):
+    current_totals = (int(k_ts), float(volume), float(taker_buy_volume))
+    previous = _last_kline_cvd_totals.get(asset)
+    _last_kline_cvd_totals[asset] = current_totals
+    if previous is None or int(previous[0]) != int(k_ts):
+        return
+
+    delta_volume = max(current_totals[1] - float(previous[1]), 0.0)
+    delta_buy_volume = max(current_totals[2] - float(previous[2]), 0.0)
+    if delta_volume <= 0:
+        return
+    if not _should_apply_kline_cvd(asset):
+        return
+
+    delta = (2.0 * min(delta_buy_volume, delta_volume)) - delta_volume
+    _apply_cvd_delta(asset, delta, "kline-fallback")
 
 
 def get_cvd_snapshot(asset):
@@ -266,17 +399,22 @@ def _prefetch_candle_opens():
     """
     for symbol, asset in SYMBOL_MAP.items():
         try:
-            resp = _requests.get(
-                BINANCE_REST,
-                params={
-                    "symbol":   symbol.upper(),
-                    "interval": "15m",
-                    "limit":    MACD_REST_LIMIT,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            candles = resp.json()
+            while True:
+                endpoint = _active_endpoint()
+                resp = _requests.get(
+                    _active_rest_url(),
+                    params={
+                        "symbol":   symbol.upper(),
+                        "interval": "15m",
+                        "limit":    MACD_REST_LIMIT,
+                    },
+                    timeout=10,
+                )
+                if _is_restricted_location_response(resp.status_code, resp.text) and _switch_to_next_endpoint("restricted location"):
+                    continue
+                resp.raise_for_status()
+                candles = resp.json()
+                break
 
             # Last candle is the currently open (unfinished) one — use its open/close.
             # Earlier candles are closed and seed the MACD history.
@@ -311,13 +449,13 @@ def _prefetch_candle_opens():
                 hist_pair = macd_histogram.get(asset)
                 if hist_pair is not None:
                     log.info(
-                        "[WS] %s prefetch — candle_open=%.4f  live_close=%.4f  macd_hist=%.8f/%.8f",
-                        asset.upper(), open_price, close_price, hist_pair[0], hist_pair[1],
+                        "[WS] %s prefetch via %s — candle_open=%.4f  live_close=%.4f  macd_hist=%.8f/%.8f",
+                        asset.upper(), endpoint["name"], open_price, close_price, hist_pair[0], hist_pair[1],
                     )
                 else:
                     log.info(
-                        "[WS] %s prefetch — candle_open=%.4f  live_close=%.4f",
-                        asset.upper(), open_price, close_price,
+                        "[WS] %s prefetch via %s — candle_open=%.4f  live_close=%.4f",
+                        asset.upper(), endpoint["name"], open_price, close_price,
                     )
         except Exception as e:
             log.warning(
@@ -329,7 +467,8 @@ def _prefetch_candle_opens():
 # ── WebSocket callbacks ───────────────────────────────────────────────────────
 
 def _on_open(ws):
-    log.info("[WS] Connected to Binance — streaming ETH+SOL+BTC+XRP 15m candles")
+    endpoint = _active_endpoint()
+    log.info("[WS] Connected to %s — streaming ETH+SOL+BTC+XRP 15m candles", endpoint["name"])
 
 
 def _on_message(ws, message):
@@ -373,19 +512,24 @@ def _on_message(ws, message):
                 _closed_closes[asset].append(close)
                 _update_macd_histogram(asset)
                 _update_ema_values(asset)
-                cvd_value_window[asset] = 0.0
                 k_ts = int(k.get("t", 0))
+                volume = float(k.get("v", 0))
+                quote_volume = float(k.get("q", 0))
+                taker_buy_volume = float(k.get("V", 0))
+                taker_buy_quote_volume = float(k.get("Q", 0))
+                _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume)
+                cvd_value_window[asset] = 0.0
                 row = {
                     "ts": k_ts,
                     "open": open_,
                     "high": float(k.get("h", 0)),
                     "low": float(k.get("l", 0)),
                     "close": close,
-                    "volume": float(k.get("v", 0)),
-                    "quote_volume": float(k.get("q", 0)),
+                    "volume": volume,
+                    "quote_volume": quote_volume,
                     "trades": int(k.get("n", 0)),
-                    "taker_buy_volume": float(k.get("V", 0)),
-                    "taker_buy_quote_volume": float(k.get("Q", 0)),
+                    "taker_buy_volume": taker_buy_volume,
+                    "taker_buy_quote_volume": taker_buy_quote_volume,
                     "closed": True,
                 }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
@@ -410,17 +554,22 @@ def _on_message(ws, message):
                 _update_macd_histogram(asset, close)
                 _update_ema_values(asset, close)
                 k_ts = int(k.get("t", 0))
+                volume = float(k.get("v", 0))
+                quote_volume = float(k.get("q", 0))
+                taker_buy_volume = float(k.get("V", 0))
+                taker_buy_quote_volume = float(k.get("Q", 0))
+                _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume)
                 row = {
                     "ts": k_ts,
                     "open": open_,
                     "high": float(k.get("h", 0)),
                     "low": float(k.get("l", 0)),
                     "close": close,
-                    "volume": float(k.get("v", 0)),
-                    "quote_volume": float(k.get("q", 0)),
+                    "volume": volume,
+                    "quote_volume": quote_volume,
                     "trades": int(k.get("n", 0)),
-                    "taker_buy_volume": float(k.get("V", 0)),
-                    "taker_buy_quote_volume": float(k.get("Q", 0)),
+                    "taker_buy_volume": taker_buy_volume,
+                    "taker_buy_quote_volume": taker_buy_quote_volume,
                     "closed": False,
                 }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
@@ -436,6 +585,12 @@ def _on_message(ws, message):
 
 def _on_error(ws, error):
     log.error("[WS] WebSocket error: %s", error)
+    if _is_restricted_location_response(body=error):
+        _restricted_location_seen.set()
+        try:
+            ws.close()
+        except Exception:
+            pass
 
 
 def _on_close(ws, code, msg):
@@ -447,14 +602,19 @@ def _on_close(ws, code, msg):
 def _run_forever():
     while True:
         try:
+            _restricted_location_seen.clear()
+            endpoint = _active_endpoint()
             ws = websocket.WebSocketApp(
-                WS_URL,
+                _active_ws_url(),
                 on_open=_on_open,
                 on_message=_on_message,
                 on_error=_on_error,
                 on_close=_on_close,
             )
+            log.info("[WS] Connecting to %s market-data stream", endpoint["name"])
             ws.run_forever(ping_interval=30, ping_timeout=10)
+            if _restricted_location_seen.is_set():
+                _switch_to_next_endpoint("restricted location")
         except Exception as e:
             log.error("[WS] thread crashed: %s — restarting in 5s", e)
         time.sleep(5)
@@ -468,7 +628,8 @@ def start_rsi_feed():
     Named start_rsi_feed for drop-in compatibility with panic_rsi import.
     Returns immediately.
     """
-    log.info("[WS] Prefetching candle opens from Binance REST...")
+    log.info("[WS] Prefetching candle opens from %s REST...", _active_endpoint()["name"])
+    log.info("[WS] CVD source=%s  kline_fallback_after=%.1fs", CVD_SOURCE, CVD_KLINE_FALLBACK_AFTER_SECS)
     _prefetch_candle_opens()
 
     t = threading.Thread(target=_run_forever, daemon=True, name="binance-ws")
