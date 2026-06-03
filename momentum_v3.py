@@ -204,6 +204,7 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_PRICE_HIGH        = float(os.getenv("OPPO_PRICE_HIGH", "0.30"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
+OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
@@ -277,6 +278,10 @@ def validate_settings():
         errors.append("REBOUND_SELL_MULTIPLIER must be > 0")
     if not 0 < REBOUND_MAX_TARGET_PRICE < 1:
         errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
+    if OPPO_REBOUND_MAX_PRICE <= OPPO_MAX_PRICE:
+        errors.append("OPPO_REBOUND_MAX_PRICE must be greater than OPPO_MAX_PRICE")
+    if OPPO_REBOUND_MAX_PRICE >= 1.0:
+        errors.append("OPPO_REBOUND_MAX_PRICE must be < 1.0")
     if OPPO_COUNTER_BUY_AMOUNT <= 0:
         errors.append("OPPO_COUNTER_BUY_AMOUNT must be > 0")
     if not 0 <= OPPO_COUNTER_MIN_PRICE <= OPPO_COUNTER_MAX_PRICE < 1:
@@ -574,6 +579,9 @@ def save_state():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_min_price": OPPO_MIN_PRICE,
+            "oppo_max_price": OPPO_MAX_PRICE,
+            "oppo_rebound_mult": OPPO_REBOUND_MULT,
             "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -585,6 +593,7 @@ def save_state():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -2302,7 +2311,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         for side in ("yes", "no"):
             low_assets = []
             for asset, (price, token) in side_values[side].items():
-                if price <= OPPO_DEAD_ZONE or OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE:
+                opp_key = f"{asset}_{side}"
+                is_initial_oppo_zone = price <= OPPO_DEAD_ZONE or OPPO_MIN_PRICE <= price <= OPPO_MAX_PRICE
+                is_tracked_rebound_zone = opp_key in oppo_rebound_tracker
+                if is_initial_oppo_zone or is_tracked_rebound_zone:
                     low_assets.append((asset, price, token))
             if not low_assets:
                 continue
@@ -2327,6 +2339,13 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     continue
 
                 trough = oppo_rebound_tracker.get(opp_key)
+                if trough is not None and opp_price > OPPO_REBOUND_MAX_PRICE:
+                    record_oppo_trigger(
+                        opp_key, opp_asset, side, opp_price, "REBOUND-CAP",
+                        f"price {opp_price:.4f} > rebound max {OPPO_REBOUND_MAX_PRICE:.4f}",
+                    )
+                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "oppo-rebound-price-too-high")
+                    continue
                 if trough is None:
                     oppo_rebound_tracker[opp_key] = opp_price
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"start trough {opp_price:.4f}")
@@ -2682,6 +2701,9 @@ def _build_state_snapshot():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_min_price": OPPO_MIN_PRICE,
+            "oppo_max_price": OPPO_MAX_PRICE,
+            "oppo_rebound_mult": OPPO_REBOUND_MULT,
             "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
             "flip_max":   FLIP_MAX,
@@ -2693,6 +2715,7 @@ def _build_state_snapshot():
             "rebound_sell_multiplier": REBOUND_SELL_MULTIPLIER,
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
+            "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -3262,6 +3285,7 @@ function render(s){
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
+        <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass / flexi</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15); below threshold → $${cfg.flexi_rvol_buy_amount||1} flexi order</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
@@ -3464,6 +3488,7 @@ def main():
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
+    log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
         "  OPPO RVOL guard: enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
         OPPO_RVOL_GUARD_ENABLED, FLEXI_RVOL_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN, FLEXI_RVOL_BUY_AMOUNT,
