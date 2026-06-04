@@ -150,7 +150,7 @@ FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "true").lower() == "true"
 BUY_PRICE_MIN  = 1.00   # buy if price >= this
 BUY_PRICE_MAX  = 1.00   # buy if price <= this
 ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
-STOP_BUY_AT    = 840    # seconds into window after which no new buys (13.5 min)
+STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
 EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "false"
