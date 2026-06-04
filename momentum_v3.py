@@ -233,7 +233,7 @@ OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
 CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "5")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
-RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 20)))
+RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
 
