@@ -1,13 +1,16 @@
 """
 kraken_ws.py
 ============
-Kraken market-data adapter for CVD and RVOL only.
+Kraken market-data adapter for price candles, EMA, CVD, and RVOL.
 
-This module intentionally mirrors the CVD/RVOL snapshot functions exported by
-binance_ws.py so momentum_v3.py can keep using Binance for candle_open,
-live_close, EMA, and gap logic while sourcing CVD + RVOL from Kraken.
+This module exposes the public objects/functions momentum_v3.py needs while
+sourcing all market data from Kraken.
 
 Exports:
+    candle_open — dict {asset: float} current Kraken 15m candle open
+    live_close — dict {asset: float|None} latest Kraken 15m close/update
+    get_ema_snapshot(asset) — thread-safe EMA(8)/EMA(25) lookup
+    get_candle_history(asset, limit=18) — thread-safe Kraken candle history
     get_cvd_snapshot(asset) — thread-safe (session, window, slope) lookup
     get_volume_snapshot(asset, period=20, rvol_min=1.5) — Kraken 15m RVOL
     start_kraken_metrics_feed() — prefetch OHLC and launch Kraken WebSocket
@@ -29,6 +32,8 @@ ASSETS = ("eth", "sol", "btc", "xrp")
 WS_URL = "wss://ws.kraken.com/v2"
 KRAKEN_OHLC_REST = "https://api.kraken.com/0/public/OHLC"
 OHLC_INTERVAL_MINUTES = 15
+EMA_FAST_PERIOD = 8
+EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 20
 CANDLE_HISTORY_LIMIT = 120
 
@@ -46,12 +51,16 @@ REST_PAIR_BY_ASSET = {
     "xrp": "XRPUSD",
 }
 
+candle_open = {asset: 0.0 for asset in ASSETS}
+live_close = {asset: None for asset in ASSETS}
+ema_values = {asset: {"ema_fast": None, "ema_slow": None} for asset in ASSETS}
 cvd_value = {asset: 0.0 for asset in ASSETS}
 cvd_value_window = {asset: 0.0 for asset in ASSETS}
 cvd_slope = {asset: 0.0 for asset in ASSETS}
 candle_history = {asset: deque(maxlen=CANDLE_HISTORY_LIMIT) for asset in ASSETS}
 
 _lock = threading.Lock()
+_closed_closes = {asset: deque(maxlen=CANDLE_HISTORY_LIMIT) for asset in ASSETS}
 _cvd_points = {asset: deque(maxlen=300) for asset in ASSETS}
 _cvd_window_start = {asset: None for asset in ASSETS}
 _started = False
@@ -83,6 +92,62 @@ def _parse_rfc3339_ms(value):
 def _cvd_interval_start(ts_secs):
     interval = OHLC_INTERVAL_MINUTES * 60
     return int(ts_secs // interval) * interval
+
+
+def _ema_series(values, period):
+    if not values:
+        return []
+    multiplier = 2 / (period + 1)
+    ema = float(values[0])
+    series = [ema]
+    for value in values[1:]:
+        ema = (float(value) - ema) * multiplier + ema
+        series.append(ema)
+    return series
+
+
+def _update_ema_values(asset, current_close=None):
+    closes = list(_closed_closes[asset])
+    if current_close is not None:
+        closes.append(float(current_close))
+    if len(closes) < 2:
+        ema_values[asset] = {"ema_fast": None, "ema_slow": None}
+        return
+    fast_series = _ema_series(closes, EMA_FAST_PERIOD)
+    slow_series = _ema_series(closes, EMA_SLOW_PERIOD)
+    ema_values[asset] = {
+        "ema_fast": float(fast_series[-1]) if fast_series else None,
+        "ema_slow": float(slow_series[-1]) if slow_series else None,
+    }
+
+
+def _refresh_price_state(asset):
+    rows = list(candle_history.get(asset, []))
+    if not rows:
+        candle_open[asset] = 0.0
+        live_close[asset] = None
+        ema_values[asset] = {"ema_fast": None, "ema_slow": None}
+        return
+
+    current = rows[-1]
+    candle_open[asset] = float(current.get("open", 0.0) or 0.0)
+    live_close[asset] = float(current.get("close", 0.0) or 0.0)
+    _closed_closes[asset].clear()
+    _closed_closes[asset].extend(float(row.get("close", 0.0) or 0.0) for row in rows[:-1])
+    _update_ema_values(asset, live_close[asset])
+
+
+def get_ema_snapshot(asset):
+    with _lock:
+        pair = ema_values.get(asset) or {}
+        return (pair.get("ema_fast"), pair.get("ema_slow"))
+
+
+def get_candle_history(asset, limit=18):
+    with _lock:
+        rows = list(candle_history.get(asset, []))
+        rows = rows[-int(limit):] if limit else rows
+        return [dict(r) for r in rows]
 
 
 def _update_cvd(asset, qty, side, ts_secs=None):
@@ -138,10 +203,11 @@ def _upsert_ohlc(asset, row):
     ts = int(row.get("ts", 0))
     if history and int(history[-1].get("ts", 0)) == ts:
         history[-1] = row
-        return
-    if history:
-        history[-1]["closed"] = True
-    history.append(row)
+    else:
+        if history:
+            history[-1]["closed"] = True
+        history.append(row)
+    _refresh_price_state(asset)
 
 
 def get_volume_snapshot(asset, period=20, rvol_min=1.5):
@@ -204,7 +270,8 @@ def _prefetch_ohlc():
                 raise ValueError("empty OHLC response")
             with _lock:
                 candle_history[asset].clear()
-                for idx, raw in enumerate(rows[-CANDLE_HISTORY_LIMIT:]):
+                selected_rows = rows[-CANDLE_HISTORY_LIMIT:]
+                for idx, raw in enumerate(selected_rows):
                     ts, open_, high, low, close, _vwap, volume, trades = raw
                     close_f = float(close)
                     volume_f = float(volume)
@@ -217,8 +284,9 @@ def _prefetch_ohlc():
                         "volume": volume_f,
                         "quote_volume": volume_f * close_f,
                         "trades": int(trades),
-                        "closed": idx < len(rows[-CANDLE_HISTORY_LIMIT:]) - 1,
+                        "closed": idx < len(selected_rows) - 1,
                     })
+                _refresh_price_state(asset)
             log.info("[KRAKEN] %s OHLC prefetch loaded %d candles", asset.upper(), len(rows))
         except Exception as e:
             log.warning("[KRAKEN] %s OHLC prefetch failed: %s", asset.upper(), e)
@@ -266,7 +334,7 @@ def _on_open(ws):
         },
         "req_id": 2,
     }))
-    log.info("[KRAKEN] Connected — streaming CVD trades + %dm OHLC RVOL", OHLC_INTERVAL_MINUTES)
+    log.info("[KRAKEN] Connected — streaming trades, prices, EMA, and %dm OHLC RVOL", OHLC_INTERVAL_MINUTES)
 
 
 def _on_message(ws, message):
@@ -311,7 +379,7 @@ def _run_forever():
 
 
 def start_kraken_metrics_feed():
-    """Seed Kraken OHLC history and launch WebSocket daemon for CVD/RVOL."""
+    """Seed Kraken OHLC history and launch WebSocket daemon for all market data."""
     global _started
     if _started:
         log.info("[KRAKEN] Metrics feed already started")
@@ -321,5 +389,8 @@ def start_kraken_metrics_feed():
     _prefetch_ohlc()
     t = threading.Thread(target=_run_forever, daemon=True, name="kraken-metrics-ws")
     t.start()
-    log.info("[KRAKEN] Metrics feed started — CVD/RVOL source is Kraken")
+    log.info(
+        "[KRAKEN] Feed started — opens: ETH=%.4f SOL=%.4f BTC=%.4f XRP=%.4f",
+        candle_open["eth"], candle_open["sol"], candle_open["btc"], candle_open["xrp"],
+    )
     return t

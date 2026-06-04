@@ -6,7 +6,7 @@ Strategy:
   ENTRY_AFTER and STOP_BUY_AT seconds into window.
 
   Gap guard (pre-buy, inverted vs panic_rsi):
-    Checks abs(binance_live_close - binance_candle_open) >= threshold.
+    Checks abs(kraken_live_close - kraken_candle_open) >= threshold.
     ALLOW buy if gap is large enough (confirms real momentum).
     WAIT up to GAP_WAIT_SECS for gap to widen. If still too small → blacklist.
 
@@ -81,8 +81,15 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_ema_snapshot, get_candle_history
-from kraken_ws import get_cvd_snapshot, get_volume_snapshot, start_kraken_metrics_feed
+from kraken_ws import (
+    candle_open,
+    live_close,
+    start_kraken_metrics_feed,
+    get_cvd_snapshot,
+    get_ema_snapshot,
+    get_candle_history,
+    get_volume_snapshot,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -153,7 +160,7 @@ EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "true").lower() == "tru
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
-# abs(binance_live_close - binance_candle_open) >= threshold → allow buy
+# abs(kraken_live_close - kraken_candle_open) >= threshold → allow buy
 # threshold = candle_open × GAP_SWING[asset] × GAP_MAGNITUDE[stage]
 GAP_SWING = {
     "btc": 0.001,    # 0.1% of BTC open
@@ -563,7 +570,7 @@ def save_state():
                 "multiple": round(float(v.get("multiple", 0.0)), 3),
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
-                "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
+                "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
@@ -661,11 +668,11 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 
-def _get_pump_binance_snapshot(asset):
-    """Return the latest Binance gap plus Kraken CVD slope and RVOL for pump tracking."""
+def _get_pump_kraken_snapshot(asset):
+    """Return the latest Kraken gap plus Kraken CVD slope and RVOL for pump tracking."""
     c_open = candle_open.get(asset, 0.0)
     c_live = live_close.get(asset)
-    binance_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
+    kraken_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
     try:
         _, _, cvd_slope = get_cvd_snapshot(asset)
     except Exception:
@@ -673,14 +680,14 @@ def _get_pump_binance_snapshot(asset):
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, RVOL_MIN)
     rvol = vol.get("rvol") if vol else None
     return {
-        "binance_gap": binance_gap,
+        "kraken_gap": kraken_gap,
         "cvd_slope": round(float(cvd_slope), 6) if cvd_slope is not None else None,
         "rvol": round(float(rvol), 3) if rvol is not None else None,
     }
 
 
-def _update_pump_binance_snapshot(tracker):
-    tracker.update(_get_pump_binance_snapshot(tracker.get("asset")))
+def _update_pump_kraken_snapshot(tracker):
+    tracker.update(_get_pump_kraken_snapshot(tracker.get("asset")))
 
 
 def _pump_finished_id(window_start, key):
@@ -717,7 +724,7 @@ def _pump_result_from_tracker(tracker):
 
 
 def _record_pump_event(key, tracker, milestone, status=None):
-    _update_pump_binance_snapshot(tracker)
+    _update_pump_kraken_snapshot(tracker)
     event = {
         "time": datetime.now().strftime("%H:%M"),
         "window_start": tracker.get("window_start"),
@@ -729,7 +736,7 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "multiple": round(float(tracker.get("multiple", 0.0)), 3),
         "max_price": round(float(tracker.get("max_price", 0.0)), 4),
         "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
-        "binance_gap": tracker.get("binance_gap"),
+        "kraken_gap": tracker.get("kraken_gap"),
         "cvd_slope": tracker.get("cvd_slope"),
         "rvol": tracker.get("rvol"),
         "status": status or tracker.get("status", "TRACKING"),
@@ -773,7 +780,7 @@ def _refresh_pump_tracker_price(key, tracker):
             tracker["max_price"] = price
         if multiple > float(tracker.get("max_multiple", 0.0)):
             tracker["max_multiple"] = multiple
-    _update_pump_binance_snapshot(tracker)
+    _update_pump_kraken_snapshot(tracker)
 
 
 def update_pump_trackers(window_start, secs_into):
@@ -820,7 +827,7 @@ def update_pump_trackers(window_start, secs_into):
                         "max_multiple": 1.0,
                         "status": "TRACKING",
                         "highest_milestone": 1,
-                        **_get_pump_binance_snapshot(asset),
+                        **_get_pump_kraken_snapshot(asset),
                     }
                 continue
 
@@ -1268,7 +1275,7 @@ def get_rvol_min(secs_into=None):
     return RVOL_MIN_PER_MIN * get_rvol_minute(secs_into)
 
 
-def get_binance_gap(asset):
+def get_kraken_gap(asset):
     c_open = candle_open.get(asset, 0.0)
     c_live = live_close.get(asset)
     if c_open <= 0.0 or c_live is None:
@@ -1278,7 +1285,7 @@ def get_binance_gap(asset):
 
 def force_sell_gap_triggered(asset, secs_into):
     threshold = get_gap_threshold(asset, secs_into, FORCE_SELL_GAP_MULT)
-    actual = get_binance_gap(asset)
+    actual = get_kraken_gap(asset)
     if threshold is None or actual is None:
         return False, actual, threshold
     return actual >= threshold, actual, threshold
@@ -1643,7 +1650,7 @@ def manage_positions(client, server_ts=None):
                             log.warning("[BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
                         continue
 
-        # ── Force sell profitable positions when Binance gap overextends ─────
+        # ── Force sell profitable positions when Kraken gap overextends ─────
         if not pos.get("is_rebound") and unrealized_pnl > 0 and gap_hit:
             log.info(
                 "[FORCE-SELL] %s  pnl=$%.4f  price=%.4f  gap=%.4f >= force-threshold=%.4f  selling %.3f shares",
@@ -2634,7 +2641,7 @@ def _build_state_snapshot():
         "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
-        "binance_candles": candle_out,
+        "kraken_candles": candle_out,
         "window": {
             "secs_into": secs_in,
             "secs_left": 900 - secs_in,
@@ -2685,7 +2692,7 @@ def _build_state_snapshot():
                 "multiple": round(float(v.get("multiple", 0.0)), 3),
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
-                "binance_gap": round(float(v["binance_gap"]), 4) if v.get("binance_gap") is not None else None,
+                "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
@@ -3019,7 +3026,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
     const cls=maxMult>=5?'red':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
-    const gap=p.binance_gap!=null?Number(p.binance_gap).toFixed(4):'—';
+    const gap=p.kraken_gap!=null?Number(p.kraken_gap).toFixed(4):'—';
     const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
     const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
@@ -3046,7 +3053,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'red':m>=4?'amber':'blue';
-    const gap=e.binance_gap!=null?Number(e.binance_gap).toFixed(4):'—';
+    const gap=e.kraken_gap!=null?Number(e.kraken_gap).toFixed(4):'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
     const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
@@ -3072,11 +3079,11 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Binance Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
@@ -3109,7 +3116,7 @@ function render(s){
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
-  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},binanceCandles=s.binance_candles||{};
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -3228,7 +3235,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>EMA Trend (Binance 15m) <span style="font-size:11px;color:#5a6a85;font-weight:400">EMA8 <span style="color:#fbbf24">yellow</span> / EMA25 <span style="color:#ff4fd8">pink</span></span></h2>
+      <h2>EMA Trend (Kraken 15m) <span style="font-size:11px;color:#5a6a85;font-weight:400">EMA8 <span style="color:#fbbf24">yellow</span> / EMA25 <span style="color:#ff4fd8">pink</span></span></h2>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${assets.map(a=>{
         const e=emaNow[a]||{},f=e.ema_fast,s=e.ema_slow;
         let t='—',c='dim';
@@ -3250,7 +3257,7 @@ function render(s){
 
     <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass >${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × minute (1–15)</span></h2>
-      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Binance Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
+      <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Kraken Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
     </div>
 
@@ -3302,7 +3309,7 @@ function render(s){
   const cvdWrap=document.getElementById('cvdChartWrap');
   if(cvdWrap)drawCvdChart(cvdHistory, selectedCvd, cvdWrap);
   const emaWrap=document.getElementById('emaChartWrap');
-  if(emaWrap)drawEmaChart(binanceCandles[selected]||[], emaWrap);
+  if(emaWrap)drawEmaChart(krakenCandles[selected]||[], emaWrap);
   const oppoLogWrap=document.getElementById('oppoLogWrap');
   if(oppoLogWrap){
     oppoLogWrap.scrollTop=Math.min(oppoLogScrollTop, Math.max(0, oppoLogWrap.scrollHeight-oppoLogWrap.clientHeight));
@@ -3380,13 +3387,13 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "binance_gap", "cvd_slope", "rvol", "status", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "cvd_slope", "rvol", "status", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
-            e.get("max_multiple", ""), e.get("binance_gap", ""), e.get("cvd_slope", ""),
+            e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("cvd_slope", ""),
             e.get("rvol", ""), e.get("status", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
@@ -3485,7 +3492,7 @@ def main():
              SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100, OPPO_CUT_LOSS_PCT*100)
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
-    log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
+    log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
@@ -3509,8 +3516,7 @@ def main():
 
     start_http_server()
     client = build_client()
-    start_rsi_feed()   # Binance WebSocket — populates candle_open + live_close
-    start_kraken_metrics_feed()   # Kraken WebSocket — populates CVD + RVOL
+    start_kraken_metrics_feed()   # Kraken WebSocket — populates candle_open + live_close + EMA + CVD + RVOL
 
     last_status = time.time()
     last_window = None
