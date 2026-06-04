@@ -81,7 +81,8 @@ except ImportError:
 
 load_dotenv()
 
-from binance_ws import candle_open, live_close, start_rsi_feed, get_cvd_snapshot, get_ema_snapshot, get_candle_history, get_volume_snapshot
+from binance_ws import candle_open, live_close, start_rsi_feed, get_ema_snapshot, get_candle_history
+from kraken_ws import get_cvd_snapshot, get_volume_snapshot, start_kraken_metrics_feed
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -661,7 +662,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 def _get_pump_binance_snapshot(asset):
-    """Return the latest Binance gap, CVD slope, and RVOL for pump tracking."""
+    """Return the latest Binance gap plus Kraken CVD slope and RVOL for pump tracking."""
     c_open = candle_open.get(asset, 0.0)
     c_live = live_close.get(asset)
     binance_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
@@ -885,7 +886,7 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
-    """Final OPPO buy gate: select normal or flexi size from minute-scaled Binance quote-volume RVOL."""
+    """Final OPPO buy gate: select normal or flexi size from minute-scaled Kraken RVOL."""
     minute = get_rvol_minute(secs_into)
     rvol_min = get_rvol_min(secs_into=secs_into)
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
@@ -3485,11 +3486,11 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Binance gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
-    log.info("  OPPO CVD gate: enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
-        "  OPPO RVOL guard: enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
+        "  OPPO RVOL guard (Kraken): enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
         OPPO_RVOL_GUARD_ENABLED, FLEXI_RVOL_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN, FLEXI_RVOL_BUY_AMOUNT,
     )
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
@@ -3509,6 +3510,7 @@ def main():
     start_http_server()
     client = build_client()
     start_rsi_feed()   # Binance WebSocket — populates candle_open + live_close
+    start_kraken_metrics_feed()   # Kraken WebSocket — populates CVD + RVOL
 
     last_status = time.time()
     last_window = None
