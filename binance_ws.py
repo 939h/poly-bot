@@ -129,8 +129,6 @@ MACD_REST_LIMIT = 100
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 20
-CVD_SOURCE = os.getenv("CVD_SOURCE", "auto").strip().lower()
-CVD_KLINE_FALLBACK_AFTER_SECS = max(0.0, float(os.getenv("CVD_KLINE_FALLBACK_AFTER_SECS", "10")))
 CANDLE_HISTORY_LIMIT = 120 #to get RVOL
 
 # ── Internal state ────────────────────────────────────────────────────────────
@@ -145,9 +143,6 @@ _prev_live_close = {
 _lock = threading.Lock()
 _closed_closes = {asset: deque(maxlen=MACD_REST_LIMIT) for asset in SYMBOL_MAP.values()}
 _cvd_points = {asset: deque(maxlen=300) for asset in SYMBOL_MAP.values()}
-_last_agg_trade_ts = {asset: None for asset in SYMBOL_MAP.values()}
-_last_kline_cvd_totals = {asset: None for asset in SYMBOL_MAP.values()}
-_cvd_source_active = {asset: None for asset in SYMBOL_MAP.values()}
 candle_history = {asset: deque(maxlen=CANDLE_HISTORY_LIMIT) for asset in SYMBOL_MAP.values()}
 _endpoint_lock = threading.Lock()
 _endpoint_index = 0
@@ -263,19 +258,9 @@ def _update_ema_values(asset, current_close=None):
 
 
 
-def _set_cvd_source(asset, source):
-    previous = _cvd_source_active.get(asset)
-    if previous == source:
-        return
-    _cvd_source_active[asset] = source
-    log.info("[WS] %s CVD source=%s", asset.upper(), source)
-
-
-def _apply_cvd_delta(asset, delta, source):
-    delta = float(delta)
-    if delta == 0.0:
-        return
-    _set_cvd_source(asset, source)
+def _update_cvd(asset, qty, buyer_is_maker):
+    # buyer_is_maker=True means taker sell; False means taker buy
+    delta = -float(qty) if buyer_is_maker else float(qty)
     cvd_value[asset] = float(cvd_value.get(asset, 0.0)) + delta
     cvd_value_window[asset] = float(cvd_value_window.get(asset, 0.0)) + delta
     now_ts = time.time()
@@ -288,40 +273,6 @@ def _apply_cvd_delta(asset, delta, source):
         cvd_slope[asset] = (pts[-1][1] - pts[0][1]) / dt
     else:
         cvd_slope[asset] = 0.0
-
-
-def _update_cvd(asset, qty, buyer_is_maker):
-    # buyer_is_maker=True means taker sell; False means taker buy
-    delta = -float(qty) if buyer_is_maker else float(qty)
-    _last_agg_trade_ts[asset] = time.time()
-    _apply_cvd_delta(asset, delta, "aggTrade")
-
-
-def _should_apply_kline_cvd(asset):
-    if CVD_SOURCE == "kline":
-        return True
-    if CVD_SOURCE in ("aggtrade", "agg_trade"):
-        return False
-    last_trade_ts = _last_agg_trade_ts.get(asset)
-    return last_trade_ts is None or (time.time() - float(last_trade_ts)) >= CVD_KLINE_FALLBACK_AFTER_SECS
-
-
-def _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume):
-    current_totals = (int(k_ts), float(volume), float(taker_buy_volume))
-    previous = _last_kline_cvd_totals.get(asset)
-    _last_kline_cvd_totals[asset] = current_totals
-    if previous is None or int(previous[0]) != int(k_ts):
-        return
-
-    delta_volume = max(current_totals[1] - float(previous[1]), 0.0)
-    delta_buy_volume = max(current_totals[2] - float(previous[2]), 0.0)
-    if delta_volume <= 0:
-        return
-    if not _should_apply_kline_cvd(asset):
-        return
-
-    delta = (2.0 * min(delta_buy_volume, delta_volume)) - delta_volume
-    _apply_cvd_delta(asset, delta, "kline-fallback")
 
 
 def get_cvd_snapshot(asset):
@@ -512,24 +463,19 @@ def _on_message(ws, message):
                 _closed_closes[asset].append(close)
                 _update_macd_histogram(asset)
                 _update_ema_values(asset)
-                k_ts = int(k.get("t", 0))
-                volume = float(k.get("v", 0))
-                quote_volume = float(k.get("q", 0))
-                taker_buy_volume = float(k.get("V", 0))
-                taker_buy_quote_volume = float(k.get("Q", 0))
-                _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume)
                 cvd_value_window[asset] = 0.0
+                k_ts = int(k.get("t", 0))
                 row = {
                     "ts": k_ts,
                     "open": open_,
                     "high": float(k.get("h", 0)),
                     "low": float(k.get("l", 0)),
                     "close": close,
-                    "volume": volume,
-                    "quote_volume": quote_volume,
+                    "volume": float(k.get("v", 0)),
+                    "quote_volume": float(k.get("q", 0)),
                     "trades": int(k.get("n", 0)),
-                    "taker_buy_volume": taker_buy_volume,
-                    "taker_buy_quote_volume": taker_buy_quote_volume,
+                    "taker_buy_volume": float(k.get("V", 0)),
+                    "taker_buy_quote_volume": float(k.get("Q", 0)),
                     "closed": True,
                 }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
@@ -554,22 +500,17 @@ def _on_message(ws, message):
                 _update_macd_histogram(asset, close)
                 _update_ema_values(asset, close)
                 k_ts = int(k.get("t", 0))
-                volume = float(k.get("v", 0))
-                quote_volume = float(k.get("q", 0))
-                taker_buy_volume = float(k.get("V", 0))
-                taker_buy_quote_volume = float(k.get("Q", 0))
-                _update_cvd_from_kline(asset, k_ts, volume, taker_buy_volume)
                 row = {
                     "ts": k_ts,
                     "open": open_,
                     "high": float(k.get("h", 0)),
                     "low": float(k.get("l", 0)),
                     "close": close,
-                    "volume": volume,
-                    "quote_volume": quote_volume,
+                    "volume": float(k.get("v", 0)),
+                    "quote_volume": float(k.get("q", 0)),
                     "trades": int(k.get("n", 0)),
-                    "taker_buy_volume": taker_buy_volume,
-                    "taker_buy_quote_volume": taker_buy_quote_volume,
+                    "taker_buy_volume": float(k.get("V", 0)),
+                    "taker_buy_quote_volume": float(k.get("Q", 0)),
                     "closed": False,
                 }
                 if candle_history[asset] and int(candle_history[asset][-1].get("ts", 0)) == k_ts:
@@ -629,7 +570,6 @@ def start_rsi_feed():
     Returns immediately.
     """
     log.info("[WS] Prefetching candle opens from %s REST...", _active_endpoint()["name"])
-    log.info("[WS] CVD source=%s  kline_fallback_after=%.1fs", CVD_SOURCE, CVD_KLINE_FALLBACK_AFTER_SECS)
     _prefetch_candle_opens()
 
     t = threading.Thread(target=_run_forever, daemon=True, name="binance-ws")
