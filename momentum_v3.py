@@ -1491,9 +1491,9 @@ def _extreme_gap_skip_triggered(secs_into):
         swing = GAP_SWING.get(asset, 0.001)
         threshold = c_open * swing * gap_mag_vol
         actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 15:
-            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*8=%.4f",
-                        asset.upper(), actual_gap, threshold * 15)
+        if actual_gap > threshold * 10:
+            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*10=%.4f",
+                        asset.upper(), actual_gap, threshold * 10)
             return True
     return False
 
@@ -1626,7 +1626,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
     advance_rebound_cutloss_tracker(client, window_start, secs_into)
 
     if _extreme_gap_skip_triggered(secs_into):
-        skip_buy_until_window = window_start + (WINDOW_SECS * 4)  # this + next 3 windows
+        skip_buy_until_window = window_start + (WINDOW_SECS * 2)  # this + next 3 windows
         skip_log_window = None
         log.warning("[BUY-SKIP-WINDOWS] Extreme gap detected — skipping buys until window %d",
                     skip_buy_until_window)
