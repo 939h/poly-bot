@@ -24,25 +24,42 @@ class RvolReversalSnapshotTests(unittest.TestCase):
                 "closed": True,
             })
 
-    def test_two_of_previous_three_high_rvol_arms_opposite_side(self):
+    def _seed_declining_setup(self, volumes):
         for index in range(20):
             self._append(120 - index, 119 - index, 100)
-        self._append(100, 98, 130)
-        self._append(98, 96, 80)
-        self._append(96, 94, 130)
+        for index, volume in enumerate(volumes):
+            open_ = 100 - (index * 2)
+            self._append(open_, open_ - 2, volume)
+
+    def test_every_two_of_three_ordering_arms_golden_mode(self):
+        patterns = {
+            "high-low-high": (130, 80, 130),
+            "high-high-low": (130, 130, 80),
+            "low-high-high": (80, 130, 130),
+        }
+        for name, volumes in patterns.items():
+            with self.subTest(name=name):
+                with kraken_ws._lock:
+                    kraken_ws.candle_history["btc"].clear()
+                self._seed_declining_setup(volumes)
+
+                snapshot = kraken_ws.get_rvol_reversal_snapshot("btc", period=20)
+
+                self.assertTrue(snapshot["armed"])
+                self.assertEqual(snapshot["side"], "yes")
+                self.assertEqual(snapshot["high_rvol_count"], 2)
+
+    def test_three_of_three_high_rvol_arms_golden_mode(self):
+        self._seed_declining_setup((130, 130, 130))
 
         snapshot = kraken_ws.get_rvol_reversal_snapshot("btc", period=20)
 
         self.assertTrue(snapshot["armed"])
         self.assertEqual(snapshot["side"], "yes")
-        self.assertEqual(snapshot["high_rvol_count"], 2)
+        self.assertEqual(snapshot["high_rvol_count"], 3)
 
     def test_only_one_high_rvol_does_not_arm(self):
-        for index in range(20):
-            self._append(120 - index, 119 - index, 100)
-        self._append(100, 98, 130)
-        self._append(98, 96, 80)
-        self._append(96, 94, 80)
+        self._seed_declining_setup((130, 80, 80))
 
         snapshot = kraken_ws.get_rvol_reversal_snapshot("btc", period=20)
 

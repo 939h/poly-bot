@@ -211,7 +211,7 @@ def _upsert_ohlc(asset, row):
 
 
 def get_rvol_reversal_snapshot(asset, period=20, lookback=3, min_high_rvol=2, threshold=1.0):
-    """Return the current fourth-window RVOL exhaustion setup and its historical reversal rate."""
+    """Return an order-independent N-of-M RVOL setup and its fourth-window reversal rate."""
     period = max(1, int(period))
     lookback = max(1, int(lookback))
     min_high_rvol = max(1, min(lookback, int(min_high_rvol)))
