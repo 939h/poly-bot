@@ -66,6 +66,29 @@ class RvolReversalSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot["armed"])
         self.assertEqual(snapshot["high_rvol_count"], 1)
 
+    def test_probability_reports_historical_fourth_window_reversals(self):
+        for index in range(20):
+            self._append(120 - index, 119 - index, 100)
+        self._append(100, 98, 130)
+        self._append(98, 96, 130)
+        self._append(96, 94, 80)
+        self._append(94, 96, 100)  # YES reversal win after a declining setup
+        self._append(96, 94, 130)
+        self._append(94, 92, 130)
+        self._append(92, 90, 80)
+        self._append(90, 88, 100)  # YES reversal loss after a declining setup
+        self._append(88, 86, 130)
+        self._append(86, 84, 130)
+        self._append(84, 82, 80)
+
+        snapshot = kraken_ws.get_rvol_reversal_snapshot("btc", period=20)
+
+        self.assertTrue(snapshot["armed"])
+        self.assertEqual(snapshot["side"], "yes")
+        self.assertGreaterEqual(snapshot["samples"], 2)
+        self.assertGreater(snapshot["wins"], 0)
+        self.assertEqual(snapshot["probability"], snapshot["wins"] / snapshot["samples"])
+
 
 if __name__ == "__main__":
     unittest.main()

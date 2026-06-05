@@ -266,7 +266,6 @@ PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.10"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
 PUMP_TRACK_MILESTONES = (2, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
-gap_mag_vol = 1.0
 
 
 
@@ -343,8 +342,6 @@ gap_wait            = {}   # asset -> {triggered_at, key, token, price}
 peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 last_entry_ts       = {}   # asset -> unix seconds of last buy
-skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
-skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 oppo_dead_zone_blacklisted_assets = set()  # assets whose OPPO price hit dead-zone this window
 oppo_rvol_blacklisted_assets = set()  # assets blocked by OPPO RVOL guard this window
@@ -1990,28 +1987,6 @@ def _volatility_check(asset, secs_into):
         return True   # blocked
     return False
 
-def _extreme_gap_skip_triggered(secs_into):
-    """
-    Returns True if any asset has gap > (threshold * 15).
-    Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
-    use the staged GAP_MAGNITUDE values.
-    """
-    
-    for asset in ASSETS:
-        c_open = candle_open.get(asset, 0.0)
-        c_live = live_close.get(asset)
-        if c_open <= 0 or c_live is None:
-            continue
-        swing = GAP_SWING.get(asset, 0.001)
-        threshold = c_open * swing * gap_mag_vol
-        actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 10:
-            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*10=%.4f",
-                        asset.upper(), actual_gap, threshold * 10)
-            return True
-    return False
-
-
 def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
     if secs_into is None:
         secs_into = max(0, int(time.time()) - int(window_start))
@@ -2214,7 +2189,7 @@ def advance_oppo_counter_tracker(client, window_start, secs_into):
 
 
 def scan_markets(client, window_start, secs_into, server_ts, executor):
-    global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
+    global _skip_first_window, _startup_window_ts
 
     stats["scans"] += 1
 
@@ -2241,21 +2216,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         return
 
     advance_rebound_cutloss_tracker(client, window_start, secs_into)
-
-    if _extreme_gap_skip_triggered(secs_into):
-        skip_buy_until_window = window_start + (WINDOW_SECS * 2)  # this + next 3 windows
-        skip_log_window = None
-        log.warning("[BUY-SKIP-WINDOWS] Extreme gap detected — skipping buys until window %d",
-                    skip_buy_until_window)
-        return
-
-    if skip_buy_until_window is not None and window_start < skip_buy_until_window:
-        windows_left = max(0, int((skip_buy_until_window - window_start) // WINDOW_SECS))
-        if skip_log_window != window_start:
-            log.info("[BUY-SKIP] buy-disabled for %d window(s) due to prior extreme gap", windows_left)
-            skip_log_window = window_start
-        return
-
 
     # ── Startup window skip ───────────────────────────────────────────────────
     if _skip_first_window:
@@ -2488,7 +2448,12 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
                         golden_setup.get("wins", 0), golden_setup.get("samples", 0),
                     )
-                    _record_oppo_trigger(opp_asset, side, opp_price, "GOLDEN", f"{golden_setup.get('high_rvol_count', 0)}/{OPPO_GOLDEN_RVOL_LOOKBACK} high RVOL; p={probability_text}")
+                    golden_detail = (
+                        f"{golden_setup.get('high_rvol_count', 0)}/{OPPO_GOLDEN_RVOL_LOOKBACK} high RVOL; "
+                        f"historical reversal={probability_text} ({golden_setup.get('wins', 0)}/{golden_setup.get('samples', 0)})"
+                    )
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GOLDEN", golden_detail)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "GOLDEN", golden_detail)
                 else:
                     rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
                     if not rvol_ok:
@@ -3172,7 +3137,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3319,7 +3284,7 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss/knife-block events)</span></h2>
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows golden/buy/sell/cutloss/knife-block events)</span></h2>
       <div class="oppo-log-wrap" id="oppoLogWrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody>${oppoRows}</tbody></table></div>
     </div>
@@ -3533,7 +3498,7 @@ def start_http_server():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global last_pnl_snapshot, pnl_history, armed_logged, skip_buy_until_window
+    global last_pnl_snapshot, pnl_history, armed_logged
 
     validate_settings()
     load_state()
@@ -3632,19 +3597,6 @@ def main():
                 if was_idle is not False:
                     log.info("[IDLE] Trading window open — resumed")
                 was_idle = False
-
-                # If extreme-gap skip is active, sleep whole windows when flat.
-                if (
-                    skip_buy_until_window is not None
-                    and window_start < skip_buy_until_window
-                    and not open_positions
-                ):
-                    sleep_for = max(1, secs_left + 1)
-                    windows_left = int((skip_buy_until_window - window_start) // WINDOW_SECS)
-                    log.info("[SLEEP-SKIP] Flat + buy-skip active, sleeping %ds (windows_left=%d)",
-                             sleep_for, windows_left)
-                    time.sleep(sleep_for)
-                    continue
 
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
