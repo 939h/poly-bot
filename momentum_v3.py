@@ -89,6 +89,7 @@ from kraken_ws import (
     get_ema_snapshot,
     get_candle_history,
     get_volume_snapshot,
+    get_rvol_reversal_snapshot,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -236,6 +237,12 @@ VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
+OPPO_GOLDEN_RVOL_ENABLED = os.getenv("OPPO_GOLDEN_RVOL_ENABLED", "true").lower() == "true"
+OPPO_GOLDEN_RVOL_LOOKBACK = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_LOOKBACK", "3")))
+OPPO_GOLDEN_RVOL_MIN_HIGH = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_MIN_HIGH", "2")))
+OPPO_GOLDEN_RVOL_THRESHOLD = float(os.getenv("OPPO_GOLDEN_RVOL_THRESHOLD", "1.0"))
+OPPO_GOLDEN_MIN_PROBABILITY = float(os.getenv("OPPO_GOLDEN_MIN_PROBABILITY", "0.5"))
+OPPO_GOLDEN_MIN_SAMPLES = max(0, int(os.getenv("OPPO_GOLDEN_MIN_SAMPLES", "5")))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -307,6 +314,12 @@ def validate_settings():
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     if RVOL_MIN_PER_MIN <= 0:
         errors.append("RVOL_MIN_PER_MIN must be > 0")
+    if OPPO_GOLDEN_RVOL_MIN_HIGH > OPPO_GOLDEN_RVOL_LOOKBACK:
+        errors.append("OPPO_GOLDEN_RVOL_MIN_HIGH must be <= OPPO_GOLDEN_RVOL_LOOKBACK")
+    if OPPO_GOLDEN_RVOL_THRESHOLD <= 0:
+        errors.append("OPPO_GOLDEN_RVOL_THRESHOLD must be > 0")
+    if not 0 <= OPPO_GOLDEN_MIN_PROBABILITY <= 1:
+        errors.append("OPPO_GOLDEN_MIN_PROBABILITY must be between 0 and 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -619,6 +632,10 @@ def save_state():
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
+            "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
@@ -890,6 +907,24 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
         "[OPPO-DEAD-ZONE] %s price=%.4f <= %.4f — blacklisted asset for current window and cleared OPPO tracking",
         opp_key, price, OPPO_DEAD_ZONE,
     )
+
+
+def _oppo_golden_rvol_setup(asset, side):
+    """Return an armed fourth-window reversal setup for the requested OPPO side."""
+    snapshot = get_rvol_reversal_snapshot(
+        asset, VOLUME_AVG_PERIOD, OPPO_GOLDEN_RVOL_LOOKBACK,
+        OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_THRESHOLD,
+    )
+    probability = snapshot.get("probability")
+    probability_ok = (
+        snapshot.get("samples", 0) >= OPPO_GOLDEN_MIN_SAMPLES
+        and (probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY)
+    )
+    snapshot["qualified"] = bool(
+        OPPO_GOLDEN_RVOL_ENABLED and snapshot.get("armed")
+        and snapshot.get("side") == side and probability_ok
+    )
+    return snapshot
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
@@ -2328,6 +2363,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             for opp_asset, opp_price, opp_token in low_assets:
                 opp_key = f"{opp_asset}_{side}"
+                golden_setup = _oppo_golden_rvol_setup(opp_asset, side)
+                golden_opportunity = golden_setup.get("qualified", False)
 
                 if opp_asset in traded_this_window:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
@@ -2335,8 +2372,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if (
                     opp_asset in oppo_dead_zone_blacklisted_assets
-                    or opp_asset in oppo_rvol_blacklisted_assets
-                    or opp_asset in oppo_knife_blacklisted_assets
+                    or (not golden_opportunity and opp_asset in oppo_rvol_blacklisted_assets)
+                    or (not golden_opportunity and opp_asset in oppo_knife_blacklisted_assets)
                 ):
                     _clear_oppo_tracking_for_asset(opp_asset)
                     continue
@@ -2375,7 +2412,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     continue
 
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
-                if falling_knife:
+                if falling_knife and not golden_opportunity:
                     pump_move = pump_peak - pump_trough
                     detail = (
                         f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; "
@@ -2414,7 +2451,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 if c_open > 0 and c_live is not None:
                     actual_gap = abs(c_live - c_open)
                     oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
-                    if actual_gap >= oppo_gap_threshold:
+                    if actual_gap >= oppo_gap_threshold and not golden_opportunity:
                         record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
                         log.debug("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
                                  opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
@@ -2425,7 +2462,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
                     continue
 
-                if CVD_OPPO_ENABLED:
+                if CVD_OPPO_ENABLED and not golden_opportunity:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
                     slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
@@ -2439,9 +2476,23 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
                     log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
 
-                rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
-                if not rvol_ok:
-                    continue
+                if golden_opportunity:
+                    rvol_snapshot = get_volume_snapshot(opp_asset, VOLUME_AVG_PERIOD, get_rvol_min(secs_into))
+                    oppo_buy_amount = BUY_AMOUNT
+                    probability = golden_setup.get("probability")
+                    probability_text = f"{probability:.1%}" if probability is not None else "n/a"
+                    prior_rvols = ",".join(f"{value:.2f}" for value in golden_setup.get("rvols", []) if value is not None)
+                    log.info(
+                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — bypassing knife/gap/CVD/current-RVOL guards",
+                        opp_asset.upper(), side.upper(), golden_setup.get("high_rvol_count", 0),
+                        OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
+                        golden_setup.get("wins", 0), golden_setup.get("samples", 0),
+                    )
+                    _record_oppo_trigger(opp_asset, side, opp_price, "GOLDEN", f"{golden_setup.get('high_rvol_count', 0)}/{OPPO_GOLDEN_RVOL_LOOKBACK} high RVOL; p={probability_text}")
+                else:
+                    rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
+                    if not rvol_ok:
+                        continue
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
 
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
@@ -2741,6 +2792,10 @@ def _build_state_snapshot():
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
+            "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
@@ -3499,6 +3554,11 @@ def main():
     log.info(
         "  OPPO RVOL guard (Kraken): enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
         OPPO_RVOL_GUARD_ENABLED, FLEXI_RVOL_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN, FLEXI_RVOL_BUY_AMOUNT,
+    )
+    log.info(
+        "  OPPO golden fourth-window: enabled=%s  prior-high=%d/%d > %.2fx  historical reversal >= %.0f%% over >=%d samples",
+        OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_LOOKBACK,
+        OPPO_GOLDEN_RVOL_THRESHOLD, OPPO_GOLDEN_MIN_PROBABILITY * 100, OPPO_GOLDEN_MIN_SAMPLES,
     )
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
