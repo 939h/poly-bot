@@ -631,6 +631,7 @@ def save_state():
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
             "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
             "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
             "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
@@ -2606,6 +2607,7 @@ def _build_state_snapshot():
     gap_threshold_out = {}
     cvd_out = {}
     volume_out = {}
+    golden_rvol_out = {}
     ema_now = {}
     candle_out = {}
     for a in ASSETS:
@@ -2638,6 +2640,37 @@ def _build_state_snapshot():
             "rvol_min": float(vol.get("rvol_min", rvol_min)),
             "ready": bool(vol.get("ready", False)),
         }
+        golden = get_rvol_reversal_snapshot(
+            a, VOLUME_AVG_PERIOD, OPPO_GOLDEN_RVOL_LOOKBACK,
+            OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_THRESHOLD,
+        )
+        probability = golden.get("probability")
+        samples = int(golden.get("samples", 0))
+        probability_ok = samples >= OPPO_GOLDEN_MIN_SAMPLES and (
+            probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY
+        )
+        prior_rvols = list(golden.get("rvols", []))
+        golden_rvol_out[a] = {
+            "enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "armed": bool(golden.get("armed", False)),
+            "qualified": bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok),
+            "side": golden.get("side"),
+            "high_rvol_count": int(golden.get("high_rvol_count", 0)),
+            "required": OPPO_GOLDEN_RVOL_MIN_HIGH,
+            "lookback": OPPO_GOLDEN_RVOL_LOOKBACK,
+            "threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+            "probability": round(float(probability), 4) if probability is not None else None,
+            "samples": samples,
+            "wins": int(golden.get("wins", 0)),
+            "candles": [
+                {
+                    "label": f"i-{offset}",
+                    "rvol": round(float(value), 3) if value is not None else None,
+                    "passed": bool(value is not None and value > OPPO_GOLDEN_RVOL_THRESHOLD),
+                }
+                for offset, value in enumerate(reversed(prior_rvols), start=1)
+            ],
+        }
         ema_fast, ema_slow = get_ema_snapshot(a)
         ema_now[a] = {
             "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
@@ -2654,6 +2687,7 @@ def _build_state_snapshot():
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
         "volume":        volume_out,
+        "golden_rvol":   golden_rvol_out,
         "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
@@ -2759,6 +2793,7 @@ def _build_state_snapshot():
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
             "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
             "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
             "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
             "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
@@ -2805,6 +2840,16 @@ canvas{display:block;width:100%!important;height:180px!important}
 .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid #252d3d}
 .asset-row:last-child{border-bottom:none}
 .asset-row .k{color:#5a6a85}
+.golden-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+.golden-card{background:#1e2533;border:1px solid #2a3347;border-radius:9px;padding:12px}
+.golden-card.qualified{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.18)}
+.golden-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.golden-candles{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.golden-candle{background:#161b27;border:1px solid #30394b;border-radius:7px;padding:7px;text-align:center;font-family:monospace;font-size:11px}
+.golden-candle.pass{background:#0d2a1e;border-color:#166534;color:#4ade9f}
+.golden-candle.fail{color:#7b879d}
+.golden-candle .slot{display:block;font-size:10px;text-transform:uppercase;margin-bottom:2px;color:inherit}
+.golden-meta{display:flex;justify-content:space-between;gap:8px;margin-top:9px;font-size:11px;color:#7b879d;font-family:monospace}
 footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bottom:10px}
 </style>
 </head>
@@ -3136,7 +3181,7 @@ function render(s){
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
-  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{};
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -3147,6 +3192,24 @@ function render(s){
   const total=(st.wins||0)+(st.losses||0);
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
+
+  const goldenCards=assets.map(a=>{
+    const g=goldenRvol[a]||{},candles=g.candles||[];
+    const state=!g.enabled?'OFF':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING'));
+    const stateCls=g.qualified?'amber':(g.armed?'blue':'dim');
+    const probability=g.probability!=null?`${(Number(g.probability)*100).toFixed(1)}% (${g.wins||0}/${g.samples||0})`:'collecting samples';
+    const candleCells=[1,2,3].map(slot=>{
+      const c=candles.find(x=>x.label===`i-${slot}`)||{};
+      const cls=c.passed?'pass':'fail';
+      const value=c.rvol!=null?`${Number(c.rvol).toFixed(2)}x`:'—';
+      return `<div class="golden-candle ${cls}"><span class="slot">i-${slot}</span><strong>${value}</strong><div>${c.passed?'PASS':'WAIT'}</div></div>`;
+    }).join('');
+    return `<div class="golden-card ${g.qualified?'qualified':''}">
+      <div class="golden-head"><strong>${a.toUpperCase()}</strong><span class="${stateCls}" style="font-weight:700">${state}${g.side?` · ${(g.side||'').toUpperCase()}`:''}</span></div>
+      <div class="golden-candles">${candleCells}</div>
+      <div class="golden-meta"><span>${g.high_rvol_count||0}/${g.lookback||3} high · need ${g.required||2}</span><span>history ${probability}</span></div>
+    </div>`;
+  }).join('');
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3273,6 +3336,11 @@ function render(s){
         return `<button id="cvdBtn_${a}" onclick="window.__cvdAsset='${a}'" style="padding:4px 10px;background:${active?'#0d1e2a':'#1e2533'};border:1px solid ${active?'#60a5fa':'#2a3347'};color:#e8edf5;border-radius:6px;font-size:11px;cursor:pointer">${a.toUpperCase()} <span class="${(c.slope||0)>0?'green':(c.slope||0)<0?'red':'dim'}">${slope}</span></button>`;
       }).join('')}</div>
       <div class="chart-wrap" id="cvdChartWrap"></div>
+    </div>
+
+    <div class="section">
+      <h2>Golden OPPO Progress <span style="font-size:11px;color:#5a6a85;font-weight:400">previous completed 15m candles; PASS when RVOL &gt; ${Number(cfg.oppo_golden_rvol_threshold||1).toFixed(2)}x</span></h2>
+      <div class="golden-grid">${goldenCards}</div>
     </div>
 
     <div class="section">
