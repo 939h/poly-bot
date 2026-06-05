@@ -35,7 +35,7 @@ OHLC_INTERVAL_MINUTES = 15
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
 CVD_SLOPE_WINDOW_SECS = 60
-CANDLE_HISTORY_LIMIT = 120
+CANDLE_HISTORY_LIMIT = 1200
 
 WS_SYMBOL_TO_ASSET = {
     "ETH/USD": "eth",
@@ -208,6 +208,72 @@ def _upsert_ohlc(asset, row):
             history[-1]["closed"] = True
         history.append(row)
     _refresh_price_state(asset)
+
+
+def get_rvol_reversal_snapshot(asset, period=20, lookback=3, min_high_rvol=2, threshold=1.0):
+    """Return the current fourth-window RVOL exhaustion setup and its historical reversal rate."""
+    period = max(1, int(period))
+    lookback = max(1, int(lookback))
+    min_high_rvol = max(1, min(lookback, int(min_high_rvol)))
+    threshold = float(threshold)
+    with _lock:
+        rows = [dict(row) for row in candle_history.get(asset, []) if row.get("closed")]
+
+    def quote_volume(row):
+        return float(row.get("quote_volume", row.get("volume", 0.0)) or 0.0)
+
+    def row_rvol(index):
+        if index < period:
+            return None
+        average = sum(quote_volume(row) for row in rows[index - period:index]) / period
+        return quote_volume(rows[index]) / average if average > 0 else 0.0
+
+    def setup_before(index):
+        if index < period + lookback:
+            return None
+        previous = rows[index - lookback:index]
+        rvols = [row_rvol(i) for i in range(index - lookback, index)]
+        net_move = float(previous[-1].get("close", 0.0) or 0.0) - float(previous[0].get("open", 0.0) or 0.0)
+        if net_move == 0:
+            return None
+        side = "yes" if net_move < 0 else "no"
+        return {
+            "side": side,
+            "high_rvol_count": sum(value is not None and value > threshold for value in rvols),
+            "rvols": rvols,
+            "net_move": net_move,
+        }
+
+    side_stats = {"yes": {"samples": 0, "wins": 0}, "no": {"samples": 0, "wins": 0}}
+    for index in range(period + lookback, len(rows)):
+        setup = setup_before(index)
+        if not setup or setup["high_rvol_count"] < min_high_rvol:
+            continue
+        candle_move = float(rows[index].get("close", 0.0) or 0.0) - float(rows[index].get("open", 0.0) or 0.0)
+        stats = side_stats[setup["side"]]
+        stats["samples"] += 1
+        if (setup["side"] == "yes" and candle_move > 0) or (setup["side"] == "no" and candle_move < 0):
+            stats["wins"] += 1
+
+    current = setup_before(len(rows))
+    armed = bool(current and current["high_rvol_count"] >= min_high_rvol)
+    current_stats = side_stats.get(current.get("side")) if current else None
+    samples = current_stats["samples"] if current_stats else 0
+    wins = current_stats["wins"] if current_stats else 0
+    return {
+        "armed": armed,
+        "side": current.get("side") if current else None,
+        "high_rvol_count": current.get("high_rvol_count", 0) if current else 0,
+        "rvols": current.get("rvols", []) if current else [],
+        "net_move": current.get("net_move", 0.0) if current else 0.0,
+        "probability": wins / samples if samples else None,
+        "samples": samples,
+        "wins": wins,
+        "period": period,
+        "lookback": lookback,
+        "min_high_rvol": min_high_rvol,
+        "threshold": threshold,
+    }
 
 
 def get_volume_snapshot(asset, period=20, rvol_min=1.5):
