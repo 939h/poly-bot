@@ -33,6 +33,7 @@ Requirements:
     OPPO_COUNTER_SELL_MULTIPLIER=1.4
     OPPO_COUNTER_SELL_CAP=0.94
     OPPO_COUNTER_CUT_LOSS_PCT=0.60
+    OPPO_GOLDEN_GAP_MAG=3.0
 """
 
 import os
@@ -214,6 +215,7 @@ OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.10"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.20"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
+OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
@@ -307,6 +309,10 @@ def validate_settings():
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
     if OPPO_FALLING_KNIFE_MIN_MOVE <= 0:
         errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
+    if OPPO_GAP_MAG <= 0:
+        errors.append("OPPO_GAP_MAG must be > 0")
+    if OPPO_GOLDEN_GAP_MAG <= 0:
+        errors.append("OPPO_GOLDEN_GAP_MAG must be > 0")
     if PUMP_TRACK_SUCCESS_MIN_MULTIPLE <= 0:
         errors.append("PUMP_TRACK_SUCCESS_MIN_MULTIPLE must be > 0")
     if VOLUME_AVG_PERIOD <= 0:
@@ -611,6 +617,8 @@ def save_state():
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
+            "oppo_gap_mag": OPPO_GAP_MAG,
+            "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -2411,12 +2419,17 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 c_live = live_close.get(opp_asset)
                 if c_open > 0 and c_live is not None:
                     actual_gap = abs(c_live - c_open)
-                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
-                    if actual_gap >= oppo_gap_threshold and not golden_opportunity:
-                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
-                        log.debug("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
-                                 opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
-                        _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
+                    gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_opportunity else OPPO_GAP_MAG
+                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * gap_magnitude
+                    if actual_gap >= oppo_gap_threshold:
+                        status = "GOLDEN-GAP-BLOCK" if golden_opportunity else "GAP-BLOCK"
+                        detail = f"{actual_gap:.4f}>={oppo_gap_threshold:.4f} mag={gap_magnitude:.2f}x"
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail)
+                        log.info(
+                            "[OPPO-%s] %s_%s actual_gap=%.4f >= threshold=%.4f magnitude=%.2fx",
+                            status, opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold, gap_magnitude,
+                        )
+                        _record_oppo_trigger(opp_asset, side, opp_price, status, detail)
                         continue
 
                 if not _ema_confirms_side(opp_asset, side):
@@ -2444,7 +2457,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     probability_text = f"{probability:.1%}" if probability is not None else "n/a"
                     prior_rvols = ",".join(f"{value:.2f}" for value in golden_setup.get("rvols", []) if value is not None)
                     log.info(
-                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — bypassing knife/gap/CVD/current-RVOL guards",
+                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — golden gap passed; bypassing knife/CVD/current-RVOL guards",
                         opp_asset.upper(), side.upper(), golden_setup.get("high_rvol_count", 0),
                         OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
                         golden_setup.get("wins", 0), golden_setup.get("samples", 0),
@@ -2650,10 +2663,21 @@ def _build_state_snapshot():
             probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY
         )
         prior_rvols = list(golden.get("rvols", []))
+        golden_gap_limit = c_open * GAP_SWING.get(a, 0.001) * OPPO_GOLDEN_GAP_MAG if c_open > 0 else None
+        golden_actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
+        golden_gap_passed = bool(
+            golden_gap_limit is None or golden_actual_gap is None or golden_actual_gap < golden_gap_limit
+        )
+        setup_qualified = bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok)
         golden_rvol_out[a] = {
             "enabled": OPPO_GOLDEN_RVOL_ENABLED,
             "armed": bool(golden.get("armed", False)),
-            "qualified": bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok),
+            "setup_qualified": setup_qualified,
+            "qualified": bool(setup_qualified and golden_gap_passed),
+            "gap_passed": golden_gap_passed,
+            "gap_actual": round(float(golden_actual_gap), 4) if golden_actual_gap is not None else None,
+            "gap_limit": round(float(golden_gap_limit), 4) if golden_gap_limit is not None else None,
+            "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
             "side": golden.get("side"),
             "high_rvol_count": int(golden.get("high_rvol_count", 0)),
             "required": OPPO_GOLDEN_RVOL_MIN_HIGH,
@@ -2773,6 +2797,8 @@ def _build_state_snapshot():
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
+            "oppo_gap_mag": OPPO_GAP_MAG,
+            "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -3182,7 +3208,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3195,8 +3221,9 @@ function render(s){
 
   const goldenCards=assets.map(a=>{
     const g=goldenRvol[a]||{},candles=g.candles||[];
-    const state=!g.enabled?'OFF':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING'));
-    const stateCls=g.qualified?'amber':(g.armed?'blue':'dim');
+    const gapBlocked=g.setup_qualified && g.gap_passed===false;
+    const state=!g.enabled?'OFF':(gapBlocked?'GAP BLOCK':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING')));
+    const stateCls=gapBlocked?'red':(g.qualified?'amber':(g.armed?'blue':'dim'));
     const probability=g.probability!=null?`${(Number(g.probability)*100).toFixed(1)}% (${g.wins||0}/${g.samples||0})`:'collecting samples';
     const candleCells=[1,2,3].map(slot=>{
       const c=candles.find(x=>x.label===`i-${slot}`)||{};
@@ -3208,6 +3235,7 @@ function render(s){
       <div class="golden-head"><strong>${a.toUpperCase()}</strong><span class="${stateCls}" style="font-weight:700">${state}${g.side?` · ${(g.side||'').toUpperCase()}`:''}</span></div>
       <div class="golden-candles">${candleCells}</div>
       <div class="golden-meta"><span>${g.high_rvol_count||0}/${g.lookback||3} high · need ${g.required||2}</span><span>history ${probability}</span></div>
+      <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_passed===false?'red':'green'}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
     </div>`;
   }).join('');
 
@@ -3264,7 +3292,7 @@ function render(s){
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
   const oppoRows=oppoLog.map(o=>{
-    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
+    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
     const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
     const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
@@ -3382,6 +3410,7 @@ function render(s){
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass / flexi</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15); below threshold → $${cfg.flexi_rvol_buy_amount||1} flexi order</td></tr>
+        <tr><td>OPPO gap guards</td><td>Normal magnitude x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden magnitude</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — golden blocks when current Kraken gap reaches this threshold</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -3593,6 +3622,7 @@ def main():
         OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_LOOKBACK,
         OPPO_GOLDEN_RVOL_THRESHOLD, OPPO_GOLDEN_MIN_PROBABILITY * 100, OPPO_GOLDEN_MIN_SAMPLES,
     )
+    log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
