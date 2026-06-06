@@ -34,6 +34,10 @@ Requirements:
     OPPO_COUNTER_SELL_CAP=0.94
     OPPO_COUNTER_CUT_LOSS_PCT=0.60
     OPPO_GOLDEN_GAP_MAG=3.0
+    OPPO_OPTIMIZER_ENABLED=true
+    OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES=8
+    OPPO_TRADE_OPTIMIZER_ENABLED=true
+    OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES=5
 """
 
 import os
@@ -91,6 +95,7 @@ from kraken_ws import (
     get_candle_history,
     get_volume_snapshot,
     get_rvol_reversal_snapshot,
+    get_golden_optimizer_snapshot,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -245,6 +250,10 @@ OPPO_GOLDEN_RVOL_MIN_HIGH = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_MIN_HIGH", "2
 OPPO_GOLDEN_RVOL_THRESHOLD = float(os.getenv("OPPO_GOLDEN_RVOL_THRESHOLD", "1.0"))
 OPPO_GOLDEN_MIN_PROBABILITY = float(os.getenv("OPPO_GOLDEN_MIN_PROBABILITY", "0.5"))
 OPPO_GOLDEN_MIN_SAMPLES = max(0, int(os.getenv("OPPO_GOLDEN_MIN_SAMPLES", "5")))
+OPPO_OPTIMIZER_ENABLED = os.getenv("OPPO_OPTIMIZER_ENABLED", "true").lower() == "true"
+OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES = max(1, int(os.getenv("OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES", "8")))
+OPPO_TRADE_OPTIMIZER_ENABLED = os.getenv("OPPO_TRADE_OPTIMIZER_ENABLED", "true").lower() == "true"
+OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES = max(1, int(os.getenv("OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES", "5")))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -642,6 +651,10 @@ def save_state():
             "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
             "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
             "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
+            "oppo_optimizer_enabled": OPPO_OPTIMIZER_ENABLED,
+            "oppo_optimizer_min_validation_samples": OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            "oppo_trade_optimizer_enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+            "oppo_trade_optimizer_min_validation_trades": OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
@@ -682,13 +695,79 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
         "is_counter": pos.get("is_counter", False),
+        "is_oppo": pos.get("is_oppo", key.endswith("_oppo")),
+        "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
         "pnl":      round(pnl, 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_gap_magnitude": pos.get("entry_gap_magnitude"),
+        "entry_rebound_ratio": pos.get("entry_rebound_ratio"),
+        "entry_cvd_slope": pos.get("entry_cvd_slope"),
     }
     trade_log.insert(0, record)
     if len(trade_log) > 200:
         trade_log.pop()
 
+
+
+def _build_oppo_trade_optimizer_snapshot():
+    """Recommend standard OPPO entry filters from completed non-golden OPPO trades."""
+    trades = [
+        trade for trade in reversed(trade_log)
+        if trade.get("is_oppo") and not trade.get("is_golden_oppo")
+        and trade.get("entry_rvol") is not None
+        and trade.get("entry_gap_magnitude") is not None
+        and trade.get("entry_rebound_ratio") is not None
+    ]
+    result = {
+        "mode": "shadow-recommend-only",
+        "enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+        "ready": False,
+        "trades": len(trades),
+        "note": "Uses completed standard OPPO trades only; blocked opportunities are not yet replayed",
+    }
+    if not OPPO_TRADE_OPTIMIZER_ENABLED or len(trades) < OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES * 2:
+        return result
+    validation_start = max(1, int(len(trades) * 0.70))
+
+    def evaluate(config):
+        sections = {"train": [], "validation": []}
+        for index, trade in enumerate(trades):
+            if float(trade["entry_rvol"]) < config["min_rvol"]:
+                continue
+            if float(trade["entry_gap_magnitude"]) >= config["max_gap_magnitude"]:
+                continue
+            if float(trade["entry_rebound_ratio"]) < config["min_rebound_ratio"]:
+                continue
+            sections["validation" if index >= validation_start else "train"].append(float(trade.get("pnl", 0.0)))
+        metrics = {}
+        for name, pnls in sections.items():
+            metrics[name] = {
+                "trades": len(pnls),
+                "wins": sum(pnl > 0 for pnl in pnls),
+                "pnl": round(sum(pnls), 4),
+                "win_rate": sum(pnl > 0 for pnl in pnls) / len(pnls) if pnls else None,
+            }
+        val = metrics["validation"]
+        metrics["score"] = val["pnl"] if val["trades"] >= OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES else None
+        return metrics
+
+    candidates = []
+    for min_rvol in (0.0, 0.5, 1.0, 1.5, 2.0):
+        for max_gap in (0.5, 1.0, 2.0, 3.0, 5.0, 10.0):
+            for min_rebound in (1.2, 1.5, 2.0, 2.5):
+                config = {"min_rvol": min_rvol, "max_gap_magnitude": max_gap, "min_rebound_ratio": min_rebound}
+                metrics = evaluate(config)
+                if metrics["score"] is not None:
+                    candidates.append({"config": config, **metrics})
+    candidates.sort(key=lambda item: (item["score"], item["validation"]["win_rate"] or 0, item["validation"]["trades"]), reverse=True)
+    current_config = {"min_rvol": 0.0, "max_gap_magnitude": OPPO_GAP_MAG, "min_rebound_ratio": OPPO_REBOUND_MULT}
+    result.update({
+        "ready": bool(candidates),
+        "candidate_count": len(candidates),
+        "recommendation": candidates[0] if candidates else None,
+        "current": {"config": current_config, **evaluate(current_config)},
+    })
+    return result
 
 
 def _get_pump_kraken_snapshot(asset):
@@ -1335,7 +1414,8 @@ def force_sell_gap_triggered(asset, secs_into):
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
                   is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False,
-                  entry_rvol=None):
+                  entry_rvol=None, entry_gap_magnitude=None, entry_rebound_ratio=None,
+                  entry_cvd_slope=None, is_golden_oppo=False):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
@@ -1413,6 +1493,10 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "window_start":         window_start,
         "is_simulated":         is_simulated,
         "entry_rvol":           round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_gap_magnitude":   round(float(entry_gap_magnitude), 3) if entry_gap_magnitude is not None else None,
+        "entry_rebound_ratio":   round(float(entry_rebound_ratio), 3) if entry_rebound_ratio is not None else None,
+        "entry_cvd_slope":       round(float(entry_cvd_slope), 6) if entry_cvd_slope is not None else None,
+        "is_golden_oppo":        bool(is_golden_oppo),
     }
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
@@ -2417,8 +2501,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 c_open = candle_open.get(opp_asset, 0.0)
                 c_live = live_close.get(opp_asset)
-                if c_open > 0 and c_live is not None:
-                    actual_gap = abs(c_live - c_open)
+                actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
+                if actual_gap is not None:
                     gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_opportunity else OPPO_GAP_MAG
                     oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * gap_magnitude
                     if actual_gap >= oppo_gap_threshold:
@@ -2474,6 +2558,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
 
+                base_gap = c_open * GAP_SWING.get(opp_asset, 0.001) if c_open > 0 else None
+                entry_gap_magnitude = actual_gap / base_gap if base_gap and base_gap > 0 else None
+                _, _, entry_cvd_slope = get_cvd_snapshot(opp_asset)
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
                 if buy["ok"]:
@@ -2483,7 +2570,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")),
                                   buy_amount=oppo_buy_amount,
-                                  entry_rvol=entry_rvol)
+                                  entry_rvol=entry_rvol,
+                                  entry_gap_magnitude=entry_gap_magnitude,
+                                  entry_rebound_ratio=rebound_ratio,
+                                  entry_cvd_slope=entry_cvd_slope,
+                                  is_golden_oppo=golden_opportunity)
                     traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
@@ -2621,6 +2712,7 @@ def _build_state_snapshot():
     cvd_out = {}
     volume_out = {}
     golden_rvol_out = {}
+    golden_optimizer_out = {}
     ema_now = {}
     candle_out = {}
     for a in ASSETS:
@@ -2695,6 +2787,19 @@ def _build_state_snapshot():
                 for offset, value in enumerate(reversed(prior_rvols), start=1)
             ],
         }
+        if OPPO_OPTIMIZER_ENABLED:
+            golden_optimizer_out[a] = get_golden_optimizer_snapshot(
+                a, VOLUME_AVG_PERIOD,
+                current={
+                    "lookback": OPPO_GOLDEN_RVOL_LOOKBACK,
+                    "min_high": OPPO_GOLDEN_RVOL_MIN_HIGH,
+                    "threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+                    "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
+                },
+                min_validation_samples=OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            )
+        else:
+            golden_optimizer_out[a] = {"mode": "off", "ready": False}
         ema_fast, ema_slow = get_ema_snapshot(a)
         ema_now[a] = {
             "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
@@ -2712,6 +2817,8 @@ def _build_state_snapshot():
         "cvd":           cvd_out,
         "volume":        volume_out,
         "golden_rvol":   golden_rvol_out,
+        "golden_optimizer": golden_optimizer_out,
+        "oppo_trade_optimizer": _build_oppo_trade_optimizer_snapshot(),
         "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
@@ -2822,6 +2929,10 @@ def _build_state_snapshot():
             "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
             "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
             "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
+            "oppo_optimizer_enabled": OPPO_OPTIMIZER_ENABLED,
+            "oppo_optimizer_min_validation_samples": OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            "oppo_trade_optimizer_enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+            "oppo_trade_optimizer_min_validation_trades": OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
@@ -3207,7 +3318,7 @@ function render(s){
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
-  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{};
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
@@ -3238,6 +3349,21 @@ function render(s){
       <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_passed===false?'red':'green'}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
     </div>`;
   }).join('');
+
+  const optimizerRows=assets.map(a=>{
+    const o=goldenOptimizer[a]||{},r=o.recommendation||{},rc=r.config||{},rv=r.validation||{},cur=o.current||{},cv=cur.validation||{};
+    const rec=o.ready?`L${rc.lookback} · ${rc.min_high} high · RVOL>${Number(rc.threshold).toFixed(2)} · gap x${Number(rc.gap_magnitude).toFixed(1)}`:'collecting data';
+    const recRate=rv.rate!=null?`${(Number(rv.rate)*100).toFixed(1)}% (${rv.wins||0}/${rv.samples||0})`:'—';
+    const curRate=cv.rate!=null?`${(Number(cv.rate)*100).toFixed(1)}% (${cv.wins||0}/${cv.samples||0})`:'—';
+    return `<tr><td>${a.toUpperCase()}</td><td>${o.mode||'shadow-recommend-only'}</td><td>${rec}</td><td class="${rv.rate!=null&&cv.rate!=null&&rv.rate>cv.rate?'green':'dim'}">${recRate}</td><td>${curRate}</td><td>${o.candidate_count||0}</td></tr>`;
+  }).join('');
+
+  const oto=oppoTradeOptimizer||{},otr=oto.recommendation||{},otc=otr.config||{},otv=otr.validation||{},otcur=oto.current||{},otcv=otcur.validation||{};
+  const oppoOptimizerRecommendation=oto.ready
+    ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · gap &lt; x${Number(otc.max_gap_magnitude).toFixed(1)} · rebound ≥ x${Number(otc.min_rebound_ratio).toFixed(1)}`
+    : 'collecting completed standard OPPO trades';
+  const oppoOptimizerValidation=otv.trades!=null?`$${Number(otv.pnl||0).toFixed(4)} · ${otv.trades} trades · ${otv.win_rate!=null?(Number(otv.win_rate)*100).toFixed(1)+'%':'—'}`:'—';
+  const oppoOptimizerCurrent=otcv.trades!=null?`$${Number(otcv.pnl||0).toFixed(4)} · ${otcv.trades} trades · ${otcv.win_rate!=null?(Number(otcv.win_rate)*100).toFixed(1)+'%':'—'}`:'—';
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3369,6 +3495,17 @@ function render(s){
     <div class="section">
       <h2>Golden OPPO Progress <span style="font-size:11px;color:#5a6a85;font-weight:400">previous completed 15m candles; PASS when RVOL &gt; ${Number(cfg.oppo_golden_rvol_threshold||1).toFixed(2)}x</span></h2>
       <div class="golden-grid">${goldenCards}</div>
+    </div>
+
+    <div class="section">
+      <h2>Golden OPPO Optimizer <span style="font-size:11px;color:#5a6a85;font-weight:400">shadow + recommend-only; held-out Kraken validation proxy; never changes live settings</span></h2>
+      <table><thead><tr><th>Asset</th><th>Mode</th><th>Recommended golden settings</th><th>Validation reversal</th><th>Current validation</th><th>Candidates</th></tr></thead><tbody>${optimizerRows}</tbody></table>
+    </div>
+
+    <div class="section">
+      <h2>Standard OPPO Optimizer <span style="font-size:11px;color:#5a6a85;font-weight:400">shadow + recommend-only; completed non-golden OPPO trades; never changes live settings</span></h2>
+      <table><thead><tr><th>Mode</th><th>Recommended entry filters</th><th>Validation result</th><th>Current result</th><th>Recorded trades</th><th>Candidates</th></tr></thead>
+      <tbody><tr><td>${oto.mode||'shadow-recommend-only'}</td><td>${oppoOptimizerRecommendation}</td><td class="${otv.pnl>otcv.pnl?'green':'dim'}">${oppoOptimizerValidation}</td><td>${oppoOptimizerCurrent}</td><td>${oto.trades||0}</td><td>${oto.candidate_count||0}</td></tr></tbody></table>
     </div>
 
     <div class="section">
@@ -3623,6 +3760,8 @@ def main():
         OPPO_GOLDEN_RVOL_THRESHOLD, OPPO_GOLDEN_MIN_PROBABILITY * 100, OPPO_GOLDEN_MIN_SAMPLES,
     )
     log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG)
+    log.info("  OPPO optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d", OPPO_OPTIMIZER_ENABLED, OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES)
+    log.info("  Standard OPPO trade optimizer: enabled=%s mode=shadow-recommend-only min_validation_trades=%d", OPPO_TRADE_OPTIMIZER_ENABLED, OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
