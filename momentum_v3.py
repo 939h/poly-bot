@@ -162,10 +162,10 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
-EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "true").lower() == "false"
+EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "false").lower() == "false"
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
-EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "true").lower() == "true"
+EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "false").lower() == "false"
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -195,7 +195,7 @@ CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.6"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 10    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
-FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "4"))
+FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "50"))
 BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "20.0")) #original is 1.5 - set 20.0 is "disable" it purposely
 BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
 
