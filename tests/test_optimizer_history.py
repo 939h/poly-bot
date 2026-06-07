@@ -47,8 +47,11 @@ class OptimizerHistoryTests(unittest.TestCase):
         standard = {
             "ready": True,
             "candidate_count": 3,
+            "good_pump_entry_ratio_samples": 12,
+            "good_pump_entry_ratio_average": 2.975,
+            "good_pump_entry_ratio_median": 1.7,
             "recommendation": {
-                "config": {"min_rvol": 1.0, "max_gap_magnitude": 3.0, "min_rebound_ratio": 1.5},
+                "config": {"min_rvol": 1.0, "max_kraken_gap_ratio": 3.0, "min_rebound_ratio": 1.5},
                 "validation": {"trades": 6, "wins": 4, "win_rate": 2 / 3, "pnl": 1.25},
                 "score": 1.25,
             },
@@ -61,6 +64,7 @@ class OptimizerHistoryTests(unittest.TestCase):
         self.assertEqual(rows[0]["optimizer"], "standard")
         self.assertEqual(rows[0]["min_rvol"], "1.0")
         self.assertEqual(rows[0]["validation_pnl"], "1.25")
+        self.assertEqual(rows[0]["good_pump_entry_ratio_median"], "1.7")
 
 
 if __name__ == "__main__":

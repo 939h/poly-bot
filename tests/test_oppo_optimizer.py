@@ -18,6 +18,19 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         momentum_v3.OPPO_TRADE_OPTIMIZER_ENABLED = self.original_enabled
         momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE = self.original_equivalence
 
+    def test_migrates_legacy_gap_magnitude_field_names(self):
+        legacy = {
+            "pump_log": [{"kraken_gap_magnitude": 1.2, "entry_gap_magnitude": 0.8}],
+            "config": {"max_gap_magnitude": 5.0},
+        }
+
+        migrated = momentum_v3._migrate_gap_ratio_names(legacy)
+
+        self.assertEqual(migrated["pump_log"][0]["kraken_gap_ratio"], 1.2)
+        self.assertEqual(migrated["pump_log"][0]["entry_kraken_gap_ratio"], 0.8)
+        self.assertEqual(migrated["config"]["max_kraken_gap_ratio"], 5.0)
+        self.assertNotIn("entry_gap_magnitude", migrated["pump_log"][0])
+
     def test_recommends_filters_using_peak_multiple(self):
         momentum_v3.pump_log = []
         for index in range(12):
@@ -26,7 +39,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
                 # A pump that ends FAILED can still be the strongest opportunity.
                 "status": "FAILED",
                 "entry_rvol": 1.5 if strong else 0.4,
-                "entry_gap_magnitude": 0.4 if strong else 4.0,
+                "entry_kraken_gap_ratio": 0.4 if strong else 4.0,
                 "max_multiple": 14.0 if strong else 1.2,
             })
 
@@ -38,13 +51,13 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.assertGreater(result["recommendation"]["validation"]["average_max_multiple"], 10.0)
         self.assertEqual(result["recommendation"]["validation"]["highest_max_multiple"], 14.0)
         config = result["recommendation"]["config"]
-        self.assertTrue(config["min_rvol"] >= 0.5 or config["max_gap_magnitude"] <= 4.0)
+        self.assertTrue(config["min_rvol"] >= 0.5 or config["max_kraken_gap_ratio"] <= 4.0)
 
     def test_keeps_valid_one_x_samples_and_caps_outlier_influence(self):
         momentum_v3.pump_log = []
         for multiple in (30.0, 1.0, 1.0, 1.0, 1.0, 4.0, 4.0, 4.0, 4.0, 4.0):
             momentum_v3.pump_log.insert(0, {
-                "status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": 0.1,
+                "status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": 0.1,
                 "max_multiple": multiple, "observation_secs": 120, "price_updates": 20,
             })
 
@@ -58,8 +71,8 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
     def test_excludes_short_or_under_observed_pumps(self):
         momentum_v3.pump_log = [
-            {"status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": 1.0, "max_multiple": 1.0, "observation_secs": 10, "price_updates": 20},
-            {"status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": 1.0, "max_multiple": 1.0, "observation_secs": 120, "price_updates": 1},
+            {"status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": 1.0, "max_multiple": 1.0, "observation_secs": 10, "price_updates": 20},
+            {"status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": 1.0, "max_multiple": 1.0, "observation_secs": 120, "price_updates": 1},
         ]
 
         result = momentum_v3._build_oppo_trade_optimizer_snapshot()
@@ -70,7 +83,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
     def test_recommends_without_weak_validation_outcomes_but_reports_warning(self):
         momentum_v3.pump_log = [
-            {"status": "SUCCESS", "entry_rvol": 0.2, "entry_gap_magnitude": 1.0, "max_multiple": 4.0}
+            {"status": "SUCCESS", "entry_rvol": 0.2, "entry_kraken_gap_ratio": 1.0, "max_multiple": 4.0}
             for _ in range(12)
         ]
 
@@ -82,12 +95,30 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.assertIn("no weak/failed pumps", result["outcome_warning"])
         self.assertIsNone(result["readiness_reason"])
 
+    def test_recommendation_caps_ratio_at_good_pump_entry_median(self):
+        ratios = (1.2, 0.5, 2.2, 8.0)
+        chronological = []
+        for index in range(12):
+            ratio = ratios[index % len(ratios)]
+            chronological.append({
+                "status": "FAILED", "entry_rvol": 0.5,
+                "entry_kraken_gap_ratio": ratio, "max_multiple": 4.0,
+            })
+        momentum_v3.pump_log = list(reversed(chronological))
+
+        result = momentum_v3._build_oppo_trade_optimizer_snapshot()
+
+        self.assertEqual(result["good_pump_entry_ratio_median"], 1.7)
+        self.assertEqual(result["good_pump_entry_ratio_average"], 2.975)
+        self.assertTrue(result["ready"])
+        self.assertLessEqual(result["recommendation"]["config"]["max_kraken_gap_ratio"], 1.7)
+
     def test_equivalent_scores_prefer_conservative_gap(self):
         momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE = 0.10
         chronological = []
         for index in range(12):
             chronological.append({
-                "status": "FAILED", "entry_rvol": 0.2, "entry_gap_magnitude": 4.0,
+                "status": "FAILED", "entry_rvol": 0.2, "entry_kraken_gap_ratio": 4.0,
                 "max_multiple": 1.2 if index in (9, 11) else 4.0,
             })
         momentum_v3.pump_log = list(reversed(chronological))
@@ -95,7 +126,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         result = momentum_v3._build_oppo_trade_optimizer_snapshot()
 
         self.assertTrue(result["ready"])
-        self.assertEqual(result["recommendation"]["config"]["max_gap_magnitude"], 5.0)
+        self.assertEqual(result["recommendation"]["config"]["max_kraken_gap_ratio"], 4.0)
 
     def test_pump_tracker_stops_at_dead_zone_and_preserves_prior_peak(self):
         originals = (momentum_v3.ASSETS, momentum_v3.live_prices, momentum_v3.pump_tracker,
@@ -111,7 +142,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
                     "base_price": 0.05, "trough": 0.05, "current": 0.10,
                     "multiple": 2.0, "max_price": 0.10, "max_multiple": 2.0,
                     "entry_ts": momentum_v3.time.time() - 800, "price_updates": 10,
-                    "entry_rvol": 0.5, "entry_gap_magnitude": 1.0,
+                    "entry_rvol": 0.5, "entry_kraken_gap_ratio": 1.0,
                 }
             }
 
@@ -140,7 +171,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
                     "base_price": 0.05, "trough": 0.05, "current": 0.05,
                     "multiple": 1.0, "max_price": 0.05, "max_multiple": 1.0,
                     "entry_ts": momentum_v3.time.time() - 900, "price_updates": 20,
-                    "entry_rvol": 0.5, "entry_gap_magnitude": 1.0,
+                    "entry_rvol": 0.5, "entry_kraken_gap_ratio": 1.0,
                 }
             }
 
@@ -155,21 +186,21 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
     def test_all_configs_csv_exports_every_candidate(self):
         momentum_v3.pump_log = [
-            {"status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": 1.0, "max_multiple": 2.0}
+            {"status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": 1.0, "max_multiple": 2.0}
             for _ in range(12)
         ]
 
         csv_text = momentum_v3._optimizer_configs_csv_bytes().decode()
 
-        self.assertIn("recommended,min_rvol,max_gap_magnitude,score", csv_text)
+        self.assertIn("recommended,min_rvol,max_kraken_gap_ratio,good_pump_entry_ratio_median,good_pump_entry_ratio_average,good_pump_entry_ratio_samples,score", csv_text)
         self.assertEqual(len(csv_text.strip().splitlines()), 31)
 
     def test_excludes_tracking_milestones_and_incomplete_metrics(self):
         momentum_v3.pump_log = [
-            {"status": "TRACKING", "entry_rvol": 2.0, "entry_gap_magnitude": 0.2, "max_multiple": 14.0},
-            {"status": "SUCCESS", "entry_rvol": None, "entry_gap_magnitude": 0.2, "max_multiple": 4.0},
-            {"status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": None, "max_multiple": 3.0},
-            {"status": "FAILED", "entry_rvol": 1.0, "entry_gap_magnitude": 1.0, "max_multiple": 0.0},
+            {"status": "TRACKING", "entry_rvol": 2.0, "entry_kraken_gap_ratio": 0.2, "max_multiple": 14.0},
+            {"status": "SUCCESS", "entry_rvol": None, "entry_kraken_gap_ratio": 0.2, "max_multiple": 4.0},
+            {"status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": None, "max_multiple": 3.0},
+            {"status": "FAILED", "entry_rvol": 1.0, "entry_kraken_gap_ratio": 1.0, "max_multiple": 0.0},
         ]
 
         result = momentum_v3._build_oppo_trade_optimizer_snapshot()
@@ -184,19 +215,19 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         try:
             momentum_v3.live_prices = {"btc_yes": 0.05}
             momentum_v3._get_pump_kraken_snapshot = lambda asset: {
-                "kraken_gap": 10.0, "kraken_gap_magnitude": 1.5, "cvd_slope": 0.25, "rvol": 2.0,
+                "kraken_gap": 10.0, "kraken_gap_ratio": 1.5, "cvd_slope": 0.25, "rvol": 2.0,
             }
             tracker = {
                 "asset": "btc", "trough": 0.06, "base_price": 0.06, "current": 0.06,
                 "max_price": 0.12, "max_multiple": 2.0, "highest_milestone": 2,
-                "entry_gap_magnitude": 4.0, "entry_cvd_slope": -0.1, "entry_rvol": 0.4,
+                "entry_kraken_gap_ratio": 4.0, "entry_cvd_slope": -0.1, "entry_rvol": 0.4,
             }
 
             momentum_v3._refresh_pump_tracker_price("btc_yes", tracker)
 
             self.assertEqual(tracker["trough"], 0.05)
             self.assertEqual(tracker["entry_rvol"], 2.0)
-            self.assertEqual(tracker["entry_gap_magnitude"], 1.5)
+            self.assertEqual(tracker["entry_kraken_gap_ratio"], 1.5)
             self.assertEqual(tracker["max_multiple"], 1.0)
         finally:
             momentum_v3.live_prices = original_prices

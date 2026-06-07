@@ -468,6 +468,24 @@ STATE_FILE = "bot_state.json"
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
+def _migrate_gap_ratio_names(value):
+    """Rename persisted legacy gap-magnitude fields without changing their values."""
+    if isinstance(value, dict):
+        renames = {
+            "kraken_gap_magnitude": "kraken_gap_ratio",
+            "entry_gap_magnitude": "entry_kraken_gap_ratio",
+            "max_gap_magnitude": "max_kraken_gap_ratio",
+        }
+        for old_name, new_name in renames.items():
+            if old_name in value and new_name not in value:
+                value[new_name] = value.pop(old_name)
+        for nested in value.values():
+            _migrate_gap_ratio_names(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _migrate_gap_ratio_names(nested)
+    return value
+
 def load_state():
     global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot
     if not os.path.exists(STATE_FILE):
@@ -475,7 +493,7 @@ def load_state():
         return
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            saved = json.load(f)
+            saved = _migrate_gap_ratio_names(json.load(f))
         saved_stats = saved.get("stats", {})
         for k in stats:
             if k in saved_stats:
@@ -618,13 +636,13 @@ def save_state():
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
-                "kraken_gap_magnitude": round(float(v["kraken_gap_magnitude"]), 4) if v.get("kraken_gap_magnitude") is not None else None,
+                "kraken_gap_ratio": round(float(v["kraken_gap_ratio"]), 4) if v.get("kraken_gap_ratio") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "entry_at": v.get("entry_at", v.get("started_at", "")),
                 "entry_ts": v.get("entry_ts"),
                 "price_updates": int(v.get("price_updates", 0)),
-                "entry_gap_magnitude": round(float(v["entry_gap_magnitude"]), 4) if v.get("entry_gap_magnitude") is not None else None,
+                "entry_kraken_gap_ratio": round(float(v["entry_kraken_gap_ratio"]), 4) if v.get("entry_kraken_gap_ratio") is not None else None,
                 "entry_cvd_slope": round(float(v["entry_cvd_slope"]), 6) if v.get("entry_cvd_slope") is not None else None,
                 "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
@@ -736,7 +754,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
         "pnl":      round(pnl, 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
-        "entry_gap_magnitude": pos.get("entry_gap_magnitude"),
+        "entry_kraken_gap_ratio": pos.get("entry_kraken_gap_ratio"),
         "entry_rebound_ratio": pos.get("entry_rebound_ratio"),
         "entry_cvd_slope": pos.get("entry_cvd_slope"),
     }
@@ -751,7 +769,7 @@ def _build_oppo_trade_optimizer_snapshot():
     completed = [event for event in reversed(pump_log) if event.get("status") in ("SUCCESS", "FAILED")]
 
     def quality_reason(event):
-        if event.get("entry_rvol") is None or event.get("entry_gap_magnitude") is None:
+        if event.get("entry_rvol") is None or event.get("entry_kraken_gap_ratio") is None:
             return "missing-entry-metrics"
         if float(event.get("max_multiple", 0.0) or 0.0) <= 0:
             return "invalid-multiple"
@@ -816,18 +834,29 @@ def _build_oppo_trade_optimizer_snapshot():
     dataset_train = summarize([float(sample["max_multiple"]) for sample in samples[:validation_start]])
     dataset_validation = summarize([float(sample["max_multiple"]) for sample in samples[validation_start:]])
     outcome_diverse = bool(dataset_validation["weak_pumps"])
+    good_pump_entry_ratios = [
+        float(sample["entry_kraken_gap_ratio"])
+        for sample in samples
+        if float(sample["max_multiple"]) >= PUMP_TRACK_SUCCESS_MIN_MULTIPLE
+    ]
+    good_pump_ratio_average = round(sum(good_pump_entry_ratios) / len(good_pump_entry_ratios), 4) if good_pump_entry_ratios else None
+    good_pump_ratio_median = round(float(np.median(good_pump_entry_ratios)), 4) if good_pump_entry_ratios else None
     result.update({
         "dataset_train": dataset_train,
         "dataset_validation": dataset_validation,
         "outcome_diverse": outcome_diverse,
         "outcome_warning": None if outcome_diverse else "validation data has no weak/failed pumps below 2x",
+        "good_pump_entry_ratio_samples": len(good_pump_entry_ratios),
+        "good_pump_entry_ratio_average": good_pump_ratio_average,
+        "good_pump_entry_ratio_median": good_pump_ratio_median,
+        "recommended_ratio_cap": good_pump_ratio_median,
         "readiness_reason": None,
     })
 
     def evaluate(config):
         sections = {"train": [], "validation": []}
         for index, sample in enumerate(samples):
-            if float(sample["entry_rvol"]) < config["min_rvol"] or float(sample["entry_gap_magnitude"]) >= config["max_gap_magnitude"]:
+            if float(sample["entry_rvol"]) < config["min_rvol"] or float(sample["entry_kraken_gap_ratio"]) > config["max_kraken_gap_ratio"]:
                 continue
             sections["validation" if index >= validation_start else "train"].append(float(sample["max_multiple"]))
         metrics = {name: summarize(values) for name, values in sections.items()}
@@ -853,30 +882,40 @@ def _build_oppo_trade_optimizer_snapshot():
         return metrics
 
     candidates = []
+    ratio_candidates = {0.5, 1.0, 2.0, 3.0, 5.0, 10.0}
+    if good_pump_ratio_median is not None:
+        ratio_candidates.add(good_pump_ratio_median)
     for min_rvol in (0.0, 0.5, 1.0, 1.5, 2.0):
-        for max_gap in (0.5, 1.0, 2.0, 3.0, 5.0, 10.0):
-            config = {"min_rvol": min_rvol, "max_gap_magnitude": max_gap}
+        for max_gap in sorted(ratio_candidates):
+            config = {"min_rvol": min_rvol, "max_kraken_gap_ratio": max_gap}
             metrics = evaluate(config)
             candidates.append({"config": config, **metrics})
     eligible = [candidate for candidate in candidates if candidate["score"] is not None]
     eligible.sort(key=lambda item: (item["score"], item["validation"]["median_max_multiple"] or 0, item["validation"]["samples"]), reverse=True)
 
     recommendation = None
-    if eligible:
-        best_score = eligible[0]["score"]
-        equivalent = [item for item in eligible if item["score"] >= best_score - OPPO_OPTIMIZER_SCORE_EQUIVALENCE]
+    ratio_capped_eligible = [
+        item for item in eligible
+        if good_pump_ratio_median is not None
+        and item["config"]["max_kraken_gap_ratio"] <= good_pump_ratio_median
+    ]
+    if ratio_capped_eligible:
+        best_score = ratio_capped_eligible[0]["score"]
+        equivalent = [item for item in ratio_capped_eligible if item["score"] >= best_score - OPPO_OPTIMIZER_SCORE_EQUIVALENCE]
         max_coverage = max(item["validation"]["samples"] for item in equivalent)
         coverage_floor = max(OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, math.ceil(max_coverage * 0.80))
         conservative = [item for item in equivalent if item["validation"]["samples"] >= coverage_floor]
         recommendation = min(
             conservative,
-            key=lambda item: (item["config"]["max_gap_magnitude"], -item["config"]["min_rvol"], -item["score"]),
+            key=lambda item: (item["config"]["max_kraken_gap_ratio"], -item["config"]["min_rvol"], -item["score"]),
         )
 
-    current_config = {"min_rvol": 0.0, "max_gap_magnitude": OPPO_GAP_MAG}
+    current_config = {"min_rvol": 0.0, "max_kraken_gap_ratio": OPPO_GAP_MAG}
     result.update({
         "ready": recommendation is not None,
+        "readiness_reason": None if recommendation is not None else "collecting enough samples below the good-pump median Kraken gap ratio",
         "candidate_count": len(eligible),
+        "ratio_capped_candidate_count": len(ratio_capped_eligible),
         "evaluated_candidate_count": len(candidates),
         "recommendation": recommendation,
         "candidates": candidates,
@@ -932,6 +971,9 @@ def _optimizer_history_row(optimizer, asset, snapshot, now):
         "current_validation_average_max_multiple": current_validation.get("average_max_multiple"),
         "current_validation_median_max_multiple": current_validation.get("median_max_multiple"),
         "current_validation_highest_max_multiple": current_validation.get("highest_max_multiple"),
+        "good_pump_entry_ratio_samples": snapshot.get("good_pump_entry_ratio_samples"),
+        "good_pump_entry_ratio_average": snapshot.get("good_pump_entry_ratio_average"),
+        "good_pump_entry_ratio_median": snapshot.get("good_pump_entry_ratio_median"),
         "candidate_count": snapshot.get("candidate_count"),
         "score": recommendation.get("score"),
     }
@@ -984,7 +1026,7 @@ def _get_pump_kraken_snapshot(asset):
     c_live = live_close.get(asset)
     kraken_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
     gap_unit = c_open * GAP_SWING.get(asset, 0.001) if c_open > 0 else 0.0
-    kraken_gap_magnitude = round(kraken_gap / gap_unit, 4) if kraken_gap is not None and gap_unit > 0 else None
+    kraken_gap_ratio = round(kraken_gap / gap_unit, 4) if kraken_gap is not None and gap_unit > 0 else None
     try:
         _, _, cvd_slope = get_cvd_snapshot(asset)
     except Exception:
@@ -993,7 +1035,7 @@ def _get_pump_kraken_snapshot(asset):
     rvol = vol.get("rvol") if vol else None
     return {
         "kraken_gap": kraken_gap,
-        "kraken_gap_magnitude": kraken_gap_magnitude,
+        "kraken_gap_ratio": kraken_gap_ratio,
         "cvd_slope": round(float(cvd_slope), 6) if cvd_slope is not None else None,
         "rvol": round(float(rvol), 3) if rvol is not None else None,
     }
@@ -1050,14 +1092,14 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "max_price": round(float(tracker.get("max_price", 0.0)), 4),
         "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
         "kraken_gap": tracker.get("kraken_gap"),
-        "kraken_gap_magnitude": tracker.get("kraken_gap_magnitude"),
+        "kraken_gap_ratio": tracker.get("kraken_gap_ratio"),
         "cvd_slope": tracker.get("cvd_slope"),
         "rvol": tracker.get("rvol"),
         "entry_at": tracker.get("entry_at", tracker.get("started_at")),
         "entry_ts": tracker.get("entry_ts"),
         "observation_secs": round(max(0.0, time.time() - float(tracker.get("entry_ts", time.time()))), 2),
         "price_updates": int(tracker.get("price_updates", 0)),
-        "entry_gap_magnitude": tracker.get("entry_gap_magnitude", tracker.get("kraken_gap_magnitude")),
+        "entry_kraken_gap_ratio": tracker.get("entry_kraken_gap_ratio", tracker.get("kraken_gap_ratio")),
         "entry_cvd_slope": tracker.get("entry_cvd_slope", tracker.get("cvd_slope")),
         "entry_rvol": tracker.get("entry_rvol", tracker.get("rvol")),
         "status": status or tracker.get("status", "TRACKING"),
@@ -1114,7 +1156,7 @@ def _refresh_pump_tracker_price(key, tracker):
             tracker["entry_at"] = datetime.now().strftime("%H:%M:%S")
             tracker["entry_ts"] = time.time()
             tracker["price_updates"] = 1
-            tracker["entry_gap_magnitude"] = entry_snapshot.get("kraken_gap_magnitude")
+            tracker["entry_kraken_gap_ratio"] = entry_snapshot.get("kraken_gap_ratio")
             tracker["entry_cvd_slope"] = entry_snapshot.get("cvd_slope")
             tracker["entry_rvol"] = entry_snapshot.get("rvol")
         trough = float(tracker.get("trough", 0.0))
@@ -1174,7 +1216,7 @@ def update_pump_trackers(window_start, secs_into):
                         "entry_at": datetime.now().strftime("%H:%M:%S"),
                         "entry_ts": time.time(),
                         "price_updates": 1,
-                        "entry_gap_magnitude": entry_snapshot.get("kraken_gap_magnitude"),
+                        "entry_kraken_gap_ratio": entry_snapshot.get("kraken_gap_ratio"),
                         "entry_cvd_slope": entry_snapshot.get("cvd_slope"),
                         "entry_rvol": entry_snapshot.get("rvol"),
                         **entry_snapshot,
@@ -1662,7 +1704,7 @@ def force_sell_gap_triggered(asset, secs_into):
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
                   is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False,
-                  entry_rvol=None, entry_gap_magnitude=None, entry_rebound_ratio=None,
+                  entry_rvol=None, entry_kraken_gap_ratio=None, entry_rebound_ratio=None,
                   entry_cvd_slope=None, is_golden_oppo=False):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     if filled_shares is not None and filled_shares > 0:
@@ -1741,7 +1783,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "window_start":         window_start,
         "is_simulated":         is_simulated,
         "entry_rvol":           round(float(entry_rvol), 3) if entry_rvol is not None else None,
-        "entry_gap_magnitude":   round(float(entry_gap_magnitude), 3) if entry_gap_magnitude is not None else None,
+        "entry_kraken_gap_ratio":   round(float(entry_kraken_gap_ratio), 3) if entry_kraken_gap_ratio is not None else None,
         "entry_rebound_ratio":   round(float(entry_rebound_ratio), 3) if entry_rebound_ratio is not None else None,
         "entry_cvd_slope":       round(float(entry_cvd_slope), 6) if entry_cvd_slope is not None else None,
         "is_golden_oppo":        bool(is_golden_oppo),
@@ -2807,7 +2849,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
 
                 base_gap = c_open * GAP_SWING.get(opp_asset, 0.001) if c_open > 0 else None
-                entry_gap_magnitude = actual_gap / base_gap if base_gap and base_gap > 0 else None
+                entry_kraken_gap_ratio = actual_gap / base_gap if base_gap and base_gap > 0 else None
                 _, _, entry_cvd_slope = get_cvd_snapshot(opp_asset)
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
@@ -2819,7 +2861,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")),
                                   buy_amount=oppo_buy_amount,
                                   entry_rvol=entry_rvol,
-                                  entry_gap_magnitude=entry_gap_magnitude,
+                                  entry_kraken_gap_ratio=entry_kraken_gap_ratio,
                                   entry_rebound_ratio=rebound_ratio,
                                   entry_cvd_slope=entry_cvd_slope,
                                   is_golden_oppo=golden_opportunity)
@@ -3124,13 +3166,13 @@ def _build_state_snapshot():
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
-                "kraken_gap_magnitude": round(float(v["kraken_gap_magnitude"]), 4) if v.get("kraken_gap_magnitude") is not None else None,
+                "kraken_gap_ratio": round(float(v["kraken_gap_ratio"]), 4) if v.get("kraken_gap_ratio") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
                 "entry_at": v.get("entry_at", v.get("started_at", "")),
                 "entry_ts": v.get("entry_ts"),
                 "price_updates": int(v.get("price_updates", 0)),
-                "entry_gap_magnitude": round(float(v["entry_gap_magnitude"]), 4) if v.get("entry_gap_magnitude") is not None else None,
+                "entry_kraken_gap_ratio": round(float(v["entry_kraken_gap_ratio"]), 4) if v.get("entry_kraken_gap_ratio") is not None else None,
                 "entry_cvd_slope": round(float(v["entry_cvd_slope"]), 6) if v.get("entry_cvd_slope") is not None else None,
                 "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
@@ -3625,14 +3667,15 @@ function render(s){
 
   const oto=oppoTradeOptimizer||{},otr=oto.recommendation||{},otc=otr.config||{},otv=otr.validation||{},otcur=oto.current||{},otcv=otcur.validation||{};
   const oppoOptimizerRecommendation=oto.ready
-    ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · gap &lt; x${Number(otc.max_gap_magnitude).toFixed(1)}`
+    ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · Kraken gap ratio &lt; x${Number(otc.max_kraken_gap_ratio).toFixed(1)}`
     : `not ready · ${oto.readiness_reason||'collecting pump traces'}`;
   const oppoOptimizerValidation=otv.samples!=null?`median ${Number(otv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otv.no_pump_rate||0)*100).toFixed(0)}% · ${otv.samples} samples`:'—';
   const oppoOptimizerCurrent=otcv.samples!=null?`median ${Number(otcv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otcv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otcv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otcv.no_pump_rate||0)*100).toFixed(0)}% · ${otcv.samples} samples`:'—';
   const optimizerDataset=oto.dataset_validation||{};
   const optimizerExclusions=Object.entries(oto.quality_exclusions||{}).map(([k,v])=>`${k} ${v}`).join(', ')||'none';
   const optimizerOutcomeWarning=oto.outcome_warning?` · warning: ${oto.outcome_warning}`:'';
-  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}${optimizerOutcomeWarning}`;
+  const ratioStats=oto.good_pump_entry_ratio_median!=null?` · good-pump entry Kraken gap ratio median x${Number(oto.good_pump_entry_ratio_median).toFixed(2)} / average x${Number(oto.good_pump_entry_ratio_average||0).toFixed(2)}`:'';
+  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}${ratioStats}${optimizerOutcomeWarning}`;
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3816,7 +3859,7 @@ function render(s){
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass / flexi</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15); below threshold → $${cfg.flexi_rvol_buy_amount||1} flexi order</td></tr>
-        <tr><td>OPPO gap guards</td><td>Normal magnitude x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden magnitude</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — golden blocks when current Kraken gap reaches this threshold</td></tr>
+        <tr><td>OPPO gap guards</td><td>Normal Kraken gap ratio x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden Kraken gap ratio</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — golden blocks when current Kraken gap reaches this threshold</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -3910,7 +3953,8 @@ def _optimizer_history_csv_bytes():
     import csv
     columns = [
         "timestamp", "optimizer", "asset", "lookback", "min_high", "threshold",
-        "gap_magnitude", "min_rvol", "max_gap_magnitude", "min_rebound_ratio",
+        "gap_magnitude", "min_rvol", "max_kraken_gap_ratio", "min_rebound_ratio",
+        "good_pump_entry_ratio_samples", "good_pump_entry_ratio_average", "good_pump_entry_ratio_median",
         "train_samples", "train_wins", "train_rate", "train_pnl",
         "validation_samples", "validation_wins", "validation_rate", "validation_pnl",
         "validation_average_max_multiple", "validation_median_max_multiple", "validation_highest_max_multiple",
@@ -3934,7 +3978,7 @@ def _optimizer_configs_csv_bytes():
     import csv
     snapshot = _build_oppo_trade_optimizer_snapshot()
     columns = [
-        "rank", "recommended", "min_rvol", "max_gap_magnitude", "score", "confidence", "stability_penalty",
+        "rank", "recommended", "min_rvol", "max_kraken_gap_ratio", "good_pump_entry_ratio_median", "good_pump_entry_ratio_average", "good_pump_entry_ratio_samples", "score", "confidence", "stability_penalty",
         "train_samples", "train_median", "train_trimmed_average", "train_no_pump_rate", "train_weak_pumps", "train_weak_pump_rate", "train_rate_2x", "train_rate_4x",
         "validation_samples", "validation_median", "validation_trimmed_average", "validation_capped_average", "validation_weak_pumps", "validation_weak_pump_rate",
         "validation_highest", "validation_no_pump_rate", "validation_rate_1_5x", "validation_rate_2x",
@@ -3950,7 +3994,11 @@ def _optimizer_configs_csv_bytes():
         config, train, validation = candidate.get("config", {}), candidate.get("train", {}), candidate.get("validation", {})
         writer.writerow({
             "rank": rank, "recommended": config == recommended, "min_rvol": config.get("min_rvol"),
-            "max_gap_magnitude": config.get("max_gap_magnitude"), "score": candidate.get("score"),
+            "max_kraken_gap_ratio": config.get("max_kraken_gap_ratio"),
+            "good_pump_entry_ratio_median": snapshot.get("good_pump_entry_ratio_median"),
+            "good_pump_entry_ratio_average": snapshot.get("good_pump_entry_ratio_average"),
+            "good_pump_entry_ratio_samples": snapshot.get("good_pump_entry_ratio_samples"),
+            "score": candidate.get("score"),
             "confidence": candidate.get("confidence"), "stability_penalty": candidate.get("stability_penalty"),
             "train_samples": train.get("samples"), "train_median": train.get("median_max_multiple"),
             "train_trimmed_average": train.get("trimmed_average_max_multiple"), "train_no_pump_rate": train.get("no_pump_rate"),
@@ -3973,14 +4021,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_magnitude", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_gap_magnitude", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_ratio", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_kraken_gap_ratio", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
-            e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_magnitude", ""), e.get("cvd_slope", ""),
-            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_gap_magnitude", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
+            e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_ratio", ""), e.get("cvd_slope", ""),
+            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_kraken_gap_ratio", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
