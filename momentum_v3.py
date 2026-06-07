@@ -33,6 +33,18 @@ Requirements:
     OPPO_COUNTER_SELL_MULTIPLIER=1.4
     OPPO_COUNTER_SELL_CAP=0.94
     OPPO_COUNTER_CUT_LOSS_PCT=0.60
+    OPPO_GOLDEN_GAP_MAG=3.0
+    OPPO_OPTIMIZER_ENABLED=true
+    OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES=8
+    OPPO_TRADE_OPTIMIZER_ENABLED=true
+    OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES=5
+    OPPO_OPTIMIZER_MIN_OBSERVATION_SECS=60
+    OPPO_OPTIMIZER_MIN_PRICE_UPDATES=5
+    OPPO_OPTIMIZER_MAX_MULTIPLE_CAP=10
+    OPPO_OPTIMIZER_NO_PUMP_MULTIPLE=1.1
+    OPPO_OPTIMIZER_HISTORY_HOURS=24
+    OPPO_OPTIMIZER_HISTORY_REFRESH_SECS=60
+    OPPO_OPTIMIZER_SCORE_EQUIVALENCE=0.10
 """
 
 import os
@@ -89,6 +101,8 @@ from kraken_ws import (
     get_ema_snapshot,
     get_candle_history,
     get_volume_snapshot,
+    get_rvol_reversal_snapshot,
+    get_golden_optimizer_snapshot,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -213,6 +227,7 @@ OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.10"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.20"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
+OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "3.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
@@ -236,6 +251,23 @@ VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "true").lower() == "true"
+OPPO_GOLDEN_RVOL_ENABLED = os.getenv("OPPO_GOLDEN_RVOL_ENABLED", "true").lower() == "true"
+OPPO_GOLDEN_RVOL_LOOKBACK = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_LOOKBACK", "3")))
+OPPO_GOLDEN_RVOL_MIN_HIGH = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_MIN_HIGH", "2")))
+OPPO_GOLDEN_RVOL_THRESHOLD = float(os.getenv("OPPO_GOLDEN_RVOL_THRESHOLD", "1.0"))
+OPPO_GOLDEN_MIN_PROBABILITY = float(os.getenv("OPPO_GOLDEN_MIN_PROBABILITY", "0.5"))
+OPPO_GOLDEN_MIN_SAMPLES = max(0, int(os.getenv("OPPO_GOLDEN_MIN_SAMPLES", "5")))
+OPPO_OPTIMIZER_ENABLED = os.getenv("OPPO_OPTIMIZER_ENABLED", "true").lower() == "true"
+OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES = max(1, int(os.getenv("OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES", "8")))
+OPPO_TRADE_OPTIMIZER_ENABLED = os.getenv("OPPO_TRADE_OPTIMIZER_ENABLED", "true").lower() == "true"
+OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES = max(1, int(os.getenv("OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES", "5")))
+OPPO_OPTIMIZER_MIN_OBSERVATION_SECS = max(0, int(os.getenv("OPPO_OPTIMIZER_MIN_OBSERVATION_SECS", "60")))
+OPPO_OPTIMIZER_MIN_PRICE_UPDATES = max(1, int(os.getenv("OPPO_OPTIMIZER_MIN_PRICE_UPDATES", "5")))
+OPPO_OPTIMIZER_MAX_MULTIPLE_CAP = max(1.0, float(os.getenv("OPPO_OPTIMIZER_MAX_MULTIPLE_CAP", "10")))
+OPPO_OPTIMIZER_NO_PUMP_MULTIPLE = max(1.0, float(os.getenv("OPPO_OPTIMIZER_NO_PUMP_MULTIPLE", "1.1")))
+OPPO_OPTIMIZER_HISTORY_HOURS = max(1, int(os.getenv("OPPO_OPTIMIZER_HISTORY_HOURS", "24")))
+OPPO_OPTIMIZER_HISTORY_REFRESH_SECS = max(10, int(os.getenv("OPPO_OPTIMIZER_HISTORY_REFRESH_SECS", "60")))
+OPPO_OPTIMIZER_SCORE_EQUIVALENCE = max(0.0, float(os.getenv("OPPO_OPTIMIZER_SCORE_EQUIVALENCE", "0.10")))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -259,7 +291,7 @@ PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.10"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
 PUMP_TRACK_MILESTONES = (2, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
-gap_mag_vol = 1.0
+PUMP_TRACK_WINDOW_SECS = WINDOW_SECS
 
 
 
@@ -301,12 +333,24 @@ def validate_settings():
         errors.append("OPPO_COUNTER_CUT_LOSS_PCT must be between 0 and 1")
     if OPPO_FALLING_KNIFE_MIN_MOVE <= 0:
         errors.append("OPPO_FALLING_KNIFE_MIN_MOVE must be > 0")
+    if OPPO_GAP_MAG <= 0:
+        errors.append("OPPO_GAP_MAG must be > 0")
+    if OPPO_GOLDEN_GAP_MAG <= 0:
+        errors.append("OPPO_GOLDEN_GAP_MAG must be > 0")
     if PUMP_TRACK_SUCCESS_MIN_MULTIPLE <= 0:
         errors.append("PUMP_TRACK_SUCCESS_MIN_MULTIPLE must be > 0")
+    if OPPO_OPTIMIZER_MAX_MULTIPLE_CAP < OPPO_OPTIMIZER_NO_PUMP_MULTIPLE:
+        errors.append("OPPO_OPTIMIZER_MAX_MULTIPLE_CAP must be >= OPPO_OPTIMIZER_NO_PUMP_MULTIPLE")
     if VOLUME_AVG_PERIOD <= 0:
         errors.append("VOLUME_AVG_PERIOD must be > 0")
     if RVOL_MIN_PER_MIN <= 0:
         errors.append("RVOL_MIN_PER_MIN must be > 0")
+    if OPPO_GOLDEN_RVOL_MIN_HIGH > OPPO_GOLDEN_RVOL_LOOKBACK:
+        errors.append("OPPO_GOLDEN_RVOL_MIN_HIGH must be <= OPPO_GOLDEN_RVOL_LOOKBACK")
+    if OPPO_GOLDEN_RVOL_THRESHOLD <= 0:
+        errors.append("OPPO_GOLDEN_RVOL_THRESHOLD must be > 0")
+    if not 0 <= OPPO_GOLDEN_MIN_PROBABILITY <= 1:
+        errors.append("OPPO_GOLDEN_MIN_PROBABILITY must be between 0 and 1")
     if errors:
         for err in errors:
             log.error("[CONFIG] %s", err)
@@ -330,8 +374,6 @@ gap_wait            = {}   # asset -> {triggered_at, key, token, price}
 peak_gap            = {}   # asset -> float, highest gap seen this window
 armed_logged       = False
 last_entry_ts       = {}   # asset -> unix seconds of last buy
-skip_buy_until_window = None  # window_start ts (exclusive): skip buys until this window start
-skip_log_window = None        # throttle skip log to once per window
 normal_blacklisted_assets = set()  # assets blacklisted for normal buys this window
 oppo_dead_zone_blacklisted_assets = set()  # assets whose OPPO price hit dead-zone this window
 oppo_rvol_blacklisted_assets = set()  # assets blocked by OPPO RVOL guard this window
@@ -404,6 +446,8 @@ oppo_trigger_log   = []
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
 pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
+optimizer_recommendation_history = []  # config changes retained for CSV export
+optimizer_history_last_refresh = 0.0
 last_pnl_snapshot  = 0
 ema_history = {a: deque(maxlen=120) for a in ASSETS}
 cvd_history = {a: deque(maxlen=120) for a in ASSETS}
@@ -425,7 +469,7 @@ STATE_FILE = "bot_state.json"
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -444,21 +488,23 @@ def load_state():
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
         }
         pump_log      = saved.get("pump_log", [])
+        optimizer_recommendation_history = saved.get("optimizer_recommendation_history", [])
+        _prune_optimizer_recommendation_history()
         pump_finished_tracker_keys = _finished_pump_keys_from_log(pump_log)
         if pnl_history:
             last_pnl_snapshot = time.time()
         log.info(
             "[STATE] Restored — buys=%d  wins=%d  losses=%d  pnl=$%.4f  "
-            "trades=%d  pumps=%d  pnl_pts=%d",
+            "trades=%d  pumps=%d  optimizer_changes=%d  pnl_pts=%d",
             stats["buys"], stats["wins"], stats["losses"], stats["pnl"],
-            len(trade_log), len(pump_log), len(pnl_history),
+            len(trade_log), len(pump_log), len(optimizer_recommendation_history), len(pnl_history),
         )
     except Exception as e:
         log.warning("[STATE] Load failed: %s — starting fresh", e)
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, ema_history, cvd_history
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
@@ -466,6 +512,7 @@ def reset_state():
     oppo_trigger_log = []
     pump_tracker = {}
     pump_log = []
+    optimizer_recommendation_history = []
     pump_finished_tracker_keys = set()
     normal_blacklisted_assets.clear()
     oppo_dead_zone_blacklisted_assets.clear()
@@ -571,13 +618,21 @@ def save_state():
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
+                "kraken_gap_magnitude": round(float(v["kraken_gap_magnitude"]), 4) if v.get("kraken_gap_magnitude") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "entry_at": v.get("entry_at", v.get("started_at", "")),
+                "entry_ts": v.get("entry_ts"),
+                "price_updates": int(v.get("price_updates", 0)),
+                "entry_gap_magnitude": round(float(v["entry_gap_magnitude"]), 4) if v.get("entry_gap_magnitude") is not None else None,
+                "entry_cvd_slope": round(float(v["entry_cvd_slope"]), 6) if v.get("entry_cvd_slope") is not None else None,
+                "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -601,6 +656,8 @@ def save_state():
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
+            "oppo_gap_mag": OPPO_GAP_MAG,
+            "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -619,7 +676,23 @@ def save_state():
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+            "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
+            "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
+            "oppo_optimizer_enabled": OPPO_OPTIMIZER_ENABLED,
+            "oppo_optimizer_min_validation_samples": OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            "oppo_trade_optimizer_enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+            "oppo_trade_optimizer_min_validation_trades": OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES,
+            "oppo_optimizer_min_observation_secs": OPPO_OPTIMIZER_MIN_OBSERVATION_SECS,
+            "oppo_optimizer_min_price_updates": OPPO_OPTIMIZER_MIN_PRICE_UPDATES,
+            "oppo_optimizer_max_multiple_cap": OPPO_OPTIMIZER_MAX_MULTIPLE_CAP,
+            "oppo_optimizer_no_pump_multiple": OPPO_OPTIMIZER_NO_PUMP_MULTIPLE,
+            "oppo_optimizer_history_hours": OPPO_OPTIMIZER_HISTORY_HOURS,
+            "oppo_optimizer_score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_window_secs": PUMP_TRACK_WINDOW_SECS,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
@@ -659,8 +732,13 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_flip":  pos.get("is_flip", False),
         "is_rebound": pos.get("is_rebound", False),
         "is_counter": pos.get("is_counter", False),
+        "is_oppo": pos.get("is_oppo", key.endswith("_oppo")),
+        "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
         "pnl":      round(pnl, 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_gap_magnitude": pos.get("entry_gap_magnitude"),
+        "entry_rebound_ratio": pos.get("entry_rebound_ratio"),
+        "entry_cvd_slope": pos.get("entry_cvd_slope"),
     }
     trade_log.insert(0, record)
     if len(trade_log) > 200:
@@ -668,11 +746,244 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 
+def _build_oppo_trade_optimizer_snapshot():
+    """Recommend robust standard OPPO filters from completed full-window pump traces."""
+    completed = [event for event in reversed(pump_log) if event.get("status") in ("SUCCESS", "FAILED")]
+
+    def quality_reason(event):
+        if event.get("entry_rvol") is None or event.get("entry_gap_magnitude") is None:
+            return "missing-entry-metrics"
+        if float(event.get("max_multiple", 0.0) or 0.0) <= 0:
+            return "invalid-multiple"
+        # Legacy rows without quality counters remain usable. Full-window traces and
+        # genuine fast failures remain negative evidence; under-observed rows do not.
+        if event.get("observation_secs") is not None and float(event["observation_secs"]) < OPPO_OPTIMIZER_MIN_OBSERVATION_SECS:
+            return "short-observation"
+        if event.get("price_updates") is not None and int(event["price_updates"]) < OPPO_OPTIMIZER_MIN_PRICE_UPDATES:
+            return "few-price-updates"
+        return None
+
+    quality_exclusions = {}
+    samples = []
+    for event in completed:
+        reason = quality_reason(event)
+        if reason:
+            quality_exclusions[reason] = quality_exclusions.get(reason, 0) + 1
+        else:
+            samples.append(event)
+    result = {
+        "mode": "shadow-recommend-only",
+        "enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+        "ready": False,
+        "samples": len(samples),
+        "trades": len(samples),
+        "quality_excluded": len(completed) - len(samples),
+        "quality_exclusions": quality_exclusions,
+        "note": "Full-window pump traces; robust score penalizes no-pumps, outliers, sparse samples, and train/validation instability",
+    }
+    if not OPPO_TRADE_OPTIMIZER_ENABLED:
+        result["readiness_reason"] = "optimizer disabled"
+        return result
+    if len(samples) < OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES * 2:
+        result["readiness_reason"] = "collecting more quality pump traces"
+        return result
+    validation_start = max(1, int(len(samples) * 0.70))
+
+    def summarize(multiples):
+        capped = [min(value, OPPO_OPTIMIZER_MAX_MULTIPLE_CAP) for value in multiples]
+        ordered = sorted(capped)
+        trim = int(len(ordered) * 0.10) if len(ordered) >= 10 else 0
+        trimmed = ordered[trim:len(ordered) - trim] if trim else ordered
+        rate = lambda threshold: sum(value >= threshold for value in multiples) / len(multiples) if multiples else None
+        no_pumps = sum(value < OPPO_OPTIMIZER_NO_PUMP_MULTIPLE for value in multiples)
+        weak_pumps = sum(value < PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples)
+        return {
+            "samples": len(multiples), "trades": len(multiples),
+            "wins": sum(value >= PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples),
+            "good_pumps": sum(value >= PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples),
+            "weak_pumps": weak_pumps, "weak_pump_rate": weak_pumps / len(multiples) if multiples else None,
+            "rate": rate(PUMP_TRACK_SUCCESS_MIN_MULTIPLE), "win_rate": rate(PUMP_TRACK_SUCCESS_MIN_MULTIPLE),
+            "rate_1_5x": rate(1.5), "rate_2x": rate(2.0), "rate_3x": rate(3.0),
+            "rate_4x": rate(4.0), "rate_5x": rate(5.0),
+            "no_pumps": no_pumps, "no_pump_rate": no_pumps / len(multiples) if multiples else None,
+            "average_max_multiple": round(sum(multiples) / len(multiples), 4) if multiples else None,
+            "capped_average_max_multiple": round(sum(capped) / len(capped), 4) if capped else None,
+            "trimmed_average_max_multiple": round(sum(trimmed) / len(trimmed), 4) if trimmed else None,
+            "median_max_multiple": round(float(np.median(multiples)), 4) if multiples else None,
+            "highest_max_multiple": round(max(multiples), 4) if multiples else None,
+        }
+
+    dataset_train = summarize([float(sample["max_multiple"]) for sample in samples[:validation_start]])
+    dataset_validation = summarize([float(sample["max_multiple"]) for sample in samples[validation_start:]])
+    outcome_diverse = bool(dataset_validation["weak_pumps"])
+    result.update({
+        "dataset_train": dataset_train,
+        "dataset_validation": dataset_validation,
+        "outcome_diverse": outcome_diverse,
+        "readiness_reason": None if outcome_diverse else "validation data has no weak/failed pumps below 2x",
+    })
+
+    def evaluate(config):
+        sections = {"train": [], "validation": []}
+        for index, sample in enumerate(samples):
+            if float(sample["entry_rvol"]) < config["min_rvol"] or float(sample["entry_gap_magnitude"]) >= config["max_gap_magnitude"]:
+                continue
+            sections["validation" if index >= validation_start else "train"].append(float(sample["max_multiple"]))
+        metrics = {name: summarize(values) for name, values in sections.items()}
+        train, val = metrics["train"], metrics["validation"]
+        if val["samples"] < OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES:
+            metrics["score"] = None
+            return metrics
+        confidence = min(1.0, val["samples"] / (OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES * 2))
+        stability_penalty = abs((train["median_max_multiple"] or 0) - (val["median_max_multiple"] or 0)) * 0.5
+        stability_penalty += abs((train["rate_2x"] or 0) - (val["rate_2x"] or 0))
+        metrics["confidence"] = round(confidence, 4)
+        metrics["stability_penalty"] = round(stability_penalty, 4)
+        metrics["score"] = round(
+            0.35 * val["median_max_multiple"]
+            + 0.25 * val["trimmed_average_max_multiple"]
+            + 0.20 * val["rate_2x"]
+            + 0.10 * val["rate_4x"]
+            + 0.10 * confidence
+            - val["no_pump_rate"]
+            - stability_penalty,
+            6,
+        )
+        return metrics
+
+    candidates = []
+    for min_rvol in (0.0, 0.5, 1.0, 1.5, 2.0):
+        for max_gap in (0.5, 1.0, 2.0, 3.0, 5.0, 10.0):
+            config = {"min_rvol": min_rvol, "max_gap_magnitude": max_gap}
+            metrics = evaluate(config)
+            candidates.append({"config": config, **metrics})
+    eligible = [candidate for candidate in candidates if candidate["score"] is not None]
+    eligible.sort(key=lambda item: (item["score"], item["validation"]["median_max_multiple"] or 0, item["validation"]["samples"]), reverse=True)
+
+    recommendation = None
+    if eligible and outcome_diverse:
+        best_score = eligible[0]["score"]
+        equivalent = [item for item in eligible if item["score"] >= best_score - OPPO_OPTIMIZER_SCORE_EQUIVALENCE]
+        max_coverage = max(item["validation"]["samples"] for item in equivalent)
+        coverage_floor = max(OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, math.ceil(max_coverage * 0.80))
+        conservative = [item for item in equivalent if item["validation"]["samples"] >= coverage_floor]
+        recommendation = min(
+            conservative,
+            key=lambda item: (item["config"]["max_gap_magnitude"], -item["config"]["min_rvol"], -item["score"]),
+        )
+
+    current_config = {"min_rvol": 0.0, "max_gap_magnitude": OPPO_GAP_MAG}
+    result.update({
+        "ready": recommendation is not None,
+        "candidate_count": len(eligible),
+        "evaluated_candidate_count": len(candidates),
+        "recommendation": recommendation,
+        "candidates": candidates,
+        "current": {"config": current_config, **evaluate(current_config)},
+        "score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
+    })
+    return result
+
+
+def _prune_optimizer_recommendation_history(now=None):
+    """Keep only the configured rolling recommendation-history window."""
+    global optimizer_recommendation_history
+    cutoff = float(now if now is not None else time.time()) - (OPPO_OPTIMIZER_HISTORY_HOURS * 3600)
+    optimizer_recommendation_history = [
+        row for row in optimizer_recommendation_history
+        if float(row.get("timestamp_unix", 0) or 0) >= cutoff
+    ]
+
+
+def _optimizer_history_row(optimizer, asset, snapshot, now):
+    recommendation = snapshot.get("recommendation") or {}
+    config = recommendation.get("config") or {}
+    train = recommendation.get("train") or {}
+    validation = recommendation.get("validation") or {}
+    current = snapshot.get("current") or {}
+    current_train = current.get("train") or {}
+    current_validation = current.get("validation") or {}
+    return {
+        "timestamp": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+        "timestamp_unix": float(now),
+        "optimizer": optimizer,
+        "asset": asset,
+        "config": dict(config),
+        "train_samples": train.get("samples", train.get("trades")),
+        "train_wins": train.get("wins"),
+        "train_rate": train.get("rate", train.get("win_rate")),
+        "train_pnl": train.get("pnl"),
+        "validation_samples": validation.get("samples", validation.get("trades")),
+        "validation_wins": validation.get("wins"),
+        "validation_rate": validation.get("rate", validation.get("win_rate")),
+        "validation_pnl": validation.get("pnl"),
+        "validation_average_max_multiple": validation.get("average_max_multiple"),
+        "validation_median_max_multiple": validation.get("median_max_multiple"),
+        "validation_highest_max_multiple": validation.get("highest_max_multiple"),
+        "current_train_samples": current_train.get("samples", current_train.get("trades")),
+        "current_train_wins": current_train.get("wins"),
+        "current_train_rate": current_train.get("rate", current_train.get("win_rate")),
+        "current_train_pnl": current_train.get("pnl"),
+        "current_validation_samples": current_validation.get("samples", current_validation.get("trades")),
+        "current_validation_wins": current_validation.get("wins"),
+        "current_validation_rate": current_validation.get("rate", current_validation.get("win_rate")),
+        "current_validation_pnl": current_validation.get("pnl"),
+        "current_validation_average_max_multiple": current_validation.get("average_max_multiple"),
+        "current_validation_median_max_multiple": current_validation.get("median_max_multiple"),
+        "current_validation_highest_max_multiple": current_validation.get("highest_max_multiple"),
+        "candidate_count": snapshot.get("candidate_count"),
+        "score": recommendation.get("score"),
+    }
+
+
+def _record_optimizer_recommendations(golden_optimizer, oppo_trade_optimizer, now=None):
+    """Record a row only when a ready optimizer's recommended config changes."""
+    now = float(now if now is not None else time.time())
+    _prune_optimizer_recommendation_history(now)
+    snapshots = [("golden", asset.upper(), snapshot) for asset, snapshot in golden_optimizer.items()]
+    snapshots.append(("standard", "ALL", oppo_trade_optimizer))
+    for optimizer, asset, snapshot in snapshots:
+        recommendation = snapshot.get("recommendation") if snapshot and snapshot.get("ready") else None
+        if not recommendation or not recommendation.get("config"):
+            continue
+        latest = next((
+            row for row in reversed(optimizer_recommendation_history)
+            if row.get("optimizer") == optimizer and row.get("asset") == asset
+        ), None)
+        if latest and latest.get("config") == recommendation.get("config"):
+            continue
+        optimizer_recommendation_history.append(_optimizer_history_row(optimizer, asset, snapshot, now))
+
+
+def _refresh_optimizer_recommendation_history(force=False, now=None):
+    """Refresh recommendation history independently of whether the dashboard is open."""
+    global optimizer_history_last_refresh
+    now = float(now if now is not None else time.time())
+    if not force and now - optimizer_history_last_refresh < OPPO_OPTIMIZER_HISTORY_REFRESH_SECS:
+        return
+    optimizer_history_last_refresh = now
+    golden = {}
+    for asset in ASSETS:
+        golden[asset] = get_golden_optimizer_snapshot(
+            asset, VOLUME_AVG_PERIOD,
+            current={
+                "lookback": OPPO_GOLDEN_RVOL_LOOKBACK,
+                "min_high": OPPO_GOLDEN_RVOL_MIN_HIGH,
+                "threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+                "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
+            },
+            min_validation_samples=OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+        ) if OPPO_OPTIMIZER_ENABLED else {"mode": "off", "ready": False}
+    _record_optimizer_recommendations(golden, _build_oppo_trade_optimizer_snapshot(), now)
+
+
 def _get_pump_kraken_snapshot(asset):
     """Return the latest Kraken gap plus Kraken CVD slope and RVOL for pump tracking."""
     c_open = candle_open.get(asset, 0.0)
     c_live = live_close.get(asset)
     kraken_gap = round(abs(c_live - c_open), 4) if c_open > 0 and c_live is not None else None
+    gap_unit = c_open * GAP_SWING.get(asset, 0.001) if c_open > 0 else 0.0
+    kraken_gap_magnitude = round(kraken_gap / gap_unit, 4) if kraken_gap is not None and gap_unit > 0 else None
     try:
         _, _, cvd_slope = get_cvd_snapshot(asset)
     except Exception:
@@ -681,6 +992,7 @@ def _get_pump_kraken_snapshot(asset):
     rvol = vol.get("rvol") if vol else None
     return {
         "kraken_gap": kraken_gap,
+        "kraken_gap_magnitude": kraken_gap_magnitude,
         "cvd_slope": round(float(cvd_slope), 6) if cvd_slope is not None else None,
         "rvol": round(float(rvol), 3) if rvol is not None else None,
     }
@@ -737,9 +1049,18 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "max_price": round(float(tracker.get("max_price", 0.0)), 4),
         "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
         "kraken_gap": tracker.get("kraken_gap"),
+        "kraken_gap_magnitude": tracker.get("kraken_gap_magnitude"),
         "cvd_slope": tracker.get("cvd_slope"),
         "rvol": tracker.get("rvol"),
+        "entry_at": tracker.get("entry_at", tracker.get("started_at")),
+        "entry_ts": tracker.get("entry_ts"),
+        "observation_secs": round(max(0.0, time.time() - float(tracker.get("entry_ts", time.time()))), 2),
+        "price_updates": int(tracker.get("price_updates", 0)),
+        "entry_gap_magnitude": tracker.get("entry_gap_magnitude", tracker.get("kraken_gap_magnitude")),
+        "entry_cvd_slope": tracker.get("entry_cvd_slope", tracker.get("cvd_slope")),
+        "entry_rvol": tracker.get("entry_rvol", tracker.get("rvol")),
         "status": status or tracker.get("status", "TRACKING"),
+        "finish_reason": tracker.get("finish_reason"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
@@ -754,6 +1075,7 @@ def _finish_pump_tracker(key, tracker, reason="END"):
         pump_tracker.pop(key, None)
         return
     tracker["status"] = _pump_result_from_tracker(tracker)
+    tracker["finish_reason"] = reason
     pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
     log.info(
@@ -765,14 +1087,35 @@ def _finish_pump_tracker(key, tracker, reason="END"):
     pump_tracker.pop(key, None)
 
 
+def _finish_window_pump_trackers(window_start):
+    """Finalize pump traces at the market-window boundary using the latest price."""
+    for key, tracker in list(pump_tracker.items()):
+        if tracker.get("window_start") != window_start:
+            continue
+        _refresh_pump_tracker_price(key, tracker)
+        _finish_pump_tracker(key, tracker, "FULL-WINDOW")
+
+
 def _refresh_pump_tracker_price(key, tracker):
     price = live_prices.get(key)
     if price is not None and price > 0:
+        tracker["price_updates"] = int(tracker.get("price_updates", 0)) + 1
         tracker["current"] = price
         if price < float(tracker.get("trough", price)):
+            # A lower trough becomes the new possible entry. Re-snapshot its early-window
+            # conditions so any later peak multiple is matched to the conditions at its base.
+            entry_snapshot = _get_pump_kraken_snapshot(tracker.get("asset"))
             tracker["trough"] = price
             tracker["base_price"] = price
+            tracker["max_price"] = price
+            tracker["max_multiple"] = 1.0
             tracker["highest_milestone"] = 1
+            tracker["entry_at"] = datetime.now().strftime("%H:%M:%S")
+            tracker["entry_ts"] = time.time()
+            tracker["price_updates"] = 1
+            tracker["entry_gap_magnitude"] = entry_snapshot.get("kraken_gap_magnitude")
+            tracker["entry_cvd_slope"] = entry_snapshot.get("cvd_slope")
+            tracker["entry_rvol"] = entry_snapshot.get("rvol")
         trough = float(tracker.get("trough", 0.0))
         multiple = price / trough if trough > 0 else 0.0
         tracker["multiple"] = multiple
@@ -784,14 +1127,7 @@ def _refresh_pump_tracker_price(key, tracker):
 
 
 def update_pump_trackers(window_start, secs_into):
-    """Track YES/NO pumps until stop-buy, then record final success/failure."""
-    if secs_into > STOP_BUY_AT:
-        for key, tracker in list(pump_tracker.items()):
-            if tracker.get("window_start") == window_start:
-                _refresh_pump_tracker_price(key, tracker)
-                _finish_pump_tracker(key, tracker, "END")
-        return
-
+    """Track YES/NO pump opportunities for the complete 900-second market window."""
     for asset in ASSETS:
         for side in ("yes", "no"):
             key = f"{asset}_{side}"
@@ -804,16 +1140,15 @@ def update_pump_trackers(window_start, secs_into):
                 # Do not refresh stale trackers with a new window's live price.
                 _finish_pump_tracker(key, tracker, "END")
                 tracker = None
-            if price < PUMP_TRACK_DEAD_ZONE_PRICE:
-                if tracker:
-                    _refresh_pump_tracker_price(key, tracker)
-                    _finish_pump_tracker(key, tracker, "DEAD-ZONE")
-                continue
-
+            # Once tracking starts, keep following the opportunity through the
+            # complete window even if it falls below the trading dead zone. A fast
+            # collapse is valuable negative evidence and a later recovery still
+            # belongs to this window's pump path.
             if tracker is None:
                 if _pump_tracker_already_finished(window_start, key):
                     continue
                 if PUMP_TRACK_DEAD_ZONE_PRICE <= price < PUMP_TRACK_START_PRICE:
+                    entry_snapshot = _get_pump_kraken_snapshot(asset)
                     pump_tracker[key] = {
                         "asset": asset,
                         "side": side,
@@ -827,7 +1162,13 @@ def update_pump_trackers(window_start, secs_into):
                         "max_multiple": 1.0,
                         "status": "TRACKING",
                         "highest_milestone": 1,
-                        **_get_pump_kraken_snapshot(asset),
+                        "entry_at": datetime.now().strftime("%H:%M:%S"),
+                        "entry_ts": time.time(),
+                        "price_updates": 1,
+                        "entry_gap_magnitude": entry_snapshot.get("kraken_gap_magnitude"),
+                        "entry_cvd_slope": entry_snapshot.get("cvd_slope"),
+                        "entry_rvol": entry_snapshot.get("rvol"),
+                        **entry_snapshot,
                     }
                 continue
 
@@ -890,6 +1231,24 @@ def blacklist_oppo_dead_zone_asset(asset, side, price):
         "[OPPO-DEAD-ZONE] %s price=%.4f <= %.4f — blacklisted asset for current window and cleared OPPO tracking",
         opp_key, price, OPPO_DEAD_ZONE,
     )
+
+
+def _oppo_golden_rvol_setup(asset, side):
+    """Return an armed fourth-window reversal setup for the requested OPPO side."""
+    snapshot = get_rvol_reversal_snapshot(
+        asset, VOLUME_AVG_PERIOD, OPPO_GOLDEN_RVOL_LOOKBACK,
+        OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_THRESHOLD,
+    )
+    probability = snapshot.get("probability")
+    probability_ok = (
+        snapshot.get("samples", 0) >= OPPO_GOLDEN_MIN_SAMPLES
+        and (probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY)
+    )
+    snapshot["qualified"] = bool(
+        OPPO_GOLDEN_RVOL_ENABLED and snapshot.get("armed")
+        and snapshot.get("side") == side and probability_ok
+    )
+    return snapshot
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
@@ -1294,7 +1653,8 @@ def force_sell_gap_triggered(asset, secs_into):
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
                   is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False,
-                  entry_rvol=None):
+                  entry_rvol=None, entry_gap_magnitude=None, entry_rebound_ratio=None,
+                  entry_cvd_slope=None, is_golden_oppo=False):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
@@ -1372,6 +1732,10 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "window_start":         window_start,
         "is_simulated":         is_simulated,
         "entry_rvol":           round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_gap_magnitude":   round(float(entry_gap_magnitude), 3) if entry_gap_magnitude is not None else None,
+        "entry_rebound_ratio":   round(float(entry_rebound_ratio), 3) if entry_rebound_ratio is not None else None,
+        "entry_cvd_slope":       round(float(entry_cvd_slope), 6) if entry_cvd_slope is not None else None,
+        "is_golden_oppo":        bool(is_golden_oppo),
     }
     base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
@@ -1955,28 +2319,6 @@ def _volatility_check(asset, secs_into):
         return True   # blocked
     return False
 
-def _extreme_gap_skip_triggered(secs_into):
-    """
-    Returns True if any asset has gap > (threshold * 15).
-    Uses a simple gap magnitude volume (gap_mag_vol = 1.0) and does not
-    use the staged GAP_MAGNITUDE values.
-    """
-    
-    for asset in ASSETS:
-        c_open = candle_open.get(asset, 0.0)
-        c_live = live_close.get(asset)
-        if c_open <= 0 or c_live is None:
-            continue
-        swing = GAP_SWING.get(asset, 0.001)
-        threshold = c_open * swing * gap_mag_vol
-        actual_gap = abs(c_live - c_open)
-        if actual_gap > threshold * 10:
-            log.warning("[EXTREME-GAP] %s gap=%.4f > threshold*10=%.4f",
-                        asset.upper(), actual_gap, threshold * 10)
-            return True
-    return False
-
-
 def advance_rebound_cutloss_tracker(client, window_start, secs_into=None):
     if secs_into is None:
         secs_into = max(0, int(time.time()) - int(window_start))
@@ -2179,7 +2521,7 @@ def advance_oppo_counter_tracker(client, window_start, secs_into):
 
 
 def scan_markets(client, window_start, secs_into, server_ts, executor):
-    global _skip_first_window, _startup_window_ts, skip_buy_until_window, skip_log_window
+    global _skip_first_window, _startup_window_ts
 
     stats["scans"] += 1
 
@@ -2206,21 +2548,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         return
 
     advance_rebound_cutloss_tracker(client, window_start, secs_into)
-
-    if _extreme_gap_skip_triggered(secs_into):
-        skip_buy_until_window = window_start + (WINDOW_SECS * 2)  # this + next 3 windows
-        skip_log_window = None
-        log.warning("[BUY-SKIP-WINDOWS] Extreme gap detected — skipping buys until window %d",
-                    skip_buy_until_window)
-        return
-
-    if skip_buy_until_window is not None and window_start < skip_buy_until_window:
-        windows_left = max(0, int((skip_buy_until_window - window_start) // WINDOW_SECS))
-        if skip_log_window != window_start:
-            log.info("[BUY-SKIP] buy-disabled for %d window(s) due to prior extreme gap", windows_left)
-            skip_log_window = window_start
-        return
-
 
     # ── Startup window skip ───────────────────────────────────────────────────
     if _skip_first_window:
@@ -2328,6 +2655,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
             for opp_asset, opp_price, opp_token in low_assets:
                 opp_key = f"{opp_asset}_{side}"
+                golden_setup = _oppo_golden_rvol_setup(opp_asset, side)
+                golden_opportunity = golden_setup.get("qualified", False)
 
                 if opp_asset in traded_this_window:
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "asset already traded this window")
@@ -2335,8 +2664,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if (
                     opp_asset in oppo_dead_zone_blacklisted_assets
-                    or opp_asset in oppo_rvol_blacklisted_assets
-                    or opp_asset in oppo_knife_blacklisted_assets
+                    or (not golden_opportunity and opp_asset in oppo_rvol_blacklisted_assets)
+                    or (not golden_opportunity and opp_asset in oppo_knife_blacklisted_assets)
                 ):
                     _clear_oppo_tracking_for_asset(opp_asset)
                     continue
@@ -2375,7 +2704,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     continue
 
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
-                if falling_knife:
+                if falling_knife and not golden_opportunity:
                     pump_move = pump_peak - pump_trough
                     detail = (
                         f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; "
@@ -2411,21 +2740,26 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 c_open = candle_open.get(opp_asset, 0.0)
                 c_live = live_close.get(opp_asset)
-                if c_open > 0 and c_live is not None:
-                    actual_gap = abs(c_live - c_open)
-                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * OPPO_GAP_MAG
+                actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
+                if actual_gap is not None:
+                    gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_opportunity else OPPO_GAP_MAG
+                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * gap_magnitude
                     if actual_gap >= oppo_gap_threshold:
-                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GAP-BLOCK", f"{actual_gap:.4f}>={oppo_gap_threshold:.4f}")
-                        log.debug("[OPPO-DISCARD] %s_%s actual_gap=%.4f >= oppo_threshold=%.4f (need <)",
-                                 opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold)
-                        _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "gap-too-large")
+                        status = "GOLDEN-GAP-BLOCK" if golden_opportunity else "GAP-BLOCK"
+                        detail = f"{actual_gap:.4f}>={oppo_gap_threshold:.4f} mag={gap_magnitude:.2f}x"
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail)
+                        log.info(
+                            "[OPPO-%s] %s_%s actual_gap=%.4f >= threshold=%.4f magnitude=%.2fx",
+                            status, opp_asset.upper(), side.upper(), actual_gap, oppo_gap_threshold, gap_magnitude,
+                        )
+                        _record_oppo_trigger(opp_asset, side, opp_price, status, detail)
                         continue
 
                 if not _ema_confirms_side(opp_asset, side):
                     _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
                     continue
 
-                if CVD_OPPO_ENABLED:
+                if CVD_OPPO_ENABLED and not golden_opportunity:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
                     slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
@@ -2439,11 +2773,33 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
                     log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
 
-                rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
-                if not rvol_ok:
-                    continue
+                if golden_opportunity:
+                    rvol_snapshot = get_volume_snapshot(opp_asset, VOLUME_AVG_PERIOD, get_rvol_min(secs_into))
+                    oppo_buy_amount = BUY_AMOUNT
+                    probability = golden_setup.get("probability")
+                    probability_text = f"{probability:.1%}" if probability is not None else "n/a"
+                    prior_rvols = ",".join(f"{value:.2f}" for value in golden_setup.get("rvols", []) if value is not None)
+                    log.info(
+                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — golden gap passed; bypassing knife/CVD/current-RVOL guards",
+                        opp_asset.upper(), side.upper(), golden_setup.get("high_rvol_count", 0),
+                        OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
+                        golden_setup.get("wins", 0), golden_setup.get("samples", 0),
+                    )
+                    golden_detail = (
+                        f"{golden_setup.get('high_rvol_count', 0)}/{OPPO_GOLDEN_RVOL_LOOKBACK} high RVOL; "
+                        f"historical reversal={probability_text} ({golden_setup.get('wins', 0)}/{golden_setup.get('samples', 0)})"
+                    )
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GOLDEN", golden_detail)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "GOLDEN", golden_detail)
+                else:
+                    rvol_ok, rvol_snapshot, oppo_buy_amount = _oppo_rvol_guard_ok(opp_asset, side, opp_price, secs_into)
+                    if not rvol_ok:
+                        continue
                 entry_rvol = rvol_snapshot.get("rvol") if rvol_snapshot else None
 
+                base_gap = c_open * GAP_SWING.get(opp_asset, 0.001) if c_open > 0 else None
+                entry_gap_magnitude = actual_gap / base_gap if base_gap and base_gap > 0 else None
+                _, _, entry_cvd_slope = get_cvd_snapshot(opp_asset)
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
                 if buy["ok"]:
@@ -2453,7 +2809,11 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   window_start=window_start,
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")),
                                   buy_amount=oppo_buy_amount,
-                                  entry_rvol=entry_rvol)
+                                  entry_rvol=entry_rvol,
+                                  entry_gap_magnitude=entry_gap_magnitude,
+                                  entry_rebound_ratio=rebound_ratio,
+                                  entry_cvd_slope=entry_cvd_slope,
+                                  is_golden_oppo=golden_opportunity)
                     traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
@@ -2590,6 +2950,8 @@ def _build_state_snapshot():
     gap_threshold_out = {}
     cvd_out = {}
     volume_out = {}
+    golden_rvol_out = {}
+    golden_optimizer_out = {}
     ema_now = {}
     candle_out = {}
     for a in ASSETS:
@@ -2622,12 +2984,69 @@ def _build_state_snapshot():
             "rvol_min": float(vol.get("rvol_min", rvol_min)),
             "ready": bool(vol.get("ready", False)),
         }
+        golden = get_rvol_reversal_snapshot(
+            a, VOLUME_AVG_PERIOD, OPPO_GOLDEN_RVOL_LOOKBACK,
+            OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_THRESHOLD,
+        )
+        probability = golden.get("probability")
+        samples = int(golden.get("samples", 0))
+        probability_ok = samples >= OPPO_GOLDEN_MIN_SAMPLES and (
+            probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY
+        )
+        prior_rvols = list(golden.get("rvols", []))
+        golden_gap_limit = c_open * GAP_SWING.get(a, 0.001) * OPPO_GOLDEN_GAP_MAG if c_open > 0 else None
+        golden_actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
+        golden_gap_passed = bool(
+            golden_gap_limit is None or golden_actual_gap is None or golden_actual_gap < golden_gap_limit
+        )
+        setup_qualified = bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok)
+        golden_rvol_out[a] = {
+            "enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "armed": bool(golden.get("armed", False)),
+            "setup_qualified": setup_qualified,
+            "qualified": bool(setup_qualified and golden_gap_passed),
+            "gap_passed": golden_gap_passed,
+            "gap_actual": round(float(golden_actual_gap), 4) if golden_actual_gap is not None else None,
+            "gap_limit": round(float(golden_gap_limit), 4) if golden_gap_limit is not None else None,
+            "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
+            "side": golden.get("side"),
+            "high_rvol_count": int(golden.get("high_rvol_count", 0)),
+            "required": OPPO_GOLDEN_RVOL_MIN_HIGH,
+            "lookback": OPPO_GOLDEN_RVOL_LOOKBACK,
+            "threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+            "probability": round(float(probability), 4) if probability is not None else None,
+            "samples": samples,
+            "wins": int(golden.get("wins", 0)),
+            "candles": [
+                {
+                    "label": f"i-{offset}",
+                    "rvol": round(float(value), 3) if value is not None else None,
+                    "passed": bool(value is not None and value > OPPO_GOLDEN_RVOL_THRESHOLD),
+                }
+                for offset, value in enumerate(reversed(prior_rvols), start=1)
+            ],
+        }
+        if OPPO_OPTIMIZER_ENABLED:
+            golden_optimizer_out[a] = get_golden_optimizer_snapshot(
+                a, VOLUME_AVG_PERIOD,
+                current={
+                    "lookback": OPPO_GOLDEN_RVOL_LOOKBACK,
+                    "min_high": OPPO_GOLDEN_RVOL_MIN_HIGH,
+                    "threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+                    "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
+                },
+                min_validation_samples=OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            )
+        else:
+            golden_optimizer_out[a] = {"mode": "off", "ready": False}
         ema_fast, ema_slow = get_ema_snapshot(a)
         ema_now[a] = {
             "ema_fast": round(float(ema_fast), 4) if ema_fast is not None else None,
             "ema_slow": round(float(ema_slow), 4) if ema_slow is not None else None,
         }
         candle_out[a] = get_candle_history(a, limit=18)
+    oppo_trade_optimizer_out = _build_oppo_trade_optimizer_snapshot()
+    _record_optimizer_recommendations(golden_optimizer_out, oppo_trade_optimizer_out)
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M"),
         "dry_run":       DRY_RUN,
@@ -2638,6 +3057,9 @@ def _build_state_snapshot():
         "gap_threshold": gap_threshold_out,
         "cvd":           cvd_out,
         "volume":        volume_out,
+        "golden_rvol":   golden_rvol_out,
+        "golden_optimizer": golden_optimizer_out,
+        "oppo_trade_optimizer": oppo_trade_optimizer_out,
         "cvd_history":   {a: list(cvd_history.get(a, [])) for a in ASSETS},
         "ema_now":       ema_now,
         "ema_history":   {a: list(ema_history.get(a, [])) for a in ASSETS},
@@ -2693,13 +3115,21 @@ def _build_state_snapshot():
                 "max_price": round(float(v.get("max_price", 0.0)), 4),
                 "max_multiple": round(float(v.get("max_multiple", 0.0)), 3),
                 "kraken_gap": round(float(v["kraken_gap"]), 4) if v.get("kraken_gap") is not None else None,
+                "kraken_gap_magnitude": round(float(v["kraken_gap_magnitude"]), 4) if v.get("kraken_gap_magnitude") is not None else None,
                 "cvd_slope": round(float(v["cvd_slope"]), 6) if v.get("cvd_slope") is not None else None,
                 "rvol": round(float(v["rvol"]), 3) if v.get("rvol") is not None else None,
+                "entry_at": v.get("entry_at", v.get("started_at", "")),
+                "entry_ts": v.get("entry_ts"),
+                "price_updates": int(v.get("price_updates", 0)),
+                "entry_gap_magnitude": round(float(v["entry_gap_magnitude"]), 4) if v.get("entry_gap_magnitude") is not None else None,
+                "entry_cvd_slope": round(float(v["entry_cvd_slope"]), 6) if v.get("entry_cvd_slope") is not None else None,
+                "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
             "buy_min":    BUY_PRICE_MIN,
@@ -2723,6 +3153,8 @@ def _build_state_snapshot():
             "rebound_max_target_price": REBOUND_MAX_TARGET_PRICE,
             "simulate_rebound_mode_enabled": SIMULATE_REBOUND_MODE_ENABLED,
             "oppo_rebound_max_price": OPPO_REBOUND_MAX_PRICE,
+            "oppo_gap_mag": OPPO_GAP_MAG,
+            "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -2741,7 +3173,23 @@ def _build_state_snapshot():
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
             "oppo_rvol_guard_enabled": OPPO_RVOL_GUARD_ENABLED,
+            "oppo_golden_rvol_enabled": OPPO_GOLDEN_RVOL_ENABLED,
+            "oppo_golden_rvol_rule": f"{OPPO_GOLDEN_RVOL_MIN_HIGH}/{OPPO_GOLDEN_RVOL_LOOKBACK} > {OPPO_GOLDEN_RVOL_THRESHOLD:.2f}",
+            "oppo_golden_rvol_threshold": OPPO_GOLDEN_RVOL_THRESHOLD,
+            "oppo_golden_min_probability": OPPO_GOLDEN_MIN_PROBABILITY,
+            "oppo_golden_min_samples": OPPO_GOLDEN_MIN_SAMPLES,
+            "oppo_optimizer_enabled": OPPO_OPTIMIZER_ENABLED,
+            "oppo_optimizer_min_validation_samples": OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES,
+            "oppo_trade_optimizer_enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
+            "oppo_trade_optimizer_min_validation_trades": OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES,
+            "oppo_optimizer_min_observation_secs": OPPO_OPTIMIZER_MIN_OBSERVATION_SECS,
+            "oppo_optimizer_min_price_updates": OPPO_OPTIMIZER_MIN_PRICE_UPDATES,
+            "oppo_optimizer_max_multiple_cap": OPPO_OPTIMIZER_MAX_MULTIPLE_CAP,
+            "oppo_optimizer_no_pump_multiple": OPPO_OPTIMIZER_NO_PUMP_MULTIPLE,
+            "oppo_optimizer_history_hours": OPPO_OPTIMIZER_HISTORY_HOURS,
+            "oppo_optimizer_score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_window_secs": PUMP_TRACK_WINDOW_SECS,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
@@ -2785,6 +3233,16 @@ canvas{display:block;width:100%!important;height:180px!important}
 .asset-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid #252d3d}
 .asset-row:last-child{border-bottom:none}
 .asset-row .k{color:#5a6a85}
+.golden-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+.golden-card{background:#1e2533;border:1px solid #2a3347;border-radius:9px;padding:12px}
+.golden-card.qualified{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.18)}
+.golden-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.golden-candles{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.golden-candle{background:#161b27;border:1px solid #30394b;border-radius:7px;padding:7px;text-align:center;font-family:monospace;font-size:11px}
+.golden-candle.pass{background:#0d2a1e;border-color:#166534;color:#4ade9f}
+.golden-candle.fail{color:#7b879d}
+.golden-candle .slot{display:block;font-size:10px;text-transform:uppercase;margin-bottom:2px;color:inherit}
+.golden-meta{display:flex;justify-content:space-between;gap:8px;margin-top:9px;font-size:11px;color:#7b879d;font-family:monospace}
 footer{text-align:center;color:#2a3347;font-size:11px;margin-top:20px;padding-bottom:10px}
 </style>
 </head>
@@ -3116,8 +3574,8 @@ function render(s){
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
-  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3127,6 +3585,44 @@ function render(s){
   const total=(st.wins||0)+(st.losses||0);
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
+
+  const goldenCards=assets.map(a=>{
+    const g=goldenRvol[a]||{},candles=g.candles||[];
+    const gapBlocked=g.setup_qualified && g.gap_passed===false;
+    const state=!g.enabled?'OFF':(gapBlocked?'GAP BLOCK':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING')));
+    const stateCls=gapBlocked?'red':(g.qualified?'amber':(g.armed?'blue':'dim'));
+    const probability=g.probability!=null?`${(Number(g.probability)*100).toFixed(1)}% (${g.wins||0}/${g.samples||0})`:'collecting samples';
+    const candleCells=[1,2,3].map(slot=>{
+      const c=candles.find(x=>x.label===`i-${slot}`)||{};
+      const cls=c.passed?'pass':'fail';
+      const value=c.rvol!=null?`${Number(c.rvol).toFixed(2)}x`:'—';
+      return `<div class="golden-candle ${cls}"><span class="slot">i-${slot}</span><strong>${value}</strong><div>${c.passed?'PASS':'WAIT'}</div></div>`;
+    }).join('');
+    return `<div class="golden-card ${g.qualified?'qualified':''}">
+      <div class="golden-head"><strong>${a.toUpperCase()}</strong><span class="${stateCls}" style="font-weight:700">${state}${g.side?` · ${(g.side||'').toUpperCase()}`:''}</span></div>
+      <div class="golden-candles">${candleCells}</div>
+      <div class="golden-meta"><span>${g.high_rvol_count||0}/${g.lookback||3} high · need ${g.required||2}</span><span>history ${probability}</span></div>
+      <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_passed===false?'red':'green'}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
+    </div>`;
+  }).join('');
+
+  const optimizerRows=assets.map(a=>{
+    const o=goldenOptimizer[a]||{},r=o.recommendation||{},rc=r.config||{},rv=r.validation||{},cur=o.current||{},cv=cur.validation||{};
+    const rec=o.ready?`L${rc.lookback} · ${rc.min_high} high · RVOL>${Number(rc.threshold).toFixed(2)} · gap x${Number(rc.gap_magnitude).toFixed(1)}`:'collecting data';
+    const recRate=rv.rate!=null?`${(Number(rv.rate)*100).toFixed(1)}% (${rv.wins||0}/${rv.samples||0})`:'—';
+    const curRate=cv.rate!=null?`${(Number(cv.rate)*100).toFixed(1)}% (${cv.wins||0}/${cv.samples||0})`:'—';
+    return `<tr><td>${a.toUpperCase()}</td><td>${o.mode||'shadow-recommend-only'}</td><td>${rec}</td><td class="${rv.rate!=null&&cv.rate!=null&&rv.rate>cv.rate?'green':'dim'}">${recRate}</td><td>${curRate}</td><td>${o.candidate_count||0}</td></tr>`;
+  }).join('');
+
+  const oto=oppoTradeOptimizer||{},otr=oto.recommendation||{},otc=otr.config||{},otv=otr.validation||{},otcur=oto.current||{},otcv=otcur.validation||{};
+  const oppoOptimizerRecommendation=oto.ready
+    ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · gap &lt; x${Number(otc.max_gap_magnitude).toFixed(1)}`
+    : `not ready · ${oto.readiness_reason||'collecting full-window pump traces'}`;
+  const oppoOptimizerValidation=otv.samples!=null?`median ${Number(otv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otv.no_pump_rate||0)*100).toFixed(0)}% · ${otv.samples} samples`:'—';
+  const oppoOptimizerCurrent=otcv.samples!=null?`median ${Number(otcv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otcv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otcv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otcv.no_pump_rate||0)*100).toFixed(0)}% · ${otcv.samples} samples`:'—';
+  const optimizerDataset=oto.dataset_validation||{};
+  const optimizerExclusions=Object.entries(oto.quality_exclusions||{}).map(([k,v])=>`${k} ${v}`).join(', ')||'none';
+  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}`;
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3181,7 +3677,7 @@ function render(s){
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
   const oppoRows=oppoLog.map(o=>{
-    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
+    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
     const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
     const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
@@ -3256,6 +3752,22 @@ function render(s){
     </div>
 
     <div class="section">
+      <h2>Golden OPPO Progress <span style="font-size:11px;color:#5a6a85;font-weight:400">previous completed 15m candles; PASS when RVOL &gt; ${Number(cfg.oppo_golden_rvol_threshold||1).toFixed(2)}x</span></h2>
+      <div class="golden-grid">${goldenCards}</div>
+    </div>
+
+    <div class="section">
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Golden OPPO Optimizer <span style="font-size:11px;color:#5a6a85;font-weight:400">shadow + recommend-only; held-out Kraken validation proxy; never changes live settings</span><a href="/optimizer-history.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#fbbf24;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export 24h History CSV</a></h2>
+      <table><thead><tr><th>Asset</th><th>Mode</th><th>Recommended golden settings</th><th>Validation reversal</th><th>Current validation</th><th>Candidates</th></tr></thead><tbody>${optimizerRows}</tbody></table>
+    </div>
+
+    <div class="section">
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Standard OPPO Optimizer <span style="font-size:11px;color:#5a6a85;font-weight:400">robust score keeps valid 1x outcomes and limits outlier influence; never changes live settings</span><a href="/optimizer-configs.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export All Configs CSV</a></h2>
+      <table><thead><tr><th>Mode</th><th>Recommended entry filters</th><th>Validation result</th><th>Current result</th><th>Pump samples</th><th>Candidates</th></tr></thead>
+      <tbody><tr><td>${oto.mode||'shadow-recommend-only'}</td><td>${oppoOptimizerRecommendation}</td><td class="${(otr.score||0)>(otcur.score||0)?'green':'dim'}">${oppoOptimizerValidation}</td><td>${oppoOptimizerCurrent}</td><td>${optimizerQuality}</td><td>${oto.candidate_count||0}</td></tr></tbody></table>
+    </div>
+
+    <div class="section">
       <h2>Live Prices <span style="font-size:11px;color:#5a6a85;font-weight:400">buy zone ${(cfg.buy_min||0.82)*100|0}–${(cfg.buy_max||0.86)*100|0}¢ / RVOL avg ${cfg.volume_avg_period||20} candles, pass >${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × minute (1–15)</span></h2>
       <table><thead><tr><th>Asset</th><th>YES</th><th>NO</th><th>Kraken Gap / Threshold</th><th>CVD (win/slope)</th><th>RVOL</th><th>Holding</th><th>OPPO Trigger</th></tr></thead>
       <tbody>${priceRows}</tbody></table>
@@ -3264,7 +3776,7 @@ function render(s){
     <div class="section"><h2>Open Positions (${Object.keys(pos).length})</h2>${posCards}</div>
 
     <div class="section">
-      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows OPPO buy/sell/cutloss/knife-block events)</span></h2>
+      <h2>OPPO Trigger Log <span style="font-size:11px;color:#5a6a85;font-weight:400">(shows golden/buy/sell/cutloss/knife-block events)</span></h2>
       <div class="oppo-log-wrap" id="oppoLogWrap"><table><thead><tr><th>Time</th><th>Asset</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody>${oppoRows}</tbody></table></div>
     </div>
@@ -3294,6 +3806,7 @@ function render(s){
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
         <tr><td>OPPO RVOL guard</td><td>${cfg.oppo_rvol_guard_enabled?'ON':'OFF'} — current quote volume / avg ${cfg.volume_avg_period||20} candles</td><td>Pass / flexi</td><td>Minute threshold = ${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15); below threshold → $${cfg.flexi_rvol_buy_amount||1} flexi order</td></tr>
+        <tr><td>OPPO gap guards</td><td>Normal magnitude x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden magnitude</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — golden blocks when current Kraken gap reaches this threshold</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -3382,19 +3895,82 @@ def _trade_log_csv_bytes():
     return buf.getvalue().encode("utf-8")
 
 
+def _optimizer_history_csv_bytes():
+    import io
+    import csv
+    columns = [
+        "timestamp", "optimizer", "asset", "lookback", "min_high", "threshold",
+        "gap_magnitude", "min_rvol", "max_gap_magnitude", "min_rebound_ratio",
+        "train_samples", "train_wins", "train_rate", "train_pnl",
+        "validation_samples", "validation_wins", "validation_rate", "validation_pnl",
+        "validation_average_max_multiple", "validation_median_max_multiple", "validation_highest_max_multiple",
+        "current_train_samples", "current_train_wins", "current_train_rate", "current_train_pnl",
+        "current_validation_samples", "current_validation_wins", "current_validation_rate",
+        "current_validation_pnl", "current_validation_average_max_multiple", "current_validation_median_max_multiple",
+        "current_validation_highest_max_multiple", "candidate_count", "score",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=columns)
+    writer.writeheader()
+    for row in optimizer_recommendation_history:
+        config = row.get("config") or {}
+        writer.writerow({column: config.get(column, row.get(column, "")) for column in columns})
+    return buf.getvalue().encode("utf-8")
+
+
+def _optimizer_configs_csv_bytes():
+    """Export every currently evaluated Standard OPPO optimizer configuration."""
+    import io
+    import csv
+    snapshot = _build_oppo_trade_optimizer_snapshot()
+    columns = [
+        "rank", "recommended", "min_rvol", "max_gap_magnitude", "score", "confidence", "stability_penalty",
+        "train_samples", "train_median", "train_trimmed_average", "train_no_pump_rate", "train_weak_pumps", "train_weak_pump_rate", "train_rate_2x", "train_rate_4x",
+        "validation_samples", "validation_median", "validation_trimmed_average", "validation_capped_average", "validation_weak_pumps", "validation_weak_pump_rate",
+        "validation_highest", "validation_no_pump_rate", "validation_rate_1_5x", "validation_rate_2x",
+        "validation_rate_3x", "validation_rate_4x", "validation_rate_5x",
+    ]
+    candidates = list(snapshot.get("candidates", []))
+    candidates.sort(key=lambda item: (item.get("score") is not None, item.get("score") or float("-inf")), reverse=True)
+    recommended = (snapshot.get("recommendation") or {}).get("config")
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=columns)
+    writer.writeheader()
+    for rank, candidate in enumerate(candidates, start=1):
+        config, train, validation = candidate.get("config", {}), candidate.get("train", {}), candidate.get("validation", {})
+        writer.writerow({
+            "rank": rank, "recommended": config == recommended, "min_rvol": config.get("min_rvol"),
+            "max_gap_magnitude": config.get("max_gap_magnitude"), "score": candidate.get("score"),
+            "confidence": candidate.get("confidence"), "stability_penalty": candidate.get("stability_penalty"),
+            "train_samples": train.get("samples"), "train_median": train.get("median_max_multiple"),
+            "train_trimmed_average": train.get("trimmed_average_max_multiple"), "train_no_pump_rate": train.get("no_pump_rate"),
+            "train_weak_pumps": train.get("weak_pumps"), "train_weak_pump_rate": train.get("weak_pump_rate"),
+            "train_rate_2x": train.get("rate_2x"), "train_rate_4x": train.get("rate_4x"),
+            "validation_samples": validation.get("samples"), "validation_median": validation.get("median_max_multiple"),
+            "validation_trimmed_average": validation.get("trimmed_average_max_multiple"),
+            "validation_capped_average": validation.get("capped_average_max_multiple"),
+            "validation_weak_pumps": validation.get("weak_pumps"), "validation_weak_pump_rate": validation.get("weak_pump_rate"),
+            "validation_highest": validation.get("highest_max_multiple"), "validation_no_pump_rate": validation.get("no_pump_rate"),
+            "validation_rate_1_5x": validation.get("rate_1_5x"), "validation_rate_2x": validation.get("rate_2x"),
+            "validation_rate_3x": validation.get("rate_3x"), "validation_rate_4x": validation.get("rate_4x"),
+            "validation_rate_5x": validation.get("rate_5x"),
+        })
+    return buf.getvalue().encode("utf-8")
+
+
 def _pump_log_csv_bytes():
     import io
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "cvd_slope", "rvol", "status", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_magnitude", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_gap_magnitude", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
-            e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("cvd_slope", ""),
-            e.get("rvol", ""), e.get("status", ""), e.get("milestone", ""),
+            e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_magnitude", ""), e.get("cvd_slope", ""),
+            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_gap_magnitude", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -3430,6 +4006,22 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(data))
             self.end_headers()
             self._safe_write(data, "/trade-log.csv")
+        elif self.path == "/optimizer-configs.csv":
+            data = _optimizer_configs_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=oppo_optimizer_all_configs.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/optimizer-configs.csv")
+        elif self.path == "/optimizer-history.csv":
+            data = _optimizer_history_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=optimizer_recommendations_24h.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/optimizer-history.csv")
         elif self.path == "/pump-log.csv":
             data = _pump_log_csv_bytes()
             self.send_response(200)
@@ -3478,7 +4070,7 @@ def start_http_server():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global last_pnl_snapshot, pnl_history, armed_logged, skip_buy_until_window
+    global last_pnl_snapshot, pnl_history, armed_logged
 
     validate_settings()
     load_state()
@@ -3500,6 +4092,14 @@ def main():
         "  OPPO RVOL guard (Kraken): enabled=%s  flexi=%s  avg_period=%d  pass >%.4fx × minute (1–15), else order=$%.2f",
         OPPO_RVOL_GUARD_ENABLED, FLEXI_RVOL_ENABLED, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN, FLEXI_RVOL_BUY_AMOUNT,
     )
+    log.info(
+        "  OPPO golden fourth-window: enabled=%s  prior-high=%d/%d > %.2fx  historical reversal >= %.0f%% over >=%d samples",
+        OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_LOOKBACK,
+        OPPO_GOLDEN_RVOL_THRESHOLD, OPPO_GOLDEN_MIN_PROBABILITY * 100, OPPO_GOLDEN_MIN_SAMPLES,
+    )
+    log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG)
+    log.info("  OPPO optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d", OPPO_OPTIMIZER_ENABLED, OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES)
+    log.info("  Standard OPPO pump optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d score_equivalence=%.2f pump_trace=%ds", OPPO_TRADE_OPTIMIZER_ENABLED, OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, OPPO_OPTIMIZER_SCORE_EQUIVALENCE, PUMP_TRACK_WINDOW_SECS)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
@@ -3533,6 +4133,9 @@ def main():
 
             # ── New window reset ──────────────────────────────────────────────
             if last_window is not None and window_start != last_window:
+                # Capture the final observable price before clearing prior-window
+                # state so pump traces cover the complete 900-second market window.
+                _finish_window_pump_trackers(last_window)
                 if open_positions:
                     log.info("[WINDOW] Closing %d stale positions from prior window",
                              len(open_positions))
@@ -3573,19 +4176,6 @@ def main():
                     log.info("[IDLE] Trading window open — resumed")
                 was_idle = False
 
-                # If extreme-gap skip is active, sleep whole windows when flat.
-                if (
-                    skip_buy_until_window is not None
-                    and window_start < skip_buy_until_window
-                    and not open_positions
-                ):
-                    sleep_for = max(1, secs_left + 1)
-                    windows_left = int((skip_buy_until_window - window_start) // WINDOW_SECS)
-                    log.info("[SLEEP-SKIP] Flat + buy-skip active, sleeping %ds (windows_left=%d)",
-                             sleep_for, windows_left)
-                    time.sleep(sleep_for)
-                    continue
-
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
@@ -3604,6 +4194,7 @@ def main():
                     "window": round(float(cvd_window), 3),
                     "slope": round(float(cvd_slope), 6),
                 })
+            _refresh_optimizer_recommendation_history()
             save_state()
 
         except KeyboardInterrupt:
