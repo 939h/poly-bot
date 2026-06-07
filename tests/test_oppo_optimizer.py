@@ -96,7 +96,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertEqual(result["recommendation"]["config"]["max_gap_magnitude"], 5.0)
 
-    def test_pump_tracker_continues_below_dead_zone_past_stop_buy(self):
+    def test_pump_tracker_stops_at_dead_zone_and_preserves_prior_peak(self):
         originals = (momentum_v3.ASSETS, momentum_v3.live_prices, momentum_v3.pump_tracker,
                      momentum_v3.pump_log, momentum_v3.pump_finished_tracker_keys)
         try:
@@ -107,8 +107,8 @@ class OppoTradeOptimizerTests(unittest.TestCase):
             momentum_v3.pump_tracker = {
                 "btc_yes": {
                     "asset": "btc", "side": "yes", "window_start": 1000,
-                    "base_price": 0.05, "trough": 0.05, "current": 0.05,
-                    "multiple": 1.0, "max_price": 0.05, "max_multiple": 1.0,
+                    "base_price": 0.05, "trough": 0.05, "current": 0.10,
+                    "multiple": 2.0, "max_price": 0.10, "max_multiple": 2.0,
                     "entry_ts": momentum_v3.time.time() - 800, "price_updates": 10,
                     "entry_rvol": 0.5, "entry_gap_magnitude": 1.0,
                 }
@@ -116,9 +116,11 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
             momentum_v3.update_pump_trackers(1000, 850)
 
-            self.assertIn("btc_yes", momentum_v3.pump_tracker)
-            self.assertEqual(momentum_v3.pump_log, [])
-            self.assertEqual(momentum_v3.pump_tracker["btc_yes"]["trough"], 0.03)
+            self.assertNotIn("btc_yes", momentum_v3.pump_tracker)
+            self.assertEqual(momentum_v3.pump_log[0]["finish_reason"], "DEAD-ZONE")
+            self.assertEqual(momentum_v3.pump_log[0]["max_multiple"], 2.0)
+            self.assertEqual(momentum_v3.pump_log[0]["current"], 0.03)
+            self.assertTrue(momentum_v3._pump_tracker_already_finished(1000, "btc_yes"))
         finally:
             (momentum_v3.ASSETS, momentum_v3.live_prices, momentum_v3.pump_tracker,
              momentum_v3.pump_log, momentum_v3.pump_finished_tracker_keys) = originals

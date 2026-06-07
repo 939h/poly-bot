@@ -747,7 +747,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 def _build_oppo_trade_optimizer_snapshot():
-    """Recommend robust standard OPPO filters from completed full-window pump traces."""
+    """Recommend robust standard OPPO filters from completed pump traces."""
     completed = [event for event in reversed(pump_log) if event.get("status") in ("SUCCESS", "FAILED")]
 
     def quality_reason(event):
@@ -779,7 +779,7 @@ def _build_oppo_trade_optimizer_snapshot():
         "trades": len(samples),
         "quality_excluded": len(completed) - len(samples),
         "quality_exclusions": quality_exclusions,
-        "note": "Full-window pump traces; robust score penalizes no-pumps, outliers, sparse samples, and train/validation instability",
+        "note": "Pump traces run until dead-zone exit or window end; robust score penalizes no-pumps, outliers, sparse samples, and train/validation instability",
     }
     if not OPPO_TRADE_OPTIMIZER_ENABLED:
         result["readiness_reason"] = "optimizer disabled"
@@ -1140,10 +1140,18 @@ def update_pump_trackers(window_start, secs_into):
                 # Do not refresh stale trackers with a new window's live price.
                 _finish_pump_tracker(key, tracker, "END")
                 tracker = None
-            # Once tracking starts, keep following the opportunity through the
-            # complete window even if it falls below the trading dead zone. A fast
-            # collapse is valuable negative evidence and a later recovery still
-            # belongs to this window's pump path.
+            # The dead zone is outside the pump-tracking universe. Finalize an
+            # active tracker immediately and do not start or restart it this window.
+            if price < PUMP_TRACK_DEAD_ZONE_PRICE:
+                if tracker:
+                    tracker["price_updates"] = int(tracker.get("price_updates", 0)) + 1
+                    tracker["current"] = price
+                    trough = float(tracker.get("trough", 0.0))
+                    tracker["multiple"] = price / trough if trough > 0 else 0.0
+                    _update_pump_kraken_snapshot(tracker)
+                    _finish_pump_tracker(key, tracker, "DEAD-ZONE")
+                continue
+
             if tracker is None:
                 if _pump_tracker_already_finished(window_start, key):
                     continue
@@ -3617,7 +3625,7 @@ function render(s){
   const oto=oppoTradeOptimizer||{},otr=oto.recommendation||{},otc=otr.config||{},otv=otr.validation||{},otcur=oto.current||{},otcv=otcur.validation||{};
   const oppoOptimizerRecommendation=oto.ready
     ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · gap &lt; x${Number(otc.max_gap_magnitude).toFixed(1)}`
-    : `not ready · ${oto.readiness_reason||'collecting full-window pump traces'}`;
+    : `not ready · ${oto.readiness_reason||'collecting pump traces'}`;
   const oppoOptimizerValidation=otv.samples!=null?`median ${Number(otv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otv.no_pump_rate||0)*100).toFixed(0)}% · ${otv.samples} samples`:'—';
   const oppoOptimizerCurrent=otcv.samples!=null?`median ${Number(otcv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otcv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otcv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otcv.no_pump_rate||0)*100).toFixed(0)}% · ${otcv.samples} samples`:'—';
   const optimizerDataset=oto.dataset_validation||{};
