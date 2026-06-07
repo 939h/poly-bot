@@ -820,7 +820,8 @@ def _build_oppo_trade_optimizer_snapshot():
         "dataset_train": dataset_train,
         "dataset_validation": dataset_validation,
         "outcome_diverse": outcome_diverse,
-        "readiness_reason": None if outcome_diverse else "validation data has no weak/failed pumps below 2x",
+        "outcome_warning": None if outcome_diverse else "validation data has no weak/failed pumps below 2x",
+        "readiness_reason": None,
     })
 
     def evaluate(config):
@@ -861,7 +862,7 @@ def _build_oppo_trade_optimizer_snapshot():
     eligible.sort(key=lambda item: (item["score"], item["validation"]["median_max_multiple"] or 0, item["validation"]["samples"]), reverse=True)
 
     recommendation = None
-    if eligible and outcome_diverse:
+    if eligible:
         best_score = eligible[0]["score"]
         equivalent = [item for item in eligible if item["score"] >= best_score - OPPO_OPTIMIZER_SCORE_EQUIVALENCE]
         max_coverage = max(item["validation"]["samples"] for item in equivalent)
@@ -3630,7 +3631,8 @@ function render(s){
   const oppoOptimizerCurrent=otcv.samples!=null?`median ${Number(otcv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otcv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otcv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otcv.no_pump_rate||0)*100).toFixed(0)}% · ${otcv.samples} samples`:'—';
   const optimizerDataset=oto.dataset_validation||{};
   const optimizerExclusions=Object.entries(oto.quality_exclusions||{}).map(([k,v])=>`${k} ${v}`).join(', ')||'none';
-  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}`;
+  const optimizerOutcomeWarning=oto.outcome_warning?` · warning: ${oto.outcome_warning}`:'';
+  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}${optimizerOutcomeWarning}`;
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{

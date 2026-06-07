@@ -68,7 +68,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.assertEqual(result["quality_excluded"], 2)
 
 
-    def test_does_not_recommend_without_weak_validation_outcomes(self):
+    def test_recommends_without_weak_validation_outcomes_but_reports_warning(self):
         momentum_v3.pump_log = [
             {"status": "SUCCESS", "entry_rvol": 0.2, "entry_gap_magnitude": 1.0, "max_multiple": 4.0}
             for _ in range(12)
@@ -76,10 +76,11 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
         result = momentum_v3._build_oppo_trade_optimizer_snapshot()
 
-        self.assertFalse(result["ready"])
+        self.assertTrue(result["ready"])
         self.assertFalse(result["outcome_diverse"])
-        self.assertIsNone(result["recommendation"])
-        self.assertIn("no weak/failed pumps", result["readiness_reason"])
+        self.assertIsNotNone(result["recommendation"])
+        self.assertIn("no weak/failed pumps", result["outcome_warning"])
+        self.assertIsNone(result["readiness_reason"])
 
     def test_equivalent_scores_prefer_conservative_gap(self):
         momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE = 0.10
