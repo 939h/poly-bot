@@ -44,6 +44,7 @@ Requirements:
     OPPO_OPTIMIZER_NO_PUMP_MULTIPLE=1.1
     OPPO_OPTIMIZER_HISTORY_HOURS=24
     OPPO_OPTIMIZER_HISTORY_REFRESH_SECS=60
+    OPPO_OPTIMIZER_SCORE_EQUIVALENCE=0.10
 """
 
 import os
@@ -222,9 +223,9 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
-OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.10"))
+OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.20"))
+OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "3.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
@@ -266,6 +267,7 @@ OPPO_OPTIMIZER_MAX_MULTIPLE_CAP = max(1.0, float(os.getenv("OPPO_OPTIMIZER_MAX_M
 OPPO_OPTIMIZER_NO_PUMP_MULTIPLE = max(1.0, float(os.getenv("OPPO_OPTIMIZER_NO_PUMP_MULTIPLE", "1.1")))
 OPPO_OPTIMIZER_HISTORY_HOURS = max(1, int(os.getenv("OPPO_OPTIMIZER_HISTORY_HOURS", "24")))
 OPPO_OPTIMIZER_HISTORY_REFRESH_SECS = max(10, int(os.getenv("OPPO_OPTIMIZER_HISTORY_REFRESH_SECS", "60")))
+OPPO_OPTIMIZER_SCORE_EQUIVALENCE = max(0.0, float(os.getenv("OPPO_OPTIMIZER_SCORE_EQUIVALENCE", "0.10")))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 POLL_SECS              = 1.0
@@ -285,10 +287,11 @@ MIN_SELL_SHARES          = 0.001
 CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 
 # ── Pump tracker ─────────────────────────────────────────────────────────────
-PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.10"))
+PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.15"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
 PUMP_TRACK_MILESTONES = (2, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
+PUMP_TRACK_WINDOW_SECS = WINDOW_SECS
 
 
 
@@ -687,7 +690,9 @@ def save_state():
             "oppo_optimizer_max_multiple_cap": OPPO_OPTIMIZER_MAX_MULTIPLE_CAP,
             "oppo_optimizer_no_pump_multiple": OPPO_OPTIMIZER_NO_PUMP_MULTIPLE,
             "oppo_optimizer_history_hours": OPPO_OPTIMIZER_HISTORY_HOURS,
+            "oppo_optimizer_score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_window_secs": PUMP_TRACK_WINDOW_SECS,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
@@ -742,22 +747,30 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
 
 
 def _build_oppo_trade_optimizer_snapshot():
-    """Recommend robust standard OPPO filters from completed pump peak multiples."""
+    """Recommend robust standard OPPO filters from completed full-window pump traces."""
     completed = [event for event in reversed(pump_log) if event.get("status") in ("SUCCESS", "FAILED")]
 
-    def quality_ok(event):
+    def quality_reason(event):
         if event.get("entry_rvol") is None or event.get("entry_gap_magnitude") is None:
-            return False
+            return "missing-entry-metrics"
         if float(event.get("max_multiple", 0.0) or 0.0) <= 0:
-            return False
-        # Legacy rows without quality counters remain usable; new rows must pass both checks.
+            return "invalid-multiple"
+        # Legacy rows without quality counters remain usable. Full-window traces and
+        # genuine fast failures remain negative evidence; under-observed rows do not.
         if event.get("observation_secs") is not None and float(event["observation_secs"]) < OPPO_OPTIMIZER_MIN_OBSERVATION_SECS:
-            return False
+            return "short-observation"
         if event.get("price_updates") is not None and int(event["price_updates"]) < OPPO_OPTIMIZER_MIN_PRICE_UPDATES:
-            return False
-        return True
+            return "few-price-updates"
+        return None
 
-    samples = [event for event in completed if quality_ok(event)]
+    quality_exclusions = {}
+    samples = []
+    for event in completed:
+        reason = quality_reason(event)
+        if reason:
+            quality_exclusions[reason] = quality_exclusions.get(reason, 0) + 1
+        else:
+            samples.append(event)
     result = {
         "mode": "shadow-recommend-only",
         "enabled": OPPO_TRADE_OPTIMIZER_ENABLED,
@@ -765,9 +778,14 @@ def _build_oppo_trade_optimizer_snapshot():
         "samples": len(samples),
         "trades": len(samples),
         "quality_excluded": len(completed) - len(samples),
-        "note": "Keeps valid 1x outcomes; robust score penalizes no-pumps, outliers, sparse samples, and train/validation instability",
+        "quality_exclusions": quality_exclusions,
+        "note": "Full-window pump traces; robust score penalizes no-pumps, outliers, sparse samples, and train/validation instability",
     }
-    if not OPPO_TRADE_OPTIMIZER_ENABLED or len(samples) < OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES * 2:
+    if not OPPO_TRADE_OPTIMIZER_ENABLED:
+        result["readiness_reason"] = "optimizer disabled"
+        return result
+    if len(samples) < OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES * 2:
+        result["readiness_reason"] = "collecting more quality pump traces"
         return result
     validation_start = max(1, int(len(samples) * 0.70))
 
@@ -778,10 +796,12 @@ def _build_oppo_trade_optimizer_snapshot():
         trimmed = ordered[trim:len(ordered) - trim] if trim else ordered
         rate = lambda threshold: sum(value >= threshold for value in multiples) / len(multiples) if multiples else None
         no_pumps = sum(value < OPPO_OPTIMIZER_NO_PUMP_MULTIPLE for value in multiples)
+        weak_pumps = sum(value < PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples)
         return {
             "samples": len(multiples), "trades": len(multiples),
             "wins": sum(value >= PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples),
             "good_pumps": sum(value >= PUMP_TRACK_SUCCESS_MIN_MULTIPLE for value in multiples),
+            "weak_pumps": weak_pumps, "weak_pump_rate": weak_pumps / len(multiples) if multiples else None,
             "rate": rate(PUMP_TRACK_SUCCESS_MIN_MULTIPLE), "win_rate": rate(PUMP_TRACK_SUCCESS_MIN_MULTIPLE),
             "rate_1_5x": rate(1.5), "rate_2x": rate(2.0), "rate_3x": rate(3.0),
             "rate_4x": rate(4.0), "rate_5x": rate(5.0),
@@ -792,6 +812,16 @@ def _build_oppo_trade_optimizer_snapshot():
             "median_max_multiple": round(float(np.median(multiples)), 4) if multiples else None,
             "highest_max_multiple": round(max(multiples), 4) if multiples else None,
         }
+
+    dataset_train = summarize([float(sample["max_multiple"]) for sample in samples[:validation_start]])
+    dataset_validation = summarize([float(sample["max_multiple"]) for sample in samples[validation_start:]])
+    outcome_diverse = bool(dataset_validation["weak_pumps"])
+    result.update({
+        "dataset_train": dataset_train,
+        "dataset_validation": dataset_validation,
+        "outcome_diverse": outcome_diverse,
+        "readiness_reason": None if outcome_diverse else "validation data has no weak/failed pumps below 2x",
+    })
 
     def evaluate(config):
         sections = {"train": [], "validation": []}
@@ -829,11 +859,28 @@ def _build_oppo_trade_optimizer_snapshot():
             candidates.append({"config": config, **metrics})
     eligible = [candidate for candidate in candidates if candidate["score"] is not None]
     eligible.sort(key=lambda item: (item["score"], item["validation"]["median_max_multiple"] or 0, item["validation"]["samples"]), reverse=True)
+
+    recommendation = None
+    if eligible and outcome_diverse:
+        best_score = eligible[0]["score"]
+        equivalent = [item for item in eligible if item["score"] >= best_score - OPPO_OPTIMIZER_SCORE_EQUIVALENCE]
+        max_coverage = max(item["validation"]["samples"] for item in equivalent)
+        coverage_floor = max(OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, math.ceil(max_coverage * 0.80))
+        conservative = [item for item in equivalent if item["validation"]["samples"] >= coverage_floor]
+        recommendation = min(
+            conservative,
+            key=lambda item: (item["config"]["max_gap_magnitude"], -item["config"]["min_rvol"], -item["score"]),
+        )
+
     current_config = {"min_rvol": 0.0, "max_gap_magnitude": OPPO_GAP_MAG}
     result.update({
-        "ready": bool(eligible), "candidate_count": len(eligible), "evaluated_candidate_count": len(candidates),
-        "recommendation": eligible[0] if eligible else None, "candidates": candidates,
+        "ready": recommendation is not None,
+        "candidate_count": len(eligible),
+        "evaluated_candidate_count": len(candidates),
+        "recommendation": recommendation,
+        "candidates": candidates,
         "current": {"config": current_config, **evaluate(current_config)},
+        "score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
     })
     return result
 
@@ -1013,6 +1060,7 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "entry_cvd_slope": tracker.get("entry_cvd_slope", tracker.get("cvd_slope")),
         "entry_rvol": tracker.get("entry_rvol", tracker.get("rvol")),
         "status": status or tracker.get("status", "TRACKING"),
+        "finish_reason": tracker.get("finish_reason"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
     pump_log.insert(0, event)
@@ -1027,6 +1075,7 @@ def _finish_pump_tracker(key, tracker, reason="END"):
         pump_tracker.pop(key, None)
         return
     tracker["status"] = _pump_result_from_tracker(tracker)
+    tracker["finish_reason"] = reason
     pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
     log.info(
@@ -1036,6 +1085,15 @@ def _finish_pump_tracker(key, tracker, reason="END"):
         float(tracker.get("max_price", 0.0)),
     )
     pump_tracker.pop(key, None)
+
+
+def _finish_window_pump_trackers(window_start):
+    """Finalize pump traces at the market-window boundary using the latest price."""
+    for key, tracker in list(pump_tracker.items()):
+        if tracker.get("window_start") != window_start:
+            continue
+        _refresh_pump_tracker_price(key, tracker)
+        _finish_pump_tracker(key, tracker, "FULL-WINDOW")
 
 
 def _refresh_pump_tracker_price(key, tracker):
@@ -1069,14 +1127,7 @@ def _refresh_pump_tracker_price(key, tracker):
 
 
 def update_pump_trackers(window_start, secs_into):
-    """Track YES/NO pumps until stop-buy, then record final success/failure."""
-    if secs_into > STOP_BUY_AT:
-        for key, tracker in list(pump_tracker.items()):
-            if tracker.get("window_start") == window_start:
-                _refresh_pump_tracker_price(key, tracker)
-                _finish_pump_tracker(key, tracker, "END")
-        return
-
+    """Track YES/NO pump opportunities for the complete 900-second market window."""
     for asset in ASSETS:
         for side in ("yes", "no"):
             key = f"{asset}_{side}"
@@ -1089,12 +1140,10 @@ def update_pump_trackers(window_start, secs_into):
                 # Do not refresh stale trackers with a new window's live price.
                 _finish_pump_tracker(key, tracker, "END")
                 tracker = None
-            if price < PUMP_TRACK_DEAD_ZONE_PRICE:
-                if tracker:
-                    _refresh_pump_tracker_price(key, tracker)
-                    _finish_pump_tracker(key, tracker, "DEAD-ZONE")
-                continue
-
+            # Once tracking starts, keep following the opportunity through the
+            # complete window even if it falls below the trading dead zone. A fast
+            # collapse is valuable negative evidence and a later recovery still
+            # belongs to this window's pump path.
             if tracker is None:
                 if _pump_tracker_already_finished(window_start, key):
                     continue
@@ -3138,7 +3187,9 @@ def _build_state_snapshot():
             "oppo_optimizer_max_multiple_cap": OPPO_OPTIMIZER_MAX_MULTIPLE_CAP,
             "oppo_optimizer_no_pump_multiple": OPPO_OPTIMIZER_NO_PUMP_MULTIPLE,
             "oppo_optimizer_history_hours": OPPO_OPTIMIZER_HISTORY_HOURS,
+            "oppo_optimizer_score_equivalence": OPPO_OPTIMIZER_SCORE_EQUIVALENCE,
             "pump_track_start_price": PUMP_TRACK_START_PRICE,
+            "pump_track_window_secs": PUMP_TRACK_WINDOW_SECS,
             "pump_track_dead_zone_price": PUMP_TRACK_DEAD_ZONE_PRICE,
             "pump_track_success_min_multiple": PUMP_TRACK_SUCCESS_MIN_MULTIPLE,
         },
@@ -3566,9 +3617,12 @@ function render(s){
   const oto=oppoTradeOptimizer||{},otr=oto.recommendation||{},otc=otr.config||{},otv=otr.validation||{},otcur=oto.current||{},otcv=otcur.validation||{};
   const oppoOptimizerRecommendation=oto.ready
     ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · gap &lt; x${Number(otc.max_gap_magnitude).toFixed(1)}`
-    : 'collecting completed pump-tracker opportunities';
+    : `not ready · ${oto.readiness_reason||'collecting full-window pump traces'}`;
   const oppoOptimizerValidation=otv.samples!=null?`median ${Number(otv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otv.no_pump_rate||0)*100).toFixed(0)}% · ${otv.samples} samples`:'—';
   const oppoOptimizerCurrent=otcv.samples!=null?`median ${Number(otcv.median_max_multiple||0).toFixed(2)}x · trimmed ${Number(otcv.trimmed_average_max_multiple||0).toFixed(2)}x · 2x+ ${((otcv.rate_2x||0)*100).toFixed(0)}% · no-pump ${((otcv.no_pump_rate||0)*100).toFixed(0)}% · ${otcv.samples} samples`:'—';
+  const optimizerDataset=oto.dataset_validation||{};
+  const optimizerExclusions=Object.entries(oto.quality_exclusions||{}).map(([k,v])=>`${k} ${v}`).join(', ')||'none';
+  const optimizerQuality=`kept ${oto.samples||0} · excluded ${oto.quality_excluded||0} (${optimizerExclusions}) · validation weak &lt;2x ${optimizerDataset.weak_pumps||0}/${optimizerDataset.samples||0}`;
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3710,7 +3764,7 @@ function render(s){
     <div class="section">
       <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Standard OPPO Optimizer <span style="font-size:11px;color:#5a6a85;font-weight:400">robust score keeps valid 1x outcomes and limits outlier influence; never changes live settings</span><a href="/optimizer-configs.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export All Configs CSV</a></h2>
       <table><thead><tr><th>Mode</th><th>Recommended entry filters</th><th>Validation result</th><th>Current result</th><th>Pump samples</th><th>Candidates</th></tr></thead>
-      <tbody><tr><td>${oto.mode||'shadow-recommend-only'}</td><td>${oppoOptimizerRecommendation}</td><td class="${(otr.score||0)>(otcur.score||0)?'green':'dim'}">${oppoOptimizerValidation}</td><td>${oppoOptimizerCurrent}</td><td>${oto.samples||0}</td><td>${oto.candidate_count||0}</td></tr></tbody></table>
+      <tbody><tr><td>${oto.mode||'shadow-recommend-only'}</td><td>${oppoOptimizerRecommendation}</td><td class="${(otr.score||0)>(otcur.score||0)?'green':'dim'}">${oppoOptimizerValidation}</td><td>${oppoOptimizerCurrent}</td><td>${optimizerQuality}</td><td>${oto.candidate_count||0}</td></tr></tbody></table>
     </div>
 
     <div class="section">
@@ -3871,8 +3925,8 @@ def _optimizer_configs_csv_bytes():
     snapshot = _build_oppo_trade_optimizer_snapshot()
     columns = [
         "rank", "recommended", "min_rvol", "max_gap_magnitude", "score", "confidence", "stability_penalty",
-        "train_samples", "train_median", "train_trimmed_average", "train_no_pump_rate", "train_rate_2x", "train_rate_4x",
-        "validation_samples", "validation_median", "validation_trimmed_average", "validation_capped_average",
+        "train_samples", "train_median", "train_trimmed_average", "train_no_pump_rate", "train_weak_pumps", "train_weak_pump_rate", "train_rate_2x", "train_rate_4x",
+        "validation_samples", "validation_median", "validation_trimmed_average", "validation_capped_average", "validation_weak_pumps", "validation_weak_pump_rate",
         "validation_highest", "validation_no_pump_rate", "validation_rate_1_5x", "validation_rate_2x",
         "validation_rate_3x", "validation_rate_4x", "validation_rate_5x",
     ]
@@ -3890,10 +3944,12 @@ def _optimizer_configs_csv_bytes():
             "confidence": candidate.get("confidence"), "stability_penalty": candidate.get("stability_penalty"),
             "train_samples": train.get("samples"), "train_median": train.get("median_max_multiple"),
             "train_trimmed_average": train.get("trimmed_average_max_multiple"), "train_no_pump_rate": train.get("no_pump_rate"),
+            "train_weak_pumps": train.get("weak_pumps"), "train_weak_pump_rate": train.get("weak_pump_rate"),
             "train_rate_2x": train.get("rate_2x"), "train_rate_4x": train.get("rate_4x"),
             "validation_samples": validation.get("samples"), "validation_median": validation.get("median_max_multiple"),
             "validation_trimmed_average": validation.get("trimmed_average_max_multiple"),
             "validation_capped_average": validation.get("capped_average_max_multiple"),
+            "validation_weak_pumps": validation.get("weak_pumps"), "validation_weak_pump_rate": validation.get("weak_pump_rate"),
             "validation_highest": validation.get("highest_max_multiple"), "validation_no_pump_rate": validation.get("no_pump_rate"),
             "validation_rate_1_5x": validation.get("rate_1_5x"), "validation_rate_2x": validation.get("rate_2x"),
             "validation_rate_3x": validation.get("rate_3x"), "validation_rate_4x": validation.get("rate_4x"),
@@ -3907,14 +3963,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_magnitude", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_gap_magnitude", "entry_cvd_slope", "entry_rvol", "status", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_magnitude", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_gap_magnitude", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
             e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_magnitude", ""), e.get("cvd_slope", ""),
-            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_gap_magnitude", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("milestone", ""),
+            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_gap_magnitude", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -4043,7 +4099,7 @@ def main():
     )
     log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG)
     log.info("  OPPO optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d", OPPO_OPTIMIZER_ENABLED, OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES)
-    log.info("  Standard OPPO pump optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d", OPPO_TRADE_OPTIMIZER_ENABLED, OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES)
+    log.info("  Standard OPPO pump optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d score_equivalence=%.2f pump_trace=%ds", OPPO_TRADE_OPTIMIZER_ENABLED, OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, OPPO_OPTIMIZER_SCORE_EQUIVALENCE, PUMP_TRACK_WINDOW_SECS)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
              OPPO_COUNTER_ENABLED, OPPO_COUNTER_MIN_PRICE * 100, OPPO_COUNTER_MAX_PRICE * 100,
              OPPO_COUNTER_SELL_MULTIPLIER, OPPO_COUNTER_SELL_CAP * 100, OPPO_COUNTER_CUT_LOSS_PCT * 100,
@@ -4077,6 +4133,9 @@ def main():
 
             # ── New window reset ──────────────────────────────────────────────
             if last_window is not None and window_start != last_window:
+                # Capture the final observable price before clearing prior-window
+                # state so pump traces cover the complete 900-second market window.
+                _finish_window_pump_trackers(last_window)
                 if open_positions:
                     log.info("[WINDOW] Closing %d stale positions from prior window",
                              len(open_positions))

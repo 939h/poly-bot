@@ -8,6 +8,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.original_log = momentum_v3.pump_log
         self.original_min = momentum_v3.OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES
         self.original_enabled = momentum_v3.OPPO_TRADE_OPTIMIZER_ENABLED
+        self.original_equivalence = momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE
         momentum_v3.OPPO_TRADE_OPTIMIZER_ENABLED = True
         momentum_v3.OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES = 2
 
@@ -15,6 +16,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         momentum_v3.pump_log = self.original_log
         momentum_v3.OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES = self.original_min
         momentum_v3.OPPO_TRADE_OPTIMIZER_ENABLED = self.original_enabled
+        momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE = self.original_equivalence
 
     def test_recommends_filters_using_peak_multiple(self):
         momentum_v3.pump_log = []
@@ -52,7 +54,7 @@ class OppoTradeOptimizerTests(unittest.TestCase):
         self.assertEqual(result["samples"], 10)
         self.assertGreater(result["current"]["train"]["no_pumps"] + current["no_pumps"], 0)
         self.assertLessEqual(current["capped_average_max_multiple"], momentum_v3.OPPO_OPTIMIZER_MAX_MULTIPLE_CAP)
-        self.assertNotEqual(result["recommendation"]["score"], result["recommendation"]["validation"]["average_max_multiple"])
+        self.assertNotEqual(result["current"]["score"], result["current"]["validation"]["average_max_multiple"])
 
     def test_excludes_short_or_under_observed_pumps(self):
         momentum_v3.pump_log = [
@@ -64,6 +66,89 @@ class OppoTradeOptimizerTests(unittest.TestCase):
 
         self.assertEqual(result["samples"], 0)
         self.assertEqual(result["quality_excluded"], 2)
+
+
+    def test_does_not_recommend_without_weak_validation_outcomes(self):
+        momentum_v3.pump_log = [
+            {"status": "SUCCESS", "entry_rvol": 0.2, "entry_gap_magnitude": 1.0, "max_multiple": 4.0}
+            for _ in range(12)
+        ]
+
+        result = momentum_v3._build_oppo_trade_optimizer_snapshot()
+
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["outcome_diverse"])
+        self.assertIsNone(result["recommendation"])
+        self.assertIn("no weak/failed pumps", result["readiness_reason"])
+
+    def test_equivalent_scores_prefer_conservative_gap(self):
+        momentum_v3.OPPO_OPTIMIZER_SCORE_EQUIVALENCE = 0.10
+        chronological = []
+        for index in range(12):
+            chronological.append({
+                "status": "FAILED", "entry_rvol": 0.2, "entry_gap_magnitude": 4.0,
+                "max_multiple": 1.2 if index in (9, 11) else 4.0,
+            })
+        momentum_v3.pump_log = list(reversed(chronological))
+
+        result = momentum_v3._build_oppo_trade_optimizer_snapshot()
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["recommendation"]["config"]["max_gap_magnitude"], 5.0)
+
+    def test_pump_tracker_continues_below_dead_zone_past_stop_buy(self):
+        originals = (momentum_v3.ASSETS, momentum_v3.live_prices, momentum_v3.pump_tracker,
+                     momentum_v3.pump_log, momentum_v3.pump_finished_tracker_keys)
+        try:
+            momentum_v3.ASSETS = ["btc"]
+            momentum_v3.live_prices = {"btc_yes": 0.03}
+            momentum_v3.pump_log = []
+            momentum_v3.pump_finished_tracker_keys = set()
+            momentum_v3.pump_tracker = {
+                "btc_yes": {
+                    "asset": "btc", "side": "yes", "window_start": 1000,
+                    "base_price": 0.05, "trough": 0.05, "current": 0.05,
+                    "multiple": 1.0, "max_price": 0.05, "max_multiple": 1.0,
+                    "entry_ts": momentum_v3.time.time() - 800, "price_updates": 10,
+                    "entry_rvol": 0.5, "entry_gap_magnitude": 1.0,
+                }
+            }
+
+            momentum_v3.update_pump_trackers(1000, 850)
+
+            self.assertIn("btc_yes", momentum_v3.pump_tracker)
+            self.assertEqual(momentum_v3.pump_log, [])
+            self.assertEqual(momentum_v3.pump_tracker["btc_yes"]["trough"], 0.03)
+        finally:
+            (momentum_v3.ASSETS, momentum_v3.live_prices, momentum_v3.pump_tracker,
+             momentum_v3.pump_log, momentum_v3.pump_finished_tracker_keys) = originals
+
+
+    def test_window_boundary_records_full_window_result(self):
+        originals = (momentum_v3.live_prices, momentum_v3.pump_tracker, momentum_v3.pump_log,
+                     momentum_v3.pump_finished_tracker_keys)
+        try:
+            momentum_v3.live_prices = {"btc_yes": 0.08}
+            momentum_v3.pump_log = []
+            momentum_v3.pump_finished_tracker_keys = set()
+            momentum_v3.pump_tracker = {
+                "btc_yes": {
+                    "asset": "btc", "side": "yes", "window_start": 1000,
+                    "base_price": 0.05, "trough": 0.05, "current": 0.05,
+                    "multiple": 1.0, "max_price": 0.05, "max_multiple": 1.0,
+                    "entry_ts": momentum_v3.time.time() - 900, "price_updates": 20,
+                    "entry_rvol": 0.5, "entry_gap_magnitude": 1.0,
+                }
+            }
+
+            momentum_v3._finish_window_pump_trackers(1000)
+
+            self.assertNotIn("btc_yes", momentum_v3.pump_tracker)
+            self.assertEqual(momentum_v3.pump_log[0]["finish_reason"], "FULL-WINDOW")
+            self.assertEqual(momentum_v3.pump_log[0]["max_multiple"], 1.6)
+        finally:
+            (momentum_v3.live_prices, momentum_v3.pump_tracker, momentum_v3.pump_log,
+             momentum_v3.pump_finished_tracker_keys) = originals
 
     def test_all_configs_csv_exports_every_candidate(self):
         momentum_v3.pump_log = [
