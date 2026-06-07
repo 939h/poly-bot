@@ -289,7 +289,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 # ── Pump tracker ─────────────────────────────────────────────────────────────
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.15"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
-PUMP_TRACK_MILESTONES = (2, 4, 5)
+PUMP_TRACK_MILESTONES = (1.9, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
 PUMP_TRACK_WINDOW_SECS = WINDOW_SECS
 
