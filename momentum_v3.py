@@ -443,6 +443,7 @@ pnl_history        = []
 asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
+oppo_dashboard_once_per_window = set()  # (asset, side, status) entries shown only once per market window
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
 pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
@@ -528,6 +529,7 @@ def reset_state():
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    oppo_dashboard_once_per_window.clear()
     pump_tracker = {}
     pump_log = []
     optimizer_recommendation_history = []
@@ -547,6 +549,7 @@ def reset_oppo_log():
     global oppo_log_suppressed_until
     oppo_last_trigger.clear()
     oppo_trigger_log.clear()
+    oppo_dashboard_once_per_window.clear()
     # Prevent immediate re-population from the very next scan cycle.
     oppo_log_suppressed_until = time.time() + max(2.0, POLL_SECS * 3)
     log.info("[STATE] OPPO trigger log reset by user")
@@ -1240,6 +1243,14 @@ def update_pump_trackers(window_start, secs_into):
                 tracker["highest_milestone"] = max_whole_multiple
 
 def _record_oppo_trigger(asset, side, price, status, reason):
+    # GOLDEN setup and gap-block conditions can remain true for many scan polls.
+    # Keep the dashboard useful by showing only their first event per market window.
+    once_key = (asset.lower(), side.lower(), status)
+    if status in {"GOLDEN", "GOLDEN-GAP-BLOCK"}:
+        if once_key in oppo_dashboard_once_per_window:
+            return
+        oppo_dashboard_once_per_window.add(once_key)
+
     oppo_trigger_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
         "asset": asset.upper(),
@@ -4213,6 +4224,7 @@ def main():
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_dashboard_once_per_window.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
                 pump_finished_tracker_keys.clear()
