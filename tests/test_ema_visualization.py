@@ -5,6 +5,9 @@ import momentum_v3
 
 
 class EmaVisualizationOnlyTests(unittest.TestCase):
+    def test_legacy_ema_guard_status_is_defined_and_always_disabled(self):
+        self.assertIs(momentum_v3.EMA_CONFIRM_ENABLED, False)
+
     def test_scan_markets_does_not_gate_entries_with_ema(self):
         source = inspect.getsource(momentum_v3.scan_markets)
 
