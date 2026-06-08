@@ -150,6 +150,11 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
+def _env_bool(name, default=False):
+    """Return a conventional boolean environment flag (true enables, false disables)."""
+    return os.getenv(name, str(default)).strip().lower() == "true"
+
+
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -167,10 +172,10 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
-EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "false").lower() == "false"
+EMA_CONFIRM_ENABLED = _env_bool("EMA_CONFIRM_ENABLED", False)
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
-EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "false").lower() == "false"
+EMA_PASS_LOG_ENABLED = _env_bool("EMA_PASS_LOG_ENABLED", False)
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -443,6 +448,7 @@ pnl_history        = []
 asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
+oppo_dashboard_once_per_window = set()  # (asset, side, status) entries shown only once per market window
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
 pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
@@ -528,6 +534,7 @@ def reset_state():
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    oppo_dashboard_once_per_window.clear()
     pump_tracker = {}
     pump_log = []
     optimizer_recommendation_history = []
@@ -547,6 +554,7 @@ def reset_oppo_log():
     global oppo_log_suppressed_until
     oppo_last_trigger.clear()
     oppo_trigger_log.clear()
+    oppo_dashboard_once_per_window.clear()
     # Prevent immediate re-population from the very next scan cycle.
     oppo_log_suppressed_until = time.time() + max(2.0, POLL_SECS * 3)
     log.info("[STATE] OPPO trigger log reset by user")
@@ -653,6 +661,7 @@ def save_state():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
@@ -1240,6 +1249,14 @@ def update_pump_trackers(window_start, secs_into):
                 tracker["highest_milestone"] = max_whole_multiple
 
 def _record_oppo_trigger(asset, side, price, status, reason):
+    # GOLDEN setup and gap-block conditions can remain true for many scan polls.
+    # Keep the dashboard useful by showing only their first event per market window.
+    once_key = (asset.lower(), side.lower(), status)
+    if status in {"GOLDEN", "GOLDEN-GAP-BLOCK"}:
+        if once_key in oppo_dashboard_once_per_window:
+            return
+        oppo_dashboard_once_per_window.add(once_key)
+
     oppo_trigger_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
         "asset": asset.upper(),
@@ -3183,6 +3200,7 @@ def _build_state_snapshot():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
@@ -4143,6 +4161,7 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
+    log.info("  EMA entry guard: enabled=%s  fast=%d slow=%d", EMA_CONFIRM_ENABLED, EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
@@ -4213,6 +4232,7 @@ def main():
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_dashboard_once_per_window.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
                 pump_finished_tracker_keys.clear()
