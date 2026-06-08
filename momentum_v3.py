@@ -226,7 +226,7 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "2.0"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "3.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
@@ -238,7 +238,7 @@ OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 10.0
 OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
-OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "true").lower() == "true"
+OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "false"
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
 OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
 OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", "1"))
