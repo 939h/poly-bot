@@ -172,10 +172,8 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
-EMA_CONFIRM_ENABLED = _env_bool("EMA_CONFIRM_ENABLED", False)
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
-EMA_PASS_LOG_ENABLED = _env_bool("EMA_PASS_LOG_ENABLED", False)
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -2823,10 +2821,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         _record_oppo_trigger(opp_asset, side, opp_price, status, detail)
                         continue
 
-                if not _ema_confirms_side(opp_asset, side):
-                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
-                    continue
-
                 if CVD_OPPO_ENABLED and not golden_opportunity:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
@@ -2927,9 +2921,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
             continue
-        if not _ema_confirms_side(asset, triggered_side):
-            continue
-
         stats["triggers"] += 1
         log.info("[TRIGGER] %s  price=%.4f  checking volatility + gap guard", triggered_key, triggered_price)
 
@@ -4161,7 +4152,7 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
-    log.info("  EMA entry guard: enabled=%s  fast=%d slow=%d", EMA_CONFIRM_ENABLED, EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
+    log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
@@ -4305,26 +4296,6 @@ def main():
         else:
             time.sleep(POLL_SECS)
 
-
-def _ema_confirms_side(asset, side):
-    if not EMA_CONFIRM_ENABLED:
-        if EMA_PASS_LOG_ENABLED:
-            log.debug("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
-        return True
-    ema_fast, ema_slow = get_ema_snapshot(asset)
-    if ema_fast is None or ema_slow is None:
-        if EMA_PASS_LOG_ENABLED:
-            log.info("[EMA-PASS] %s_%s EMA warmup (ema data not ready yet)", asset.upper(), side.upper())
-        return True
-    if side == "yes":
-        ok = ema_fast >= ema_slow
-    else:
-        ok = ema_fast <= ema_slow
-    if not ok:
-        log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
-    elif EMA_PASS_LOG_ENABLED:
-        log.info("[EMA-PASS] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
-    return ok
 
 
 if __name__ == "__main__":
