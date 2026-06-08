@@ -167,10 +167,8 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
-EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "false").lower() == "false"
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
-EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "false").lower() == "false"
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -443,6 +441,7 @@ pnl_history        = []
 asset_history      = {}
 trade_log          = []
 oppo_trigger_log   = []
+oppo_dashboard_once_per_window = set()  # (asset, side, status) entries shown only once per market window
 pump_tracker       = {}  # key asset_side -> trough/current/multiple tracking for prices starting below 20c
 pump_log           = []  # historical pump milestone events
 pump_finished_tracker_keys = set()  # (window_start, asset_side) pairs already finalized this window
@@ -528,6 +527,7 @@ def reset_state():
     asset_history = {}
     trade_log     = []
     oppo_trigger_log = []
+    oppo_dashboard_once_per_window.clear()
     pump_tracker = {}
     pump_log = []
     optimizer_recommendation_history = []
@@ -547,6 +547,7 @@ def reset_oppo_log():
     global oppo_log_suppressed_until
     oppo_last_trigger.clear()
     oppo_trigger_log.clear()
+    oppo_dashboard_once_per_window.clear()
     # Prevent immediate re-population from the very next scan cycle.
     oppo_log_suppressed_until = time.time() + max(2.0, POLL_SECS * 3)
     log.info("[STATE] OPPO trigger log reset by user")
@@ -1240,6 +1241,14 @@ def update_pump_trackers(window_start, secs_into):
                 tracker["highest_milestone"] = max_whole_multiple
 
 def _record_oppo_trigger(asset, side, price, status, reason):
+    # GOLDEN setup and gap-block conditions can remain true for many scan polls.
+    # Keep the dashboard useful by showing only their first event per market window.
+    once_key = (asset.lower(), side.lower(), status)
+    if status in {"GOLDEN", "GOLDEN-GAP-BLOCK"}:
+        if once_key in oppo_dashboard_once_per_window:
+            return
+        oppo_dashboard_once_per_window.add(once_key)
+
     oppo_trigger_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
         "asset": asset.upper(),
@@ -2806,10 +2815,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         _record_oppo_trigger(opp_asset, side, opp_price, status, detail)
                         continue
 
-                if not _ema_confirms_side(opp_asset, side):
-                    _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "ema-not-confirmed")
-                    continue
-
                 if CVD_OPPO_ENABLED and not golden_opportunity:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     cvd_key = opp_key
@@ -2910,9 +2915,6 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
         if not _trend_guard_ok(asset, triggered_side, results):
             trend_guarded_assets.add(asset)
             continue
-        if not _ema_confirms_side(asset, triggered_side):
-            continue
-
         stats["triggers"] += 1
         log.info("[TRIGGER] %s  price=%.4f  checking volatility + gap guard", triggered_key, triggered_price)
 
@@ -4143,6 +4145,7 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
+    log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
@@ -4213,6 +4216,7 @@ def main():
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
                 oppo_cvd_polls.clear()
+                oppo_dashboard_once_per_window.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
                 pump_finished_tracker_keys.clear()
@@ -4285,26 +4289,6 @@ def main():
         else:
             time.sleep(POLL_SECS)
 
-
-def _ema_confirms_side(asset, side):
-    if not EMA_CONFIRM_ENABLED:
-        if EMA_PASS_LOG_ENABLED:
-            log.debug("[EMA-PASS] %s_%s EMA check disabled", asset.upper(), side.upper())
-        return True
-    ema_fast, ema_slow = get_ema_snapshot(asset)
-    if ema_fast is None or ema_slow is None:
-        if EMA_PASS_LOG_ENABLED:
-            log.info("[EMA-PASS] %s_%s EMA warmup (ema data not ready yet)", asset.upper(), side.upper())
-        return True
-    if side == "yes":
-        ok = ema_fast >= ema_slow
-    else:
-        ok = ema_fast <= ema_slow
-    if not ok:
-        log.info("[EMA-BLOCK] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
-    elif EMA_PASS_LOG_ENABLED:
-        log.info("[EMA-PASS] %s_%s ema%d=%.4f ema%d=%.4f", asset.upper(), side.upper(), EMA_FAST_PERIOD, ema_fast, EMA_SLOW_PERIOD, ema_slow)
-    return ok
 
 
 if __name__ == "__main__":
