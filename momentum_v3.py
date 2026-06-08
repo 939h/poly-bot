@@ -764,6 +764,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
         "pnl":      round(pnl, 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_kraken_gap": pos.get("entry_kraken_gap"),
         "entry_kraken_gap_ratio": pos.get("entry_kraken_gap_ratio"),
         "entry_rebound_ratio": pos.get("entry_rebound_ratio"),
         "entry_cvd_slope": pos.get("entry_cvd_slope"),
@@ -1722,9 +1723,12 @@ def force_sell_gap_triggered(asset, secs_into):
 
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
                   is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False,
-                  entry_rvol=None, entry_kraken_gap_ratio=None, entry_rebound_ratio=None,
+                  entry_rvol=None, entry_kraken_gap=None, entry_kraken_gap_ratio=None, entry_rebound_ratio=None,
                   entry_cvd_slope=None, is_golden_oppo=False):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
+    base_asset = key.split("_")[0]
+    if entry_kraken_gap is None:
+        entry_kraken_gap = get_kraken_gap(base_asset)
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
@@ -1801,12 +1805,12 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "window_start":         window_start,
         "is_simulated":         is_simulated,
         "entry_rvol":           round(float(entry_rvol), 3) if entry_rvol is not None else None,
+        "entry_kraken_gap":      round(float(entry_kraken_gap), 4) if entry_kraken_gap is not None else None,
         "entry_kraken_gap_ratio":   round(float(entry_kraken_gap_ratio), 3) if entry_kraken_gap_ratio is not None else None,
         "entry_rebound_ratio":   round(float(entry_rebound_ratio), 3) if entry_rebound_ratio is not None else None,
         "entry_cvd_slope":       round(float(entry_cvd_slope), 6) if entry_cvd_slope is not None else None,
         "is_golden_oppo":        bool(is_golden_oppo),
     }
-    base_asset = key.split("_")[0]
     last_entry_ts[base_asset] = time.time()
     stats["buys"] += 1
     tag = "COUNTER " if is_counter else ("REBOUND FLIP " if is_rebound else ("FLIP " if is_flip else ""))
@@ -2875,6 +2879,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   is_simulated=bool((buy.get("resp") or {}).get("simulated")),
                                   buy_amount=oppo_buy_amount,
                                   entry_rvol=entry_rvol,
+                                  entry_kraken_gap=actual_gap,
                                   entry_kraken_gap_ratio=entry_kraken_gap_ratio,
                                   entry_rebound_ratio=rebound_ratio,
                                   entry_cvd_slope=entry_cvd_slope,
@@ -3524,6 +3529,9 @@ function renderTradeLog(log){
     const rvol=t.entry_rvol!=null?Number(t.entry_rvol):null;
     const rvolTxt=rvol!=null?rvol.toFixed(2)+'x':'—';
     const rvolCls=rvol!=null?'blue':'dim';
+    const krakenGap=t.entry_kraken_gap!=null?Number(t.entry_kraken_gap):null;
+    const krakenGapTxt=krakenGap!=null?krakenGap.toFixed(4):'—';
+    const krakenGapCls=krakenGap!=null?'amber':'dim';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
       <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}</td>
@@ -3533,12 +3541,13 @@ function renderTradeLog(log){
       <td>${fmt(t.exit_px, 2)}</td>
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
       <td class="${rvolCls}" style="font-weight:600">${rvolTxt}</td>
+      <td class="${krakenGapCls}" style="font-weight:600">${krakenGapTxt}</td>
     </tr>`;
   }).join('');
   const extra=log.length-TL_COLLAPSE;
   const btn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tlExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
   return `<div style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th><th>Buy Kraken Gap</th></tr></thead>
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
@@ -3949,13 +3958,14 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "pnl", "entry_rvol"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "pnl", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
             t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
             t.get("is_counter", False), t.get("pnl", ""), t.get("entry_rvol", ""),
+            t.get("entry_kraken_gap", ""), t.get("entry_kraken_gap_ratio", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
