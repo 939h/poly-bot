@@ -150,6 +150,11 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
+def _env_bool(name, default=False):
+    """Return a conventional boolean environment flag (true enables, false disables)."""
+    return os.getenv(name, str(default)).strip().lower() == "true"
+
+
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -167,10 +172,10 @@ ENTRY_AFTER    = 25    # seconds into window before buying allowed (5 min)
 STOP_BUY_AT    = 810    # seconds into window after which no new buys (13.5 min)
 TREND_GUARD_PRICE = 0.65
 TREND_GUARD_MIN_CONFIRMATIONS = 2
-EMA_CONFIRM_ENABLED = os.getenv("EMA_CONFIRM_ENABLED", "false").lower() == "false"
+EMA_CONFIRM_ENABLED = _env_bool("EMA_CONFIRM_ENABLED", False)
 EMA_FAST_PERIOD = int(os.getenv("EMA_FAST_PERIOD", "8"))
 EMA_SLOW_PERIOD = int(os.getenv("EMA_SLOW_PERIOD", "25"))
-EMA_PASS_LOG_ENABLED = os.getenv("EMA_PASS_LOG_ENABLED", "false").lower() == "false"
+EMA_PASS_LOG_ENABLED = _env_bool("EMA_PASS_LOG_ENABLED", False)
 
 
 # ── Gap guard (inverted — large gap ALLOWS buy) ───────────────────────────────
@@ -656,6 +661,7 @@ def save_state():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
@@ -3194,6 +3200,7 @@ def _build_state_snapshot():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
@@ -4154,6 +4161,7 @@ def main():
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
+    log.info("  EMA entry guard: enabled=%s  fast=%d slow=%d", EMA_CONFIRM_ENABLED, EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
