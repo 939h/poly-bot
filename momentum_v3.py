@@ -253,7 +253,6 @@ OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", "
 OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", "0.5"))
 OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
 CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
-CVD_OPPO_SLOPE_POLLS = max(1, int(os.getenv("CVD_OPPO_SLOPE_POLLS", "3")))
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
@@ -388,7 +387,6 @@ oppo_knife_blacklisted_assets = set()  # assets blocked by OPPO falling-knife gu
 trend_guarded_assets = set()       # assets blocked by trend guard this window
 oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
-oppo_cvd_polls = {}                # key asset_side -> consecutive cvd-confirmed polls
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
 
@@ -1282,9 +1280,6 @@ def _clear_oppo_tracking_for_asset(asset):
         tracker_asset = oppo_counter_tracker[key].get("asset") if isinstance(oppo_counter_tracker[key], dict) else None
         if tracker_asset == asset or key.startswith(prefixes):
             del oppo_counter_tracker[key]
-    for key in list(oppo_cvd_polls.keys()):
-        if key.startswith(prefixes):
-            del oppo_cvd_polls[key]
 
 
 def blacklist_oppo_dead_zone_asset(asset, side, price):
@@ -1322,6 +1317,11 @@ def _oppo_golden_rvol_setup(asset, side):
         and snapshot.get("side") == side and probability_ok
     )
     return snapshot
+
+
+def _oppo_cvd_slope_confirms(side, slope):
+    """Return whether Kraken CVD direction confirms the requested OPPO side."""
+    return float(slope) > 0 if side == "yes" else float(slope) < 0
 
 
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
@@ -2839,22 +2839,19 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if CVD_OPPO_ENABLED and not golden_opportunity:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
-                    cvd_key = opp_key
-                    slope_ok = (cvd_slope > 0) if side == "yes" else (cvd_slope < 0)
-                    if slope_ok:
-                        oppo_cvd_polls[cvd_key] = int(oppo_cvd_polls.get(cvd_key, 0)) + 1
-                    else:
-                        oppo_cvd_polls[cvd_key] = 0
-                    if oppo_cvd_polls.get(cvd_key, 0) < CVD_OPPO_SLOPE_POLLS:
-                        detail = f"polls {oppo_cvd_polls.get(cvd_key,0)}/{CVD_OPPO_SLOPE_POLLS} slope={cvd_slope:.6f} win={cvd_window:.2f}"
+                    slope_ok = _oppo_cvd_slope_confirms(side, cvd_slope)
+                    if not slope_ok:
+                        expected = "positive" if side == "yes" else "negative"
+                        detail = f"slope={cvd_slope:.6f} expected={expected} win={cvd_window:.2f}"
                         if not FLEXI_RVOL_ENABLED:
-                            record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-WAIT", detail)
-                            _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "cvd-not-confirmed")
+                            record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-BLOCK", detail)
+                            _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "cvd-direction-not-confirmed")
                             continue
                         entry_out_conditions.append("OUT-CVD")
                         record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-FLEXI", detail)
                         _record_oppo_trigger(opp_asset, side, opp_price, "CVD-FLEXI", detail)
-                    log.info("[OPPO-CVD-PASS] %s_%s polls=%d/%d slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), oppo_cvd_polls.get(cvd_key,0), CVD_OPPO_SLOPE_POLLS, cvd_slope, cvd_window)
+                    else:
+                        log.info("[OPPO-CVD-PASS] %s_%s slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), cvd_slope, cvd_window)
 
                 if golden_opportunity:
                     rvol_snapshot = get_volume_snapshot(opp_asset, VOLUME_AVG_PERIOD, get_rvol_min(secs_into))
@@ -4189,7 +4186,7 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
-    log.info("  OPPO CVD gate (Kraken): enabled=%s  slope_polls=%d (YES slope>0, NO slope<0)", CVD_OPPO_ENABLED, CVD_OPPO_SLOPE_POLLS)
+    log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => OUT-CVD flexi", CVD_OPPO_ENABLED)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
@@ -4258,7 +4255,6 @@ def main():
                 trend_guarded_assets.clear()
                 oppo_rebound_tracker.clear()
                 oppo_counter_tracker.clear()
-                oppo_cvd_polls.clear()
                 oppo_dashboard_once_per_window.clear()
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
