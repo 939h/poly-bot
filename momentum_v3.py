@@ -257,7 +257,7 @@ VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "false").lower() == "true"
-OPPO_GOLDEN_RVOL_ENABLED = os.getenv("OPPO_GOLDEN_RVOL_ENABLED", "fapse").lower() == "true"
+OPPO_GOLDEN_RVOL_ENABLED = os.getenv("OPPO_GOLDEN_RVOL_ENABLED", "true").lower() == "true"
 OPPO_GOLDEN_RVOL_LOOKBACK = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_LOOKBACK", "3")))
 OPPO_GOLDEN_RVOL_MIN_HIGH = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_MIN_HIGH", "2")))
 OPPO_GOLDEN_RVOL_THRESHOLD = float(os.getenv("OPPO_GOLDEN_RVOL_THRESHOLD", "1.0"))
