@@ -243,7 +243,7 @@ OPPO_GAP_FLEXI_END_SEC  = 600  # OUT-GAP flexi buys allowed only during seconds 
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.60")) #set 0.20 means lose 80% of fund
-OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "2.0"))
+OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "1.5"))
 OPPO_FALLING_KNIFE_MIN_MOVE = float(os.getenv("OPPO_FALLING_KNIFE_MIN_MOVE", "0.25"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
 OPPO_FIRST_SELL_FRACTION = 0.50
@@ -1753,6 +1753,9 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     base_asset = key.split("_")[0]
     if entry_kraken_gap is None:
         entry_kraken_gap = get_kraken_gap(base_asset)
+    if entry_kraken_gap_ratio is None and entry_kraken_gap is not None:
+        gap_unit = candle_open.get(base_asset, 0.0) * GAP_SWING.get(base_asset, 0.001)
+        entry_kraken_gap_ratio = entry_kraken_gap / gap_unit if gap_unit > 0 else None
     if filled_shares is not None and filled_shares > 0:
         net_shares = round(float(filled_shares), 3)
     else:
@@ -3577,9 +3580,9 @@ function renderTradeLog(log){
     const rvol=t.entry_rvol!=null?Number(t.entry_rvol):null;
     const rvolTxt=rvol!=null?rvol.toFixed(2)+'x':'—';
     const rvolCls=rvol!=null?'blue':'dim';
-    const krakenGap=t.entry_kraken_gap!=null?Number(t.entry_kraken_gap):null;
-    const krakenGapTxt=krakenGap!=null?krakenGap.toFixed(4):'—';
-    const krakenGapCls=krakenGap!=null?'amber':'dim';
+    const krakenGapRatio=t.entry_kraken_gap_ratio!=null?Number(t.entry_kraken_gap_ratio):null;
+    const krakenGapRatioTxt=krakenGapRatio!=null?krakenGapRatio.toFixed(3)+'x':'—';
+    const krakenGapRatioCls=krakenGapRatio!=null?'amber':'dim';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
       <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}${goldenTag}${outTags}</td>
@@ -3589,13 +3592,13 @@ function renderTradeLog(log){
       <td>${fmt(t.exit_px, 2)}</td>
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
       <td class="${rvolCls}" style="font-weight:600">${rvolTxt}</td>
-      <td class="${krakenGapCls}" style="font-weight:600">${krakenGapTxt}</td>
+      <td class="${krakenGapRatioCls}" style="font-weight:600">${krakenGapRatioTxt}</td>
     </tr>`;
   }).join('');
   const extra=log.length-TL_COLLAPSE;
   const btn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tlExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
   return `<div id="tradeLogWrap" style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th><th>Buy Kraken Gap</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th><th>Buy Kraken Gap Ratio</th></tr></thead>
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 

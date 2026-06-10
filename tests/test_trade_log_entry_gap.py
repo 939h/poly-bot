@@ -37,15 +37,21 @@ class TradeLogEntryGapTests(unittest.TestCase):
 
         position = momentum_v3.open_positions["btc_yes"]
         self.assertEqual(position["entry_kraken_gap"], 125.25)
+        self.assertEqual(position["entry_kraken_gap_ratio"], 1.252)
 
-        # Later Kraken movement must not change the recorded buy-time gap.
+        # Later Kraken movement must not change the recorded buy-time gap or ratio.
         momentum_v3.live_close["btc"] = 100_500.0
         momentum_v3._record_trade_log("btc_yes", position, "SELL", 0.75, 0.5)
         self.assertEqual(momentum_v3.trade_log[0]["entry_kraken_gap"], 125.25)
+        self.assertEqual(momentum_v3.trade_log[0]["entry_kraken_gap_ratio"], 1.252)
 
-    def test_dashboard_trade_log_shows_buy_time_kraken_gap(self):
-        self.assertIn("Buy Kraken Gap", momentum_v3._DASHBOARD_HTML)
-        self.assertIn("t.entry_kraken_gap", momentum_v3._DASHBOARD_HTML)
+    def test_dashboard_trade_log_shows_buy_time_kraken_gap_ratio(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("Buy Kraken Gap Ratio", html)
+        self.assertIn("t.entry_kraken_gap_ratio", html)
+        self.assertIn("krakenGapRatio.toFixed(3)+'x'", html)
+        self.assertNotIn("<th>Buy Kraken Gap</th>", html)
 
     def test_dashboard_trade_log_marks_only_golden_trades(self):
         html = momentum_v3._DASHBOARD_HTML
