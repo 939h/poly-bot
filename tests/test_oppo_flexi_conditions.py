@@ -31,7 +31,7 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertTrue(momentum_v3._oppo_cvd_slope_confirms("yes", 0.01))
         self.assertTrue(momentum_v3._oppo_cvd_slope_confirms("no", -0.01))
 
-    def test_opposite_cvd_direction_is_out_cvd(self):
+    def test_opposite_cvd_direction_fails_confirmation(self):
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("yes", -0.01))
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("no", 0.01))
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("yes", 0.0))
@@ -79,13 +79,13 @@ class OppoFlexiConditionTests(unittest.TestCase):
         )
         position = momentum_v3.open_positions["btc_yes_oppo"]
 
-        self.assertEqual(position["entry_out_conditions"], ["OUT-RVOL", "OUT-CVD", "OUT-GAP"])
+        self.assertEqual(position["entry_out_conditions"], ["OUT-RVOL", "OUT-GAP"])
         self.assertEqual(position["cost"], momentum_v3.FLEXI_RVOL_BUY_AMOUNT)
 
         momentum_v3._record_trade_log("btc_yes_oppo", position, "OPPO-SELL", 0.2, 1.0)
-        self.assertEqual(momentum_v3.trade_log[0]["entry_out_conditions"], ["OUT-RVOL", "OUT-CVD", "OUT-GAP"])
+        self.assertEqual(momentum_v3.trade_log[0]["entry_out_conditions"], ["OUT-RVOL", "OUT-GAP"])
 
-    def test_oppo_scan_collects_all_three_flexi_conditions(self):
+    def test_oppo_scan_collects_only_rvol_and_gap_flexi_conditions(self):
         source = inspect.getsource(momentum_v3.scan_markets)
 
         for condition in momentum_v3.OPPO_OUT_CONDITIONS:
@@ -95,6 +95,9 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertIn("if CVD_OPPO_ENABLED:", source)
         self.assertNotIn("if CVD_OPPO_ENABLED and not golden_opportunity", source)
         self.assertIn("_oppo_cvd_slope_confirms(side, cvd_slope)", source)
+        self.assertIn('record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-BLOCK", detail)', source)
+        self.assertNotIn('entry_out_conditions.append("OUT-CVD")', source)
+        self.assertNotIn("CVD-FLEXI", source)
         self.assertNotIn("CVD_OPPO_SLOPE_POLLS", source)
 
     def test_dashboard_renders_blue_out_condition_badges(self):
@@ -104,6 +107,8 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertIn("p.entry_out_conditions", html)
         for condition in momentum_v3.OPPO_OUT_CONDITIONS:
             self.assertIn(condition, momentum_v3.OPPO_OUT_CONDITIONS)
+        self.assertNotIn("OUT-CVD", momentum_v3.OPPO_OUT_CONDITIONS)
+        self.assertIn("CVD always blocks", html)
 
     def test_trade_log_csv_exports_out_conditions(self):
         momentum_v3.trade_log = [{"entry_out_conditions": ["OUT-RVOL", "OUT-GAP"]}]

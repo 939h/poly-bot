@@ -165,9 +165,9 @@ SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower(
 SIMULATE_REBOUND_MODE_ENABLED = os.getenv("SIMULATE_REBOUND_MODE_ENABLED", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
-FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for OPPO orders outside RVOL/CVD/gap thresholds
+FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for OPPO orders outside RVOL/gap thresholds
 FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "true").lower() == "true"
-OPPO_OUT_CONDITIONS = ("OUT-RVOL", "OUT-CVD", "OUT-GAP")
+OPPO_OUT_CONDITIONS = ("OUT-RVOL", "OUT-GAP")
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 1.00   # buy if price >= this
@@ -239,7 +239,8 @@ OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.0"))
-OPPO_GAP_FLEXI_END_SEC  = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
+OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
+OPPO_GAP_FLEXI_MAX_MAG = 2.0  # OUT-GAP flexi buys above x2.0 are always blocked
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.60")) #set 0.20 means lose 80% of fund
@@ -693,6 +694,7 @@ def save_state():
             "oppo_gap_mag": OPPO_GAP_MAG,
             "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_gap_flexi_end_sec": OPPO_GAP_FLEXI_END_SEC,
+            "oppo_gap_flexi_max_mag": OPPO_GAP_FLEXI_MAX_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -1328,9 +1330,14 @@ def _oppo_golden_rvol_setup(asset, side):
     return snapshot
 
 
-def _oppo_gap_flexi_allowed(secs_into):
-    """Allow OUT-GAP flexi sizing only during seconds 0 through 600."""
-    return FLEXI_RVOL_ENABLED and 0 <= secs_into <= OPPO_GAP_FLEXI_END_SEC
+def _oppo_gap_flexi_allowed(secs_into, gap_ratio):
+    """Allow OUT-GAP flexi only in its time window and at or below the max magnitude."""
+    return (
+        FLEXI_RVOL_ENABLED
+        and 0 <= secs_into <= OPPO_GAP_FLEXI_END_SEC
+        and gap_ratio is not None
+        and gap_ratio <= OPPO_GAP_FLEXI_MAX_MAG
+    )
 
 
 def _oppo_entry_mode_allowed(golden_opportunity):
@@ -2848,11 +2855,14 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
                 if actual_gap is not None:
                     gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_opportunity else OPPO_GAP_MAG
-                    oppo_gap_threshold = c_open * GAP_SWING.get(opp_asset, 0.001) * gap_magnitude
+                    gap_unit = c_open * GAP_SWING.get(opp_asset, 0.001)
+                    gap_ratio = actual_gap / gap_unit if gap_unit > 0 else None
+                    oppo_gap_threshold = gap_unit * gap_magnitude
                     if actual_gap >= oppo_gap_threshold:
                         status = "GOLDEN-GAP-FLEXI" if golden_opportunity else "GAP-FLEXI"
-                        detail = f"{actual_gap:.4f}>={oppo_gap_threshold:.4f} mag={gap_magnitude:.2f}x"
-                        if not _oppo_gap_flexi_allowed(secs_into):
+                        ratio_detail = f" ratio={gap_ratio:.2f}x" if gap_ratio is not None else ""
+                        detail = f"{actual_gap:.4f}>={oppo_gap_threshold:.4f} mag={gap_magnitude:.2f}x{ratio_detail}"
+                        if not _oppo_gap_flexi_allowed(secs_into, gap_ratio):
                             blocked_status = "GOLDEN-GAP-BLOCK" if golden_opportunity else "GAP-BLOCK"
                             record_oppo_trigger(opp_key, opp_asset, side, opp_price, blocked_status, detail)
                             _record_oppo_trigger(opp_asset, side, opp_price, blocked_status, detail)
@@ -2868,13 +2878,9 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     if not slope_ok:
                         expected = "positive" if side == "yes" else "negative"
                         detail = f"slope={cvd_slope:.6f} expected={expected} win={cvd_window:.2f}"
-                        if not FLEXI_RVOL_ENABLED:
-                            record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-BLOCK", detail)
-                            _record_oppo_trigger(opp_asset, side, opp_price, "SKIPPED", "cvd-direction-not-confirmed")
-                            continue
-                        entry_out_conditions.append("OUT-CVD")
-                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-FLEXI", detail)
-                        _record_oppo_trigger(opp_asset, side, opp_price, "CVD-FLEXI", detail)
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "CVD-BLOCK", detail)
+                        _record_oppo_trigger(opp_asset, side, opp_price, "CVD-BLOCK", detail)
+                        continue
                     else:
                         log.info("[OPPO-CVD-PASS] %s_%s slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), cvd_slope, cvd_window)
 
@@ -3105,13 +3111,15 @@ def _build_state_snapshot():
             probability is None or probability >= OPPO_GOLDEN_MIN_PROBABILITY
         )
         prior_rvols = list(golden.get("rvols", []))
-        golden_gap_limit = c_open * GAP_SWING.get(a, 0.001) * OPPO_GOLDEN_GAP_MAG if c_open > 0 else None
+        golden_gap_unit = c_open * GAP_SWING.get(a, 0.001) if c_open > 0 else None
+        golden_gap_limit = golden_gap_unit * OPPO_GOLDEN_GAP_MAG if golden_gap_unit is not None else None
         golden_actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
+        golden_gap_ratio = golden_actual_gap / golden_gap_unit if golden_actual_gap is not None and golden_gap_unit else None
         golden_gap_passed = bool(
             golden_gap_limit is None or golden_actual_gap is None or golden_actual_gap < golden_gap_limit
         )
         setup_qualified = bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok)
-        golden_gap_flexi = bool(setup_qualified and not golden_gap_passed and _oppo_gap_flexi_allowed(secs_in))
+        golden_gap_flexi = bool(setup_qualified and not golden_gap_passed and _oppo_gap_flexi_allowed(secs_in, golden_gap_ratio))
         golden_rvol_out[a] = {
             "enabled": OPPO_GOLDEN_RVOL_ENABLED,
             "armed": bool(golden.get("armed", False)),
@@ -3270,6 +3278,7 @@ def _build_state_snapshot():
             "oppo_gap_mag": OPPO_GAP_MAG,
             "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_gap_flexi_end_sec": OPPO_GAP_FLEXI_END_SEC,
+            "oppo_gap_flexi_max_mag": OPPO_GAP_FLEXI_MAX_MAG,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -3698,7 +3707,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','CVD-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','CVD-BLOCK','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3933,8 +3942,8 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
-        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — OUT-RVOL / OUT-CVD use $${cfg.flexi_rvol_buy_amount||1}; OUT-GAP only through ${cfg.oppo_gap_flexi_end_sec||600}s</td><td>RVOL threshold</td><td>${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
-        <tr><td>OPPO gap guards</td><td>Normal Kraken gap ratio x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden Kraken gap ratio</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — reaching a gap threshold uses OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s; later it blocks</td></tr>
+        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — OUT-RVOL uses $${cfg.flexi_rvol_buy_amount||1}; CVD always blocks; OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s and at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)}</td><td>RVOL threshold</td><td>${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
+        <tr><td>OPPO gap guards</td><td>Normal Kraken gap ratio x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden Kraken gap ratio</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — OUT-GAP flexi requires ratio at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)} through ${cfg.oppo_gap_flexi_end_sec||600}s; otherwise it blocks</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
     </div>
@@ -4220,11 +4229,11 @@ def main():
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
-    log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => OUT-CVD flexi", CVD_OPPO_ENABLED)
+    log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => CVD-BLOCK", CVD_OPPO_ENABLED)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
-        "  OPPO flexi guards: enabled=%s  RVOL/CVD/gap outside threshold => order=$%.2f; RVOL avg_period=%d threshold>%.4fx × minute",
+        "  OPPO flexi guards: enabled=%s  RVOL/gap outside threshold may use order=$%.2f; CVD always blocks; RVOL avg_period=%d threshold>%.4fx × minute",
         FLEXI_RVOL_ENABLED, FLEXI_RVOL_BUY_AMOUNT, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
     )
     log.info("  OPPO modes: master=%s normal=%s golden=%s", OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED)
@@ -4233,7 +4242,7 @@ def main():
         OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_LOOKBACK,
         OPPO_GOLDEN_RVOL_THRESHOLD, OPPO_GOLDEN_MIN_PROBABILITY * 100, OPPO_GOLDEN_MIN_SAMPLES,
     )
-    log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx  flexi allowed=0–%ds", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG, OPPO_GAP_FLEXI_END_SEC)
+    log.info("  OPPO gap guards: normal magnitude=%.2fx  golden magnitude=%.2fx  flexi allowed=0–%ds up to %.2fx", OPPO_GAP_MAG, OPPO_GOLDEN_GAP_MAG, OPPO_GAP_FLEXI_END_SEC, OPPO_GAP_FLEXI_MAX_MAG)
     log.info("  OPPO optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d", OPPO_OPTIMIZER_ENABLED, OPPO_OPTIMIZER_MIN_VALIDATION_SAMPLES)
     log.info("  Standard OPPO pump optimizer: enabled=%s mode=shadow-recommend-only min_validation_samples=%d score_equivalence=%.2f pump_trace=%ds", OPPO_TRADE_OPTIMIZER_ENABLED, OPPO_TRADE_OPTIMIZER_MIN_VALIDATION_TRADES, OPPO_OPTIMIZER_SCORE_EQUIVALENCE, PUMP_TRACK_WINDOW_SECS)
     log.info("  OPPO counter: enabled=%s  buy %.0f–%.0f¢  sell=x%.2f cap %.0f¢  cut-loss=%.0f%%  order=$%.0f  entry %d–%ds",
