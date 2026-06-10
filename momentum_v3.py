@@ -3101,12 +3101,14 @@ def _build_state_snapshot():
             golden_gap_limit is None or golden_actual_gap is None or golden_actual_gap < golden_gap_limit
         )
         setup_qualified = bool(OPPO_GOLDEN_RVOL_ENABLED and golden.get("armed") and probability_ok)
+        golden_gap_flexi = bool(setup_qualified and not golden_gap_passed and FLEXI_RVOL_ENABLED)
         golden_rvol_out[a] = {
             "enabled": OPPO_GOLDEN_RVOL_ENABLED,
             "armed": bool(golden.get("armed", False)),
             "setup_qualified": setup_qualified,
-            "qualified": bool(setup_qualified and golden_gap_passed),
+            "qualified": bool(setup_qualified and (golden_gap_passed or golden_gap_flexi)),
             "gap_passed": golden_gap_passed,
+            "gap_flexi": golden_gap_flexi,
             "gap_actual": round(float(golden_actual_gap), 4) if golden_actual_gap is not None else None,
             "gap_limit": round(float(golden_gap_limit), 4) if golden_gap_limit is not None else None,
             "gap_magnitude": OPPO_GOLDEN_GAP_MAG,
@@ -3698,9 +3700,10 @@ function render(s){
 
   const goldenCards=assets.map(a=>{
     const g=goldenRvol[a]||{},candles=g.candles||[];
-    const gapBlocked=g.setup_qualified && g.gap_passed===false;
-    const state=!g.enabled?'OFF':(gapBlocked?'GAP BLOCK':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING')));
-    const stateCls=gapBlocked?'red':(g.qualified?'amber':(g.armed?'blue':'dim'));
+    const gapFlexi=g.setup_qualified && g.gap_flexi===true;
+    const gapBlocked=g.setup_qualified && g.gap_passed===false && !gapFlexi;
+    const state=!g.enabled?'OFF':(gapFlexi?'GAP FLEXI':(gapBlocked?'GAP BLOCK':(g.qualified?'GOLDEN':(g.armed?'ARMED':'WATCHING'))));
+    const stateCls=gapBlocked?'red':(gapFlexi?'blue':(g.qualified?'amber':(g.armed?'blue':'dim')));
     const probability=g.probability!=null?`${(Number(g.probability)*100).toFixed(1)}% (${g.wins||0}/${g.samples||0})`:'collecting samples';
     const candleCells=[1,2,3].map(slot=>{
       const c=candles.find(x=>x.label===`i-${slot}`)||{};
@@ -3712,7 +3715,7 @@ function render(s){
       <div class="golden-head"><strong>${a.toUpperCase()}</strong><span class="${stateCls}" style="font-weight:700">${state}${g.side?` · ${(g.side||'').toUpperCase()}`:''}</span></div>
       <div class="golden-candles">${candleCells}</div>
       <div class="golden-meta"><span>${g.high_rvol_count||0}/${g.lookback||3} high · need ${g.required||2}</span><span>history ${probability}</span></div>
-      <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_passed===false?'red':'green'}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
+      <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_flexi?'blue':(g.gap_passed===false?'red':'green')}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
     </div>`;
   }).join('');
 
