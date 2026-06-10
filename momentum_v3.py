@@ -153,6 +153,11 @@ log = logging.getLogger(__name__)
 #  USER SETTINGS
 # =============================================================================
 
+def _env_bool(name, default=False):
+    """Return a conventional boolean environment flag (true enables, false disables)."""
+    return os.getenv(name, str(default)).strip().lower() == "true"
+
+
 ASSETS         = ["btc", "eth", "sol", "xrp"]
 
 DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
@@ -227,24 +232,24 @@ COOLDOWN_SEC           = int(os.getenv("COOLDOWN_SEC", "30"))
 
 # ── 3v1 opposite-direction mode ──────────────────────────────────────────────
 OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true"
-OPPO_NORMAL_ENABLED    = os.getenv("OPPO_NORMAL_ENABLED", "true").lower() == "true"
+OPPO_NORMAL_ENABLED    = os.getenv("OPPO_NORMAL_ENABLED", "false").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "2.0"))
-OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "3.0"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
+OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.0"))
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
-OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.40")) #set 0.20 means lose 80% of fund
+OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.60")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "2.0"))
 OPPO_FALLING_KNIFE_MIN_MOVE = float(os.getenv("OPPO_FALLING_KNIFE_MIN_MOVE", "0.25"))
 OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 10.0
-OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.40"))
-OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "false"
+OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.80"))
+OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
 OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
 OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", "1"))
@@ -662,6 +667,7 @@ def save_state():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
@@ -3227,6 +3233,7 @@ def _build_state_snapshot():
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
+            "ema_confirm_enabled": EMA_CONFIRM_ENABLED,
             "buy_min":    BUY_PRICE_MIN,
             "buy_max":    BUY_PRICE_MAX,
             "sell_multiplier": SELL_MULTIPLIER,
