@@ -37,6 +37,14 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("yes", 0.0))
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("no", 0.0))
 
+    def test_golden_entries_also_run_cvd_guard(self):
+        source = inspect.getsource(momentum_v3.scan_markets)
+        cvd_guard_index = source.index("if CVD_OPPO_ENABLED:")
+        golden_branch_index = source.index("if golden_opportunity:", cvd_guard_index)
+
+        self.assertLess(cvd_guard_index, golden_branch_index)
+        self.assertNotIn("and not golden_opportunity", source[cvd_guard_index:golden_branch_index])
+
     def test_low_rvol_returns_flexi_amount_and_out_flag(self):
         momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
         momentum_v3.FLEXI_RVOL_ENABLED = True
@@ -84,6 +92,8 @@ class OppoFlexiConditionTests(unittest.TestCase):
             self.assertIn(f'entry_out_conditions.append("{condition}")', source)
         self.assertIn("oppo_buy_amount = FLEXI_RVOL_BUY_AMOUNT", source)
         self.assertIn("entry_out_conditions=entry_out_conditions", source)
+        self.assertIn("if CVD_OPPO_ENABLED:", source)
+        self.assertNotIn("if CVD_OPPO_ENABLED and not golden_opportunity", source)
         self.assertIn("_oppo_cvd_slope_confirms(side, cvd_slope)", source)
         self.assertNotIn("CVD_OPPO_SLOPE_POLLS", source)
 

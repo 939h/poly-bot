@@ -594,6 +594,7 @@ def save_state():
             "is_rebound":  p.get("is_rebound", False),
             "is_counter":  p.get("is_counter", k.endswith("_counter")),
             "is_oppo":     p.get("is_oppo", k.endswith("_oppo")),
+            "is_golden_oppo": bool(p.get("is_golden_oppo", False)),
             "entry_out_conditions": list(p.get("entry_out_conditions", [])),
             "rebound_tranches": p.get("rebound_tranches", []),
             "cut_loss_pct": round(p.get("cut_loss_pct", OPPO_CUT_LOSS_PCT if k.endswith("_oppo") else CUT_LOSS_PCT), 4),
@@ -2851,7 +2852,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         _record_oppo_trigger(opp_asset, side, opp_price, status, detail)
                         log.info("[OPPO-%s] %s_%s %s — using flexi order", status, opp_asset.upper(), side.upper(), detail)
 
-                if CVD_OPPO_ENABLED and not golden_opportunity:
+                if CVD_OPPO_ENABLED:
                     _, cvd_window, cvd_slope = get_cvd_snapshot(opp_asset)
                     slope_ok = _oppo_cvd_slope_confirms(side, cvd_slope)
                     if not slope_ok:
@@ -2874,7 +2875,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     probability_text = f"{probability:.1%}" if probability is not None else "n/a"
                     prior_rvols = ",".join(f"{value:.2f}" for value in golden_setup.get("rvols", []) if value is not None)
                     log.info(
-                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — bypassing knife/CVD/current-RVOL guards",
+                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — bypassing knife/current-RVOL guards",
                         opp_asset.upper(), side.upper(), golden_setup.get("high_rvol_count", 0),
                         OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
                         golden_setup.get("wins", 0), golden_setup.get("samples", 0),
@@ -3034,6 +3035,7 @@ def _build_state_snapshot():
             "is_flip":   p.get("is_flip", False),
             "is_rebound": p.get("is_rebound", False),
             "is_counter": p.get("is_counter", k.endswith("_counter")),
+            "is_golden_oppo": bool(p.get("is_golden_oppo", False)),
             "entry_out_conditions": list(p.get("entry_out_conditions", [])),
             "rebound_tranches": p.get("rebound_tranches", []),
             "pnl":       pnl_unreal,
@@ -3560,6 +3562,7 @@ function renderTradeLog(log){
     const p=t.pnl||0,ps=(p>=0?'+':'')+p.toFixed(4);
     const flipTag=t.is_flip?'<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;font-size:10px;margin-left:4px">FLIP</span>':'';
     const counterTag=t.is_counter?'<span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca;font-size:10px;margin-left:4px">COUNTER</span>':'';
+    const goldenTag=t.is_golden_oppo?'<span class="badge" style="background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08;font-size:10px;margin-left:4px">GOLDEN</span>':'';
     const outTags=(Array.isArray(t.entry_out_conditions)?t.entry_out_conditions:[]).map(x=>`<span class="badge" style="background:#0d1e2a;color:#60a5fa;border:1px solid #1a3a5c;font-size:10px;margin-left:4px">${x}</span>`).join('');
     const rvol=t.entry_rvol!=null?Number(t.entry_rvol):null;
     const rvolTxt=rvol!=null?rvol.toFixed(2)+'x':'—';
@@ -3569,7 +3572,7 @@ function renderTradeLog(log){
     const krakenGapCls=krakenGap!=null?'amber':'dim';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
-      <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}${outTags}</td>
+      <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}${goldenTag}${outTags}</td>
       <td>${fmt(t.entry, 2)}</td>
       <td>${fmt(t.target, 2)}</td>
       <td>${exitBadge(t.exit, 2)}</td>
@@ -3995,13 +3998,13 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "pnl", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_out_conditions"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "is_golden_oppo", "pnl", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_out_conditions"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
             t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
-            t.get("is_counter", False), t.get("pnl", ""), t.get("entry_rvol", ""),
+            t.get("is_counter", False), t.get("is_golden_oppo", False), t.get("pnl", ""), t.get("entry_rvol", ""),
             t.get("entry_kraken_gap", ""), t.get("entry_kraken_gap_ratio", ""), "|".join(t.get("entry_out_conditions", [])),
         ])
     return buf.getvalue().encode("utf-8")

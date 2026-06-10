@@ -47,6 +47,22 @@ class TradeLogEntryGapTests(unittest.TestCase):
         self.assertIn("Buy Kraken Gap", momentum_v3._DASHBOARD_HTML)
         self.assertIn("t.entry_kraken_gap", momentum_v3._DASHBOARD_HTML)
 
+    def test_dashboard_trade_log_marks_only_golden_trades(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("const goldenTag=t.is_golden_oppo?", html)
+        self.assertIn(">GOLDEN</span>", html)
+
+    def test_trade_log_preserves_golden_mode_flag(self):
+        position = {
+            "opened_at": "12:00", "entry_price": 0.1, "sell_price": 0.2,
+            "is_golden_oppo": True,
+        }
+
+        momentum_v3._record_trade_log("btc_yes_oppo", position, "OPPO-SELL", 0.2, 1.0)
+
+        self.assertTrue(momentum_v3.trade_log[0]["is_golden_oppo"])
+
     def test_trade_log_csv_exports_buy_time_kraken_gap(self):
         momentum_v3.trade_log = [{"entry_kraken_gap": 125.25, "entry_kraken_gap_ratio": 1.2525}]
 
