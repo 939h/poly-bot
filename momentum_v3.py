@@ -239,9 +239,10 @@ OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
-OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
+OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", 2.2"))
 OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
 OPPO_GAP_FLEXI_MAX_MAG = 2.0  # OUT-GAP flexi buys above x2.0 are always blocked
+OPPO_NORMAL_RVOL_BLACKLIST_MAX = 1.0  # normal OPPO RVOL above this blacklists the asset for the window
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
 OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.60")) #set 0.20 means lose 80% of fund
@@ -696,6 +697,7 @@ def save_state():
             "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_gap_flexi_end_sec": OPPO_GAP_FLEXI_END_SEC,
             "oppo_gap_flexi_max_mag": OPPO_GAP_FLEXI_MAX_MAG,
+            "oppo_normal_rvol_blacklist_max": OPPO_NORMAL_RVOL_BLACKLIST_MAX,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -1360,13 +1362,22 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
     minute = get_rvol_minute(secs_into)
     rvol_min = get_rvol_min(secs_into=secs_into)
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
-    if not OPPO_RVOL_GUARD_ENABLED:
-        return True, vol, BUY_AMOUNT, False
-
     rvol = vol.get("rvol")
     avg = vol.get("average")
     current = vol.get("current")
     opp_key = f"{asset}_{side}"
+
+    if rvol is not None and float(rvol) > OPPO_NORMAL_RVOL_BLACKLIST_MAX:
+        rvol = float(rvol)
+        oppo_rvol_blacklisted_assets.add(asset)
+        detail = f"{rvol:.3f}x > {OPPO_NORMAL_RVOL_BLACKLIST_MAX:.3f}x; normal OPPO blacklisted this window"
+        record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
+        _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
+        return False, vol, None, False
+
+    if not OPPO_RVOL_GUARD_ENABLED:
+        return True, vol, BUY_AMOUNT, False
+
     if rvol is None:
         detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles"
         record_oppo_trigger(opp_key, asset, side, price, "RVOL-WAIT", detail)
@@ -3280,6 +3291,7 @@ def _build_state_snapshot():
             "oppo_golden_gap_mag": OPPO_GOLDEN_GAP_MAG,
             "oppo_gap_flexi_end_sec": OPPO_GAP_FLEXI_END_SEC,
             "oppo_gap_flexi_max_mag": OPPO_GAP_FLEXI_MAX_MAG,
+            "oppo_normal_rvol_blacklist_max": OPPO_NORMAL_RVOL_BLACKLIST_MAX,
             "oppo_counter_enabled": OPPO_COUNTER_ENABLED,
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
@@ -3948,7 +3960,7 @@ function render(s){
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
-        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — OUT-RVOL uses $${cfg.flexi_rvol_buy_amount||1}; CVD always blocks; OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s and at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)}</td><td>RVOL threshold</td><td>${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
+        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — OUT-RVOL uses $${cfg.flexi_rvol_buy_amount||1}; normal OPPO RVOL above x${Number(cfg.oppo_normal_rvol_blacklist_max||1).toFixed(2)} blacklists for the window; CVD always blocks; OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s and at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)}</td><td>RVOL threshold</td><td>${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
         <tr><td>OPPO gap guards</td><td>Normal Kraken gap ratio x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden Kraken gap ratio</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — OUT-GAP flexi requires ratio at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)} through ${cfg.oppo_gap_flexi_end_sec||600}s; otherwise it blocks</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
@@ -4243,6 +4255,7 @@ def main():
         FLEXI_RVOL_ENABLED, FLEXI_RVOL_BUY_AMOUNT, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
     )
     log.info("  OPPO modes: master=%s normal=%s golden=%s", OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED)
+    log.info("  OPPO normal RVOL blacklist: rvol > %.2fx blacklists asset for current window; Golden bypasses", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info(
         "  OPPO golden fourth-window: enabled=%s  prior-high=%d/%d > %.2fx  historical reversal >= %.0f%% over >=%d samples",
         OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_RVOL_MIN_HIGH, OPPO_GOLDEN_RVOL_LOOKBACK,

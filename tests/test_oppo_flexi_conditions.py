@@ -13,10 +13,12 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.original_rvol_enabled = momentum_v3.OPPO_RVOL_GUARD_ENABLED
         self.original_flexi_enabled = momentum_v3.FLEXI_RVOL_ENABLED
         self.original_volume_snapshot = momentum_v3.get_volume_snapshot
+        self.original_rvol_blacklisted = momentum_v3.oppo_rvol_blacklisted_assets
         momentum_v3.open_positions = {}
         momentum_v3.last_entry_ts = {}
         momentum_v3.stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
         momentum_v3.trade_log = []
+        momentum_v3.oppo_rvol_blacklisted_assets = set()
 
     def tearDown(self):
         momentum_v3.open_positions = self.original_open_positions
@@ -26,6 +28,7 @@ class OppoFlexiConditionTests(unittest.TestCase):
         momentum_v3.OPPO_RVOL_GUARD_ENABLED = self.original_rvol_enabled
         momentum_v3.FLEXI_RVOL_ENABLED = self.original_flexi_enabled
         momentum_v3.get_volume_snapshot = self.original_volume_snapshot
+        momentum_v3.oppo_rvol_blacklisted_assets = self.original_rvol_blacklisted
 
     def test_cvd_direction_confirms_matching_side_without_poll_wait(self):
         self.assertTrue(momentum_v3._oppo_cvd_slope_confirms("yes", 0.01))
@@ -58,11 +61,11 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertTrue(is_out)
         self.assertEqual(amount, momentum_v3.FLEXI_RVOL_BUY_AMOUNT)
 
-    def test_high_rvol_returns_normal_amount_without_out_flag(self):
+    def test_confirmed_rvol_at_or_below_one_returns_normal_amount_without_out_flag(self):
         momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
         momentum_v3.FLEXI_RVOL_ENABLED = True
         momentum_v3.get_volume_snapshot = lambda *args: {
-            "rvol": 10.0, "average": 100.0, "current": 1000.0,
+            "rvol": 0.8, "average": 100.0, "current": 80.0,
         }
 
         ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 600)
@@ -70,6 +73,45 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertFalse(is_out)
         self.assertEqual(amount, momentum_v3.BUY_AMOUNT)
+
+    def test_normal_oppo_rvol_above_one_blacklists_asset_for_window(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 1.001, "average": 100.0, "current": 100.1,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 600)
+
+        self.assertFalse(ok)
+        self.assertIsNone(amount)
+        self.assertFalse(is_out)
+        self.assertIn("btc", momentum_v3.oppo_rvol_blacklisted_assets)
+
+    def test_normal_oppo_high_rvol_blacklist_applies_when_regular_rvol_guard_is_disabled(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = False
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 1.5, "average": 100.0, "current": 150.0,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("eth", "no", 0.1, 300)
+
+        self.assertFalse(ok)
+        self.assertIsNone(amount)
+        self.assertFalse(is_out)
+        self.assertIn("eth", momentum_v3.oppo_rvol_blacklisted_assets)
+
+    def test_normal_oppo_rvol_equal_to_one_is_not_blacklisted(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 1.0, "average": 100.0, "current": 100.0,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 600)
+
+        self.assertTrue(ok)
+        self.assertEqual(amount, momentum_v3.BUY_AMOUNT)
+        self.assertFalse(is_out)
+        self.assertNotIn("btc", momentum_v3.oppo_rvol_blacklisted_assets)
 
     def test_position_and_trade_log_preserve_ordered_out_conditions(self):
         momentum_v3.open_position(
