@@ -5,6 +5,12 @@ import momentum_v3
 
 
 class OppoCvdStopCountdownTests(unittest.TestCase):
+    def test_legacy_short_cvd_import_remains_available_for_mixed_deployments(self):
+        import kraken_ws
+
+        self.assertTrue(callable(kraken_ws.get_short_cvd_slope))
+        self.assertEqual(kraken_ws.get_short_cvd_slope("btc"), kraken_ws.get_cvd_snapshot("btc")[2])
+
     def test_oppo_stop_snapshots_cvd_and_restarts_on_improvement_from_baseline(self):
         source = inspect.getsource(momentum_v3.manage_positions)
 

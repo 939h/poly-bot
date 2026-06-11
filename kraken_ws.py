@@ -12,7 +12,7 @@ Exports:
     get_ema_snapshot(asset) — thread-safe EMA(8)/EMA(25) lookup
     get_candle_history(asset, limit=18) — thread-safe Kraken candle history
     get_cvd_snapshot(asset) — thread-safe (session, window, slope) lookup
-    get_short_cvd_slope(asset, window_secs=15) — thread-safe short-period CVD slope lookup
+    get_short_cvd_slope(asset, window_secs=15) — compatibility alias for mixed deployments
     get_volume_snapshot(asset, period=20, rvol_min=1.5) — Kraken 15m RVOL
     start_kraken_metrics_feed() — prefetch OHLC and launch Kraken WebSocket
 """
@@ -183,6 +183,16 @@ def get_cvd_snapshot(asset):
             float(cvd_slope.get(asset, 0.0)),
         )
 
+
+def get_short_cvd_slope(asset, window_secs=15):
+    """Compatibility alias for older momentum_v3 deployments.
+
+    Current momentum_v3 snapshots CVD when its stop countdown starts and does
+    not call this helper. Keeping the export prevents mixed-version deploys from
+    crashing while both files roll out.
+    """
+    del window_secs
+    return get_cvd_snapshot(asset)[2]
 
 
 def _normalise_ohlc_row(row, closed=False):
