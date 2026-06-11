@@ -166,7 +166,7 @@ SIMULATE_REBOUND_MODE_ENABLED = os.getenv("SIMULATE_REBOUND_MODE_ENABLED", "fals
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for OPPO orders outside RVOL/gap thresholds
-FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "true").lower() == "true"
+FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "false").lower() == "true"
 OPPO_OUT_CONDITIONS = ("OUT-RVOL", "OUT-GAP")
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
