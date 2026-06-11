@@ -183,6 +183,7 @@ def get_cvd_snapshot(asset):
         )
 
 
+
 def _normalise_ohlc_row(row, closed=False):
     close = float(row.get("close", 0.0) or 0.0)
     volume = float(row.get("volume", 0.0) or 0.0)
