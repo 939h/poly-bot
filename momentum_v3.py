@@ -168,6 +168,7 @@ REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # 
 FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for OPPO orders outside RVOL/gap thresholds
 FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "false").lower() == "true"
 OPPO_OUT_CONDITIONS = ("OUT-RVOL", "OUT-GAP")
+OPPO_SUPPRESSED_TRIGGER_STATUSES = frozenset({"RVOL-BLOCK", "CVD-BLOCK"})
 
 # ── Buy trigger ───────────────────────────────────────────────────────────────
 BUY_PRICE_MIN  = 1.00   # buy if price >= this
@@ -237,8 +238,8 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
-OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.0"))
-OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.0"))
+OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
+OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
 OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
 OPPO_GAP_FLEXI_MAX_MAG = 2.0  # OUT-GAP flexi buys above x2.0 are always blocked
 OPPO_SELL_MULTIPLIER   = float(os.getenv("OPPO_SELL_MULTIPLIER", "5.0"))
@@ -438,7 +439,7 @@ def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
 
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
-    if time.time() < oppo_log_suppressed_until:
+    if status in OPPO_SUPPRESSED_TRIGGER_STATUSES or time.time() < oppo_log_suppressed_until:
         return
     oppo_last_trigger[opp_key] = {
         "asset": opp_asset,
@@ -774,6 +775,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_oppo": pos.get("is_oppo", key.endswith("_oppo")),
         "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
         "pnl":      round(pnl, 4),
+        "cost":     round(float(pos.get("cost", 0.0)), 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
         "entry_kraken_gap": pos.get("entry_kraken_gap"),
         "entry_kraken_gap_ratio": pos.get("entry_kraken_gap_ratio"),
@@ -1263,6 +1265,9 @@ def update_pump_trackers(window_start, secs_into):
                 tracker["highest_milestone"] = max_whole_multiple
 
 def _record_oppo_trigger(asset, side, price, status, reason):
+    if status in OPPO_SUPPRESSED_TRIGGER_STATUSES:
+        return
+
     # GOLDEN setup and gap-block conditions can remain true for many scan polls.
     # Keep the dashboard useful by showing only their first event per market window.
     once_key = (asset.lower(), side.lower(), status)
@@ -1385,10 +1390,6 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
         detail = f"{rvol:.3f}x <= {rvol_min:.3f}x (minute {minute}); flexi disabled"
         record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
         _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
-        log.info(
-            "[OPPO-RVOL-BLOCK] %s minute=%d rvol=%.3fx threshold>%.3fx — flexi disabled",
-            opp_key, minute, rvol, rvol_min,
-        )
         return False, vol, None, False
 
     detail = f"{rvol:.3f}x <= {rvol_min:.3f}x; using ${FLEXI_RVOL_BUY_AMOUNT:g} order"
@@ -3707,7 +3708,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','CVD-BLOCK','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','RVOL-BLOCK','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3717,6 +3718,10 @@ function render(s){
   const total=(st.wins||0)+(st.losses||0);
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
+  const roiCost=tLog.reduce((sum,t)=>sum+Math.max(0,Number(t.cost)||0),0);
+  const roiPnl=tLog.reduce((sum,t)=>(Number(t.cost)||0)>0?sum+(Number(t.pnl)||0):sum,0);
+  const roi=roiCost>0?roiPnl/roiCost*100:null;
+  const roiTxt=roi!=null?(roi>=0?'+':'')+roi.toFixed(2)+'%':'—';
 
   const goldenCards=assets.map(a=>{
     const g=goldenRvol[a]||{},candles=g.candles||[];
@@ -3813,7 +3818,7 @@ function render(s){
   }).join('')||'<p class="dim" style="padding:8px 0">No open positions</p>';
 
   const oppoRows=oppoLog.map(o=>{
-    const redStatuses=new Set(['CUT-LOSS','RVOL-BLOCK','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
+    const redStatuses=new Set(['CUT-LOSS','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
     const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
     const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
@@ -3859,6 +3864,7 @@ function render(s){
       <div class="card"><div class="lbl">Win rate</div><div class="val ${total>0?'green':'dim'}">${wr}</div></div>
       <div class="card"><div class="lbl">Open</div><div class="val blue">${Object.keys(pos).length}</div></div>
       <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnlColor(pnl)}">${pnl>=0?'+':''}$${pnl.toFixed(4)}</div></div>
+      <div class="card"><div class="lbl">ROI</div><div class="val ${roi!=null?pnlColor(roi):'dim'}">${roiTxt}</div></div>
     </div>
 
     <div class="section">
@@ -4021,13 +4027,13 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "is_golden_oppo", "pnl", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_out_conditions"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "is_golden_oppo", "pnl", "cost", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_out_conditions"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
             t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
-            t.get("is_counter", False), t.get("is_golden_oppo", False), t.get("pnl", ""), t.get("entry_rvol", ""),
+            t.get("is_counter", False), t.get("is_golden_oppo", False), t.get("pnl", ""), t.get("cost", ""), t.get("entry_rvol", ""),
             t.get("entry_kraken_gap", ""), t.get("entry_kraken_gap_ratio", ""), "|".join(t.get("entry_out_conditions", [])),
         ])
     return buf.getvalue().encode("utf-8")

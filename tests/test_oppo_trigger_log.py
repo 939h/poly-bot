@@ -14,6 +14,21 @@ class OppoTriggerLogTests(unittest.TestCase):
         momentum_v3.oppo_trigger_log = self.original_log
         momentum_v3.oppo_dashboard_once_per_window = self.original_once
 
+    def test_rvol_and_cvd_blocks_are_suppressed_from_trigger_logs(self):
+        original_last = momentum_v3.oppo_last_trigger
+        momentum_v3.oppo_last_trigger = {}
+        try:
+            for status in ("RVOL-BLOCK", "CVD-BLOCK"):
+                momentum_v3.record_oppo_trigger("btc_yes_oppo", "btc", "yes", 0.05, status, "repeat")
+                momentum_v3._record_oppo_trigger("btc", "yes", 0.05, status, "repeat")
+
+            self.assertEqual(momentum_v3.oppo_last_trigger, {})
+            self.assertEqual(momentum_v3.oppo_trigger_log, [])
+            self.assertNotIn("'CVD-BLOCK'", momentum_v3._DASHBOARD_HTML)
+            self.assertNotIn("'RVOL-BLOCK'", momentum_v3._DASHBOARD_HTML)
+        finally:
+            momentum_v3.oppo_last_trigger = original_last
+
     def test_golden_gap_block_is_logged_only_once_per_window(self):
         momentum_v3._record_oppo_trigger("btc", "yes", 0.05, "GOLDEN-GAP-BLOCK", "first")
         momentum_v3._record_oppo_trigger("btc", "yes", 0.06, "GOLDEN-GAP-BLOCK", "repeat")
