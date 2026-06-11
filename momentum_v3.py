@@ -101,6 +101,7 @@ from kraken_ws import (
     live_close,
     start_kraken_metrics_feed,
     get_cvd_snapshot,
+    get_short_cvd_slope,
     get_ema_snapshot,
     get_candle_history,
     get_volume_snapshot,
@@ -211,6 +212,8 @@ CUT_LOSS_PCT   = float(os.getenv("CUT_LOSS_PCT", "0.6"))   # if 0.65, u loss 35%
 HOLD_EARLY_SECS = 30    # force-stop cooldown 0–5 min
 HOLD_MID_SECS   = 10    # force-stop cooldown 5–10 min
 HOLD_LATE_SECS  = 5    # force-stop cooldown 10–15 min
+OPPO_STOP_LOSS_COUNTDOWN_SECS = int(os.getenv("OPPO_STOP_LOSS_COUNTDOWN_SECS", "15"))
+OPPO_STOP_CVD_WINDOW_SECS = int(os.getenv("OPPO_STOP_CVD_WINDOW_SECS", "15"))
 FORCE_SELL_GAP_MULT = float(os.getenv("FORCE_SELL_GAP_MULT", "50"))
 BREAKEVEN_GAP_MULT = float(os.getenv("BREAKEVEN_GAP_MULT", "20.0")) #original is 1.5 - set 20.0 is "disable" it purposely
 BREAKEVEN_POLL_CONFIRMATIONS = int(os.getenv("BREAKEVEN_POLL_CONFIRMATIONS", "5"))
@@ -315,6 +318,10 @@ def validate_settings():
         errors.append("REBOUND_BUY_AMOUNT must be > 0")
     if FLEXI_RVOL_BUY_AMOUNT <= 0:
         errors.append("FLEXI_RVOL_BUY_AMOUNT must be > 0")
+    if OPPO_STOP_LOSS_COUNTDOWN_SECS <= 0:
+        errors.append("OPPO_STOP_LOSS_COUNTDOWN_SECS must be > 0")
+    if OPPO_STOP_CVD_WINDOW_SECS <= 0:
+        errors.append("OPPO_STOP_CVD_WINDOW_SECS must be > 0")
     if FORCE_SELL_GAP_MULT <= 0:
         errors.append("FORCE_SELL_GAP_MULT must be > 0")
     if REBOUND_CUTLOSS_MULT <= 1.0:
@@ -678,6 +685,8 @@ def save_state():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_stop_loss_countdown_secs": OPPO_STOP_LOSS_COUNTDOWN_SECS,
+            "oppo_stop_cvd_window_secs": OPPO_STOP_CVD_WINDOW_SECS,
             "oppo_min_price": OPPO_MIN_PRICE,
             "oppo_max_price": OPPO_MAX_PRICE,
             "oppo_rebound_mult": OPPO_REBOUND_MULT,
@@ -1843,6 +1852,8 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "force_stop_triggered": None,
         "force_stop_cooldown":  None,
         "force_stop_spread_retries": 0,
+        "force_stop_cvd_confirming": False,
+        "force_stop_cvd_restarts": 0,
         "last_exit_attempt_ts": 0.0,
         "breakeven_armed":      False,
         "breakeven_gap_polls":  0,
@@ -2187,7 +2198,8 @@ def manage_positions(client, server_ts=None):
             continue
 
         # ── Force stop (cut-loss) with cooldown ───────────────────────────────
-        if current_price <= cut_loss:
+        oppo_stop_active = bool(pos.get("is_oppo") and pos.get("force_stop_triggered") is not None)
+        if current_price <= cut_loss or (oppo_stop_active and current_price < entry):
             if pos.get("force_stop_triggered") is None:
                 # Spread check on first trigger
                 fsr = pos.get("force_stop_spread_retries", 0)
@@ -2201,7 +2213,13 @@ def manage_positions(client, server_ts=None):
                         continue
                     log.info("[STOP-SPREAD-FORCE] %s  forcing stop after %d retries", key, fsr)
                 secs_in = secs_into_now
-                if secs_in < 300:
+                if pos.get("is_oppo"):
+                    cooldown, period = OPPO_STOP_LOSS_COUNTDOWN_SECS, "oppo-cvd"
+                    side = key.split("_")[1]
+                    short_cvd_slope = get_short_cvd_slope(key.split("_")[0], OPPO_STOP_CVD_WINDOW_SECS)
+                    pos["force_stop_cvd_confirming"] = _oppo_cvd_slope_confirms(side, short_cvd_slope)
+                    pos["force_stop_cvd_restarts"] = 0
+                elif secs_in < 300:
                     cooldown, period = HOLD_EARLY_SECS, "early"
                 elif secs_in < 600:
                     cooldown, period = HOLD_MID_SECS, "mid"
@@ -2214,6 +2232,19 @@ def manage_positions(client, server_ts=None):
                 continue
 
             cooldown  = pos.get("force_stop_cooldown", HOLD_LATE_SECS)
+            if pos.get("is_oppo"):
+                side = key.split("_")[1]
+                short_cvd_slope = get_short_cvd_slope(key.split("_")[0], OPPO_STOP_CVD_WINDOW_SECS)
+                cvd_confirming = _oppo_cvd_slope_confirms(side, short_cvd_slope)
+                was_confirming = bool(pos.get("force_stop_cvd_confirming", False))
+                if cvd_confirming and not was_confirming:
+                    pos["force_stop_triggered"] = now
+                    pos["force_stop_cvd_restarts"] = int(pos.get("force_stop_cvd_restarts", 0)) + 1
+                    log.info(
+                        "[STOP-CVD-RESTART] %s slope=%.6f price=%.4f entry=%.4f restarting %ds countdown",
+                        key, short_cvd_slope, current_price, entry, cooldown,
+                    )
+                pos["force_stop_cvd_confirming"] = cvd_confirming
             secs_held = now - pos.get("force_stop_triggered", now)
             if secs_held < cooldown:
                 log.info("[STOP-WAIT] %s  price=%.4f  %ds/%ds", key, current_price, int(secs_held), cooldown)
@@ -2280,6 +2311,8 @@ def manage_positions(client, server_ts=None):
             pos["force_stop_triggered"] = None
             pos["force_stop_cooldown"]  = None
             pos["force_stop_spread_retries"] = 0
+            pos["force_stop_cvd_confirming"] = False
+            pos["force_stop_cvd_restarts"] = 0
 
         # ── Rebound positions sell in two tranches ───────────────────────────
         if pos.get("is_rebound"):
@@ -3272,6 +3305,8 @@ def _build_state_snapshot():
             "sell_cap":   SELL_CAP,
             "cut_loss":   CUT_LOSS_PCT,
             "oppo_cut_loss": OPPO_CUT_LOSS_PCT,
+            "oppo_stop_loss_countdown_secs": OPPO_STOP_LOSS_COUNTDOWN_SECS,
+            "oppo_stop_cvd_window_secs": OPPO_STOP_CVD_WINDOW_SECS,
             "oppo_min_price": OPPO_MIN_PRICE,
             "oppo_max_price": OPPO_MAX_PRICE,
             "oppo_rebound_mult": OPPO_REBOUND_MULT,
@@ -3953,7 +3988,7 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table><tbody>
-        <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
+        <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry; OPPO ${cfg.oppo_stop_loss_countdown_secs||15}s countdown restarts on confirming ${cfg.oppo_stop_cvd_window_secs||15}s CVD reversal until entry recovery</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}</td><td>Golden-only</td><td>Master ON, Normal OFF, Golden ON</td></tr>
@@ -4248,6 +4283,7 @@ def main():
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => CVD-BLOCK", CVD_OPPO_ENABLED)
+    log.info("  OPPO stop-loss countdown: %ds; short CVD window=%ds; in-side CVD reversal restarts countdown until entry recovery", OPPO_STOP_LOSS_COUNTDOWN_SECS, OPPO_STOP_CVD_WINDOW_SECS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
