@@ -24,6 +24,16 @@ class OppoCvdStopCountdownTests(unittest.TestCase):
         self.assertIn("oppo_stop_active and current_price < entry", source)
         self.assertNotIn("get_short_cvd_slope", source)
 
+    def test_successful_cvd_stop_recovery_is_logged_once_above_entry(self):
+        source = inspect.getsource(momentum_v3.manage_positions)
+
+        self.assertIn('cvd_restarts > 0', source)
+        self.assertIn('current_price >= entry', source)
+        self.assertIn('not pos.get("force_stop_cvd_recovery_logged", False)', source)
+        self.assertIn('"CVD-RECOVERED"', source)
+        self.assertIn('pos["force_stop_cvd_recovery_logged"] = True', source)
+        self.assertIn("'CVD-RECOVERED'", momentum_v3._DASHBOARD_HTML)
+
     def test_yes_and_no_use_change_from_stop_baseline(self):
         self.assertTrue(momentum_v3._oppo_cvd_slope_confirms("yes", -0.25 - -0.40))
         self.assertFalse(momentum_v3._oppo_cvd_slope_confirms("yes", -0.50 - -0.40))

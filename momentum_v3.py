@@ -1850,6 +1850,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "force_stop_spread_retries": 0,
         "force_stop_cvd_baseline": None,
         "force_stop_cvd_restarts": 0,
+        "force_stop_cvd_recovery_logged": False,
         "last_exit_attempt_ts": 0.0,
         "breakeven_armed":      False,
         "breakeven_gap_polls":  0,
@@ -2214,6 +2215,7 @@ def manage_positions(client, server_ts=None):
                     _, cvd_at_stop, _ = get_cvd_snapshot(key.split("_")[0])
                     pos["force_stop_cvd_baseline"] = cvd_at_stop
                     pos["force_stop_cvd_restarts"] = 0
+                    pos["force_stop_cvd_recovery_logged"] = False
                 elif secs_in < 300:
                     cooldown, period = HOLD_EARLY_SECS, "early"
                 elif secs_in < 600:
@@ -2300,8 +2302,23 @@ def manage_positions(client, server_ts=None):
                 log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
             continue
 
-        # Price recovered — reset cooldown
+        # Price recovered — reset cooldown. For an OPPO stop delayed by an
+        # improving CVD baseline, report the successful recovery exactly once.
         if pos.get("force_stop_triggered") is not None:
+            cvd_restarts = int(pos.get("force_stop_cvd_restarts", 0))
+            if (
+                pos.get("is_oppo")
+                and cvd_restarts > 0
+                and current_price >= entry
+                and not pos.get("force_stop_cvd_recovery_logged", False)
+            ):
+                parts = key.split("_")
+                if len(parts) >= 2:
+                    reason = f"cvd saved cut-loss after {cvd_restarts} restart(s); rebound above entry={entry:.4f}"
+                    _record_oppo_trigger(parts[0], parts[1], current_price, "CVD-RECOVERED", reason)
+                    pos["force_stop_cvd_recovery_logged"] = True
+                    log.info("[STOP-CVD-RECOVERED] %s price=%.4f entry=%.4f restarts=%d",
+                             key, current_price, entry, cvd_restarts)
             log.info("[STOP-CANCEL] %s  price=%.4f recovered above cut=%.4f",
                      key, current_price, cut_loss)
             pos["force_stop_triggered"] = None
@@ -3750,7 +3767,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
