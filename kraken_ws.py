@@ -12,6 +12,7 @@ Exports:
     get_ema_snapshot(asset) — thread-safe EMA(8)/EMA(25) lookup
     get_candle_history(asset, limit=18) — thread-safe Kraken candle history
     get_cvd_snapshot(asset) — thread-safe (session, window, slope) lookup
+    get_short_cvd_slope(asset, window_secs=15) — thread-safe short-period CVD slope lookup
     get_volume_snapshot(asset, period=20, rvol_min=1.5) — Kraken 15m RVOL
     start_kraken_metrics_feed() — prefetch OHLC and launch Kraken WebSocket
 """
@@ -34,7 +35,7 @@ KRAKEN_OHLC_REST = "https://api.kraken.com/0/public/OHLC"
 OHLC_INTERVAL_MINUTES = 15
 EMA_FAST_PERIOD = 8
 EMA_SLOW_PERIOD = 25
-CVD_SLOPE_WINDOW_SECS = 60
+CVD_SLOPE_WINDOW_SECS = 30
 CANDLE_HISTORY_LIMIT = 1200
 
 WS_SYMBOL_TO_ASSET = {
