@@ -184,18 +184,6 @@ def get_cvd_snapshot(asset):
         )
 
 
-def get_short_cvd_slope(asset, window_secs=15):
-    """Return CVD slope over the most recent short period."""
-    window_secs = max(float(window_secs), 1.0)
-    now = time.time()
-    with _lock:
-        points = list(_cvd_points.get(asset, ()))
-    recent = [point for point in points if now - point[0] <= window_secs]
-    if len(recent) < 2:
-        return 0.0
-    dt = max(recent[-1][0] - recent[0][0], 1e-6)
-    return (recent[-1][1] - recent[0][1]) / dt
-
 
 def _normalise_ohlc_row(row, closed=False):
     close = float(row.get("close", 0.0) or 0.0)
