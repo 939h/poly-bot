@@ -67,6 +67,19 @@ class TradingWindowTests(unittest.TestCase):
         self.assertIn("if not (idle_now and not open_positions):", source)
         self.assertNotIn("[IDLE]", source)
 
+    def test_main_loop_keeps_pump_tracker_scanning_while_idle(self):
+        import inspect
+
+        main_source = inspect.getsource(momentum_v3.main)
+        scan_source = inspect.getsource(momentum_v3.scan_markets)
+        self.assertIn("scan_markets(client, window_start, secs_into, server_ts, executor)", main_source)
+        self.assertNotIn("if not idle_now:\n                scan_markets", main_source)
+        self.assertIn("update_pump_trackers(window_start, secs_into)", scan_source)
+        self.assertLess(scan_source.index("update_pump_trackers(window_start, secs_into)"),
+                        scan_source.index("if not can_open_new_trades(server_ts):"))
+        self.assertNotIn("time.sleep(30)", main_source)
+        self.assertIn("time.sleep(POLL_SECS)", main_source)
+
 
 if __name__ == "__main__":
     unittest.main()

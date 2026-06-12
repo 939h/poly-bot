@@ -334,7 +334,7 @@ def _format_trading_windows(windows):
 
 TRADING_WINDOWS_ENABLED = os.getenv("TRADING_WINDOWS_ENABLED", "true").lower() == "true"
 TRADING_TZ_OFFSET_HRS = float(os.getenv("TRADING_TZ_OFFSET_HRS", "8"))
-TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "630-730,830-930,1130-1230,1900-2100"))
+TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "630-731,830-931,1130-1231,1900-2101"))
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
@@ -4445,8 +4445,10 @@ def main():
                     log.info("[ARMED] Window armed — buy zone active")
                 armed_logged = True
 
-            if not idle_now:
-                scan_markets(client, window_start, secs_into, server_ts, executor)
+            # Always refresh market prices and pump trackers, including outside
+            # trading hours. scan_markets applies the trading-hours gate after
+            # telemetry updates, so idle mode still cannot open new entries.
+            scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
             for a in ASSETS:
@@ -4493,10 +4495,9 @@ def main():
             if len(pnl_history) > 288:
                 pnl_history.pop(0)
 
-        if idle_now and not open_positions:
-            time.sleep(30)
-        else:
-            time.sleep(POLL_SECS)
+        # Pump tracking remains live at the normal poll rate while entry trading
+        # is idle; scan_markets blocks new entries outside configured hours.
+        time.sleep(POLL_SECS)
 
 
 
