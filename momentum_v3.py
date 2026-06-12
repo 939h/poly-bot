@@ -673,9 +673,15 @@ def save_state():
             gap_out[a] = round(abs(c_live - c_open), 4)
         else:
             gap_out[a] = None
+    bot_active = can_open_new_trades(int(time.time()))
     state = {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dry_run":       DRY_RUN,
+        "bot_status": {
+            "active": bot_active,
+            "label": "ACTIVE" if bot_active else "IDLE",
+            "detail": "New entries enabled" if bot_active else "Outside trading hours",
+        },
         "stats":         dict(stats),
         "positions":     positions_out,
         "prices":        dict(live_prices),
@@ -3270,9 +3276,15 @@ def _build_state_snapshot():
         candle_out[a] = get_candle_history(a, limit=18)
     oppo_trade_optimizer_out = _build_oppo_trade_optimizer_snapshot()
     _record_optimizer_recommendations(golden_optimizer_out, oppo_trade_optimizer_out)
+    bot_active = can_open_new_trades(now_ts)
     return {
         "updated":       datetime.now().strftime("%Y-%m-%d %H:%M"),
         "dry_run":       DRY_RUN,
+        "bot_status": {
+            "active": bot_active,
+            "label": "ACTIVE" if bot_active else "IDLE",
+            "detail": "New entries enabled" if bot_active else "Outside trading hours",
+        },
         "stats":         dict(stats),
         "positions":     positions_out,
         "prices":        dict(live_prices),
@@ -3806,6 +3818,7 @@ function render(s){
   if(prevOppoLogWrap) oppoLogScrollTop=prevOppoLogWrap.scrollTop;
   captureHorizontalScroll();
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
+  const botStatus=s.bot_status||{active:true,label:'ACTIVE',detail:'New entries enabled'};
   const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
@@ -3971,6 +3984,7 @@ function render(s){
       <div class="card"><div class="lbl">Open</div><div class="val blue">${Object.keys(pos).length}</div></div>
       <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnlColor(pnl)}">${pnl>=0?'+':''}$${pnl.toFixed(4)}</div></div>
       <div class="card"><div class="lbl">ROI</div><div class="val ${roi!=null?pnlColor(roi):'dim'}">${roiTxt}</div></div>
+      <div class="card"><div class="lbl">Bot Status</div><div class="val ${botStatus.active?'green':'amber'}">${botStatus.label}</div><div class="dim" style="font-size:11px;margin-top:4px">${botStatus.detail}</div></div>
     </div>
 
     <div class="section">

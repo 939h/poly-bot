@@ -28,6 +28,16 @@ class DashboardRoiTests(unittest.TestCase):
         self.assertNotIn(net_pnl + roi, html)  # Cards include their displayed values between labels.
         self.assertLess(html.index(roi) - html.index(net_pnl), 300)
 
+    def test_bot_status_card_is_immediately_after_roi(self):
+        html = momentum_v3._DASHBOARD_HTML
+        roi = '<div class="card"><div class="lbl">ROI</div>'
+        status = '<div class="card"><div class="lbl">Bot Status</div>'
+
+        self.assertGreater(html.index(status), html.index(roi))
+        self.assertLess(html.index(status) - html.index(roi), 300)
+        self.assertIn("botStatus.active?'green':'amber'", html)
+        self.assertIn("botStatus.detail", html)
+
     def test_trade_log_csv_exports_cost(self):
         source = inspect.getsource(momentum_v3._trade_log_csv_bytes)
 

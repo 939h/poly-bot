@@ -45,6 +45,19 @@ class TradingWindowTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 momentum_v3._parse_trading_windows(value)
 
+    def test_dashboard_snapshot_reports_active_or_idle_status(self):
+        with patch.object(momentum_v3, "TRADING_WINDOWS_ENABLED", True), \
+             patch.object(momentum_v3, "TRADING_TZ_OFFSET_HRS", 0), \
+             patch.object(momentum_v3, "TRADING_WINDOWS", ((6, 30, 8, 30),)), \
+             patch.object(momentum_v3.time, "time", return_value=self._utc_ts(10, 0)):
+            status = momentum_v3._build_state_snapshot()["bot_status"]
+
+        self.assertEqual(status, {
+            "active": False,
+            "label": "IDLE",
+            "detail": "Outside trading hours",
+        })
+
     def test_main_loop_keeps_idle_periods_silent(self):
         import inspect
 
