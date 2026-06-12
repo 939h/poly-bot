@@ -48,6 +48,9 @@ Requirements:
     OPPO_OPTIMIZER_HISTORY_HOURS=24
     OPPO_OPTIMIZER_HISTORY_REFRESH_SECS=60
     OPPO_OPTIMIZER_SCORE_EQUIVALENCE=0.10
+    TRADING_WINDOWS_ENABLED=true
+    TRADING_TZ_OFFSET_HRS=8
+    TRADING_WINDOWS=630-830,1130-1230
 """
 
 import os
@@ -290,10 +293,48 @@ POLL_SECS              = 1.0
 WINDOW_SECS            = 900
 HOLD_POSITION_LIMIT_SECS = int(os.getenv("HOLD_POSITION_LIMIT_SECS", "400"))
 
-# ── Trading windows (optional) ────────────────────────────────────────────────
-TRADING_WINDOWS_ENABLED = False
-TRADING_TZ_OFFSET_HRS   = 8
-TRADING_WINDOWS         = [(12, 30, 16, 0), (18, 0, 20, 0), (23, 0, 23, 59), (0, 0, 4, 0)]
+# ── Trading windows (optional; local clock using TRADING_TZ_OFFSET_HRS) ──────
+def _parse_trading_clock(value):
+    text = str(value).strip()
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError(f"invalid trading time {value!r}")
+        hour, minute = map(int, parts)
+    else:
+        if not text.isdigit() or len(text) > 4:
+            raise ValueError(f"invalid trading time {value!r}")
+        number = int(text)
+        hour, minute = divmod(number, 100)
+    if not 0 <= hour < 24 or not 0 <= minute < 60:
+        raise ValueError(f"invalid trading time {value!r}")
+    return hour, minute
+
+
+def _parse_trading_windows(value):
+    windows = []
+    for item in re.split(r"[,;]", str(value)):
+        item = item.strip()
+        if not item:
+            continue
+        bounds = item.split("-")
+        if len(bounds) != 2:
+            raise ValueError(f"invalid trading window {item!r}; expected START-END")
+        sh, sm = _parse_trading_clock(bounds[0])
+        eh, em = _parse_trading_clock(bounds[1])
+        windows.append((sh, sm, eh, em))
+    if not windows:
+        raise ValueError("TRADING_WINDOWS must contain at least one START-END window")
+    return tuple(windows)
+
+
+def _format_trading_windows(windows):
+    return ", ".join(f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in windows)
+
+
+TRADING_WINDOWS_ENABLED = os.getenv("TRADING_WINDOWS_ENABLED", "true").lower() == "true"
+TRADING_TZ_OFFSET_HRS = float(os.getenv("TRADING_TZ_OFFSET_HRS", "8"))
+TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "630-730,830-930,1130-1230,1900-2100"))
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
@@ -717,6 +758,9 @@ def save_state():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "trading_windows_enabled": TRADING_WINDOWS_ENABLED,
+            "trading_tz_offset_hrs": TRADING_TZ_OFFSET_HRS,
+            "trading_windows": _format_trading_windows(TRADING_WINDOWS),
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
@@ -3353,6 +3397,9 @@ def _build_state_snapshot():
             "breakeven_polls": BREAKEVEN_POLL_CONFIRMATIONS,
             "entry_after": ENTRY_AFTER,
             "stop_buy":   STOP_BUY_AT,
+            "trading_windows_enabled": TRADING_WINDOWS_ENABLED,
+            "trading_tz_offset_hrs": TRADING_TZ_OFFSET_HRS,
+            "trading_windows": _format_trading_windows(TRADING_WINDOWS),
             "volume_avg_period": VOLUME_AVG_PERIOD,
             "rvol_min": RVOL_MIN,
             "rvol_min_per_min": RVOL_MIN_PER_MIN,
@@ -4290,6 +4337,8 @@ def main():
              BUY_PRICE_MIN*100, BUY_PRICE_MAX*100,
              ENTRY_AFTER, STOP_BUY_AT,
              SELL_MULTIPLIER, SELL_CAP*100, CUT_LOSS_PCT*100, OPPO_CUT_LOSS_PCT*100)
+    log.info("  Trading hours: enabled=%s  UTC%+g  windows=%s (end times exclusive)",
+             TRADING_WINDOWS_ENABLED, TRADING_TZ_OFFSET_HRS, _format_trading_windows(TRADING_WINDOWS))
     log.info("  Flip: %.0f–%.0f¢  order=$%.0f  poll=%.1fs",
              FLIP_MIN*100, FLIP_MAX*100, BUY_AMOUNT, POLL_SECS)
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
@@ -4333,7 +4382,7 @@ def main():
     last_status = time.time()
     last_window = None
     executor    = ThreadPoolExecutor(max_workers=len(ASSETS))
-    was_idle    = None
+    idle_now    = False
     secs_left   = 0
 
     while True:
@@ -4342,6 +4391,8 @@ def main():
             window_start = get_current_window_start(server_ts)
             secs_into    = server_ts - window_start
             secs_left    = WINDOW_SECS - secs_into
+            idle_now     = not can_open_new_trades(server_ts)
+            silent_idle  = idle_now and not open_positions
 
             # ── New window reset ──────────────────────────────────────────────
             if last_window is not None and window_start != last_window:
@@ -4370,24 +4421,17 @@ def main():
                 rebound_cutloss_tracker.clear()
                 pump_tracker.clear()
                 pump_finished_tracker_keys.clear()
-                log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
-                         window_start, secs_left, ENTRY_AFTER)
+                if not silent_idle:
+                    log.info("[WINDOW] New window  ts=%d  secs_left=%d  entry at %ds",
+                             window_start, secs_left, ENTRY_AFTER)
             last_window = window_start
 
             if secs_into >= ENTRY_AFTER and not armed_logged:
-                log.info("[ARMED] Window armed — buy zone active")
+                if not silent_idle:
+                    log.info("[ARMED] Window armed — buy zone active")
                 armed_logged = True
 
-            idle_now = not can_open_new_trades(server_ts)
-            if idle_now:
-                if was_idle is not True:
-                    log.info("[IDLE] Outside trading window — no new entries")
-                was_idle = True
-            else:
-                if was_idle is not False:
-                    log.info("[IDLE] Trading window open — resumed")
-                was_idle = False
-
+            if not idle_now:
                 scan_markets(client, window_start, secs_into, server_ts, executor)
 
             manage_positions(client, server_ts)
@@ -4420,7 +4464,8 @@ def main():
             executor = ThreadPoolExecutor(max_workers=len(ASSETS))
 
         if time.time() - last_status >= 3600:
-            print_status()
+            if not (idle_now and not open_positions):
+                print_status()
             last_status = time.time()
 
         # PnL snapshot every 30 min for chart
