@@ -89,25 +89,6 @@ class RvolReversalSnapshotTests(unittest.TestCase):
         self.assertGreater(snapshot["wins"], 0)
         self.assertEqual(snapshot["probability"], snapshot["wins"] / snapshot["samples"])
 
-    def test_golden_optimizer_is_shadow_recommend_only(self):
-        for index in range(80):
-            base = 200 - index
-            volume = 140 if index % 3 != 1 else 70
-            close = base + 1 if index % 4 == 3 else base - 1
-            self._append(base, close, volume)
-
-        result = kraken_ws.get_golden_optimizer_snapshot(
-            "btc", period=5, thresholds=(0.8, 1.0), lookbacks=(3,),
-            gap_magnitudes=(20.0,), min_validation_samples=2,
-            current={"lookback": 3, "min_high": 2, "threshold": 1.0, "gap_magnitude": 20.0},
-        )
-
-        self.assertEqual(result["mode"], "shadow-recommend-only")
-        self.assertTrue(result["ready"])
-        self.assertIsNotNone(result["recommendation"])
-        self.assertIn("validation", result["recommendation"])
-        self.assertIn("current", result)
-
 
 if __name__ == "__main__":
     unittest.main()
