@@ -459,21 +459,6 @@ def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
 
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
-    tracker = pump_tracker.get(f"{opp_asset}_{side}")
-    if tracker is not None:
-        checks = tracker.setdefault("trade_cross_checks", [])
-        check = {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "status": status,
-            "detail": detail,
-            "price": round(float(opp_price), 4) if opp_price is not None else None,
-        }
-        if not checks or checks[-1] != check:
-            checks.append(check)
-            if len(checks) > 100:
-                del checks[:-100]
-        if status == "BOUGHT":
-            tracker["trade_placed"] = True
     if status in OPPO_SUPPRESSED_TRIGGER_STATUSES or time.time() < oppo_log_suppressed_until:
         return
     oppo_last_trigger[opp_key] = {
@@ -700,8 +685,6 @@ def save_state():
                 "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
-                "trade_placed": bool(v.get("trade_placed", False)),
-                "trade_cross_checks": list(v.get("trade_cross_checks", [])),
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
@@ -879,49 +862,8 @@ def _pump_result_from_tracker(tracker):
     return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
 
 
-def _pump_trade_cross_check(tracker):
-    """Explain why a successful pump did not result in an entry."""
-    checks = list(tracker.get("trade_cross_checks", []))
-    if tracker.get("trade_placed") or any(check.get("status") == "BOUGHT" for check in checks):
-        return {"trade_placed": True, "reason": "trade placed", "blockers": []}
-
-    blocker_statuses = {
-        "BUY-FAIL", "GAP-BLOCK", "GOLDEN-GAP-BLOCK", "CVD-BLOCK", "RVOL-BLOCK",
-        "KNIFE-BLOCK", "REBOUND-CAP", "SPREAD", "COOLDOWN", "DEAD-ZONE", "SKIP",
-    }
-    blockers = [check for check in checks if check.get("status") in blocker_statuses]
-    if blockers:
-        unique = []
-        seen = set()
-        for check in reversed(blockers):
-            signature = (check.get("status"), check.get("detail"))
-            if signature in seen:
-                continue
-            seen.add(signature)
-            unique.append(check)
-        unique.reverse()
-        reason = "; ".join(
-            f"{check.get('status')}: {check.get('detail') or 'no detail'}"
-            for check in unique[-5:]
-        )
-        return {"trade_placed": False, "reason": reason, "blockers": unique[-20:]}
-
-    waits = [check for check in checks if check.get("status") in {"WAIT", "RVOL-WAIT"}]
-    if waits:
-        latest = waits[-1]
-        reason = f"NO-ENTRY-SIGNAL: {latest.get('detail') or latest.get('status')}"
-    elif checks:
-        latest = checks[-1]
-        reason = f"NO-BLOCK-FOUND: last decision {latest.get('status')}: {latest.get('detail') or 'no detail'}"
-    else:
-        reason = "NO-ENTRY-CHECKS: pump tracked, but the trade scanner recorded no entry decision"
-    return {"trade_placed": False, "reason": reason, "blockers": []}
-
-
 def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_kraken_snapshot(tracker)
-    final_status = status or tracker.get("status", "TRACKING")
-    cross_check = _pump_trade_cross_check(tracker) if final_status == "SUCCESS" else {}
     event = {
         "time": datetime.now().strftime("%H:%M"),
         "window_start": tracker.get("window_start"),
@@ -944,12 +886,9 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "entry_kraken_gap_ratio": tracker.get("entry_kraken_gap_ratio", tracker.get("kraken_gap_ratio")),
         "entry_cvd_slope": tracker.get("entry_cvd_slope", tracker.get("cvd_slope")),
         "entry_rvol": tracker.get("entry_rvol", tracker.get("rvol")),
-        "status": final_status,
+        "status": status or tracker.get("status", "TRACKING"),
         "finish_reason": tracker.get("finish_reason"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
-        "trade_placed": cross_check.get("trade_placed"),
-        "trade_cross_check": cross_check.get("reason"),
-        "trade_blockers": cross_check.get("blockers", []),
     }
     pump_log.insert(0, event)
     if len(pump_log) > 500:
@@ -966,12 +905,6 @@ def _finish_pump_tracker(key, tracker, reason="END"):
     tracker["finish_reason"] = reason
     pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
-    if tracker["status"] == "SUCCESS":
-        cross_check = _pump_trade_cross_check(tracker)
-        log.info(
-            "[PUMP-CROSS-CHECK] %s trade_placed=%s reason=%s",
-            key, cross_check["trade_placed"], cross_check["reason"],
-        )
     log.info(
         "[PUMP-%s] %s now=%.3fx max=%.3fx current=%.4f max_px=%.4f",
         tracker["status"], key, float(tracker.get("multiple", 0.0)),
@@ -1010,8 +943,6 @@ def _refresh_pump_tracker_price(key, tracker):
             tracker["entry_kraken_gap_ratio"] = entry_snapshot.get("kraken_gap_ratio")
             tracker["entry_cvd_slope"] = entry_snapshot.get("cvd_slope")
             tracker["entry_rvol"] = entry_snapshot.get("rvol")
-            tracker["trade_placed"] = False
-            tracker["trade_cross_checks"] = []
         trough = float(tracker.get("trough", 0.0))
         multiple = price / trough if trough > 0 else 0.0
         tracker["multiple"] = multiple
@@ -1066,8 +997,6 @@ def update_pump_trackers(window_start, secs_into):
                         "max_multiple": 1.0,
                         "status": "TRACKING",
                         "highest_milestone": 1,
-                        "trade_placed": False,
-                        "trade_cross_checks": [],
                         "entry_at": datetime.now().strftime("%H:%M:%S"),
                         "entry_ts": time.time(),
                         "price_updates": 1,
@@ -1598,12 +1527,6 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
     requested_out_conditions = set(entry_out_conditions or [])
     entry_out_conditions = [condition for condition in OPPO_OUT_CONDITIONS if condition in requested_out_conditions]
     base_asset = key.split("_")[0]
-    side = key.split("_")[1] if len(key.split("_")) > 1 else ""
-    tracker = pump_tracker.get(f"{base_asset}_{side}")
-    if tracker is not None and (
-        window_start is None or tracker.get("window_start") == window_start
-    ):
-        tracker["trade_placed"] = True
     if entry_kraken_gap is None:
         entry_kraken_gap = get_kraken_gap(base_asset)
     if entry_kraken_gap_ratio is None and entry_kraken_gap is not None:
@@ -3139,8 +3062,6 @@ def _build_state_snapshot():
                 "entry_rvol": round(float(v["entry_rvol"]), 3) if v.get("entry_rvol") is not None else None,
                 "status": v.get("status", "TRACKING"),
                 "highest_milestone": int(v.get("highest_milestone", 1)),
-                "trade_placed": bool(v.get("trade_placed", False)),
-                "trade_cross_checks": list(v.get("trade_cross_checks", [])),
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
@@ -3213,7 +3134,7 @@ def _build_state_snapshot():
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MomentumBot</title>
+<ttitleMomentumBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#0f1117;color:#e8edf5;font-size:14px;padding:20px}
@@ -3538,7 +3459,6 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const rvolCls=e.rvol!=null?'blue':'dim';
     const status=e.status||'TRACKING';
     const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
-    const crossCheck=e.trade_cross_check||'—';
     const windowKey=e.window_start!=null?String(e.window_start):`unknown-${e.time||i}`;
     if(!windowColorIndex.has(windowKey))windowColorIndex.set(windowKey,nextWindowColor++%windowTimeColors.length);
     const timeColor=windowTimeColors[windowColorIndex.get(windowKey)];
@@ -3553,9 +3473,8 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td class="${statusCls}" style="font-weight:600">${status}</td>
-      <td class="${e.trade_placed===false?'amber':'dim'}" style="font-family:monospace">${crossCheck}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" class="dim">No 3x+ pump milestones yet</td></tr>';
+  }).join('') || '<tr><td colspan="10" class="dim">No 3x+ pump milestones yet</td></tr>';
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
@@ -3563,7 +3482,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Trade Cross Check</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
@@ -3590,7 +3509,7 @@ function render(s){
   captureHorizontalScroll();
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const botStatus=s.bot_status||{active:true,label:'ACTIVE',detail:'New entries enabled'};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{},goldenRvol=s.golden_rvol||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
@@ -3632,6 +3551,16 @@ function render(s){
       <div class="golden-meta"><span>golden gap x${Number(g.gap_magnitude||3).toFixed(2)}</span><span class="${g.gap_flexi?'blue':(g.gap_passed===false?'red':'green')}">${g.gap_actual!=null?Number(g.gap_actual).toFixed(4):'—'} / ${g.gap_limit!=null?Number(g.gap_limit).toFixed(4):'—'}</span></div>
     </div>`;
   }).join('');
+
+    const rec=o.ready?`L${rc.lookback} · ${rc.min_high} high · RVOL>${Number(rc.threshold).toFixed(2)} · gap x${Number(rc.gap_magnitude).toFixed(1)}`:'collecting data';
+    const recRate=rv.rate!=null?`${(Number(rv.rate)*100).toFixed(1)}% (${rv.wins||0}/${rv.samples||0})`:'—';
+    const curRate=cv.rate!=null?`${(Number(cv.rate)*100).toFixed(1)}% (${cv.wins||0}/${cv.samples||0})`:'—';
+    return `<tr><td>${a.toUpperCase()}</td><td>${o.mode||'shadow-recommend-only'}</td><td>${rec}</td><td class="${rv.rate!=null&&cv.rate!=null&&rv.rate>cv.rate?'green':'dim'}">${recRate}</td><td>${curRate}</td><td>${o.candidate_count||0}</td></tr>`;
+  }).join('');
+
+    ? `RVOL ≥ ${Number(otc.min_rvol).toFixed(1)} · Kraken gap ratio &lt; x${Number(otc.max_kraken_gap_ratio).toFixed(1)}`
+    : `not ready · ${oto.readiness_reason||'collecting pump traces'}`;
+  const ratioStats=oto.good_pump_entry_ratio_median!=null?` · good-pump entry Kraken gap ratio median x${Number(oto.good_pump_entry_ratio_median).toFixed(2)} / average x${Number(oto.good_pump_entry_ratio_average||0).toFixed(2)}`:'';
 
   // Buy zone indicator per asset
   const priceRows=assets.map(a=>{
@@ -3903,14 +3832,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_ratio", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_kraken_gap_ratio", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone", "trade_placed", "trade_cross_check"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_ratio", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_kraken_gap_ratio", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
             e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_ratio", ""), e.get("cvd_slope", ""),
-            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_kraken_gap_ratio", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""), e.get("trade_placed", ""), e.get("trade_cross_check", ""),
+            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_kraken_gap_ratio", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 
