@@ -241,8 +241,8 @@ OPPO_MODE_ENABLED      = os.getenv("OPPO_MODE_ENABLED", "true").lower() == "true
 OPPO_NORMAL_ENABLED    = os.getenv("OPPO_NORMAL_ENABLED", "true").lower() == "true"
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
-OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.03"))
-OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
+OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.07"))
+OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.30"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
 OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
@@ -253,7 +253,7 @@ OPPO_SELL_CAP          = float(os.getenv("OPPO_SELL_CAP", "0.80"))
 OPPO_CUT_LOSS_PCT      = float(os.getenv("OPPO_CUT_LOSS_PCT", "0.60")) #set 0.20 means lose 80% of fund
 OPPO_REBOUND_MULT      = float(os.getenv("OPPO_REBOUND_MULT", "2.0"))
 OPPO_FALLING_KNIFE_MIN_MOVE = float(os.getenv("OPPO_FALLING_KNIFE_MIN_MOVE", "0.25"))
-OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
+OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.07"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 10.0
