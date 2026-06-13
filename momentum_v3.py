@@ -442,6 +442,9 @@ oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
+active_window_start = None
+trade_decision_audit = {}
+pump_cross_checks = []
 
 def _counter_key(asset, side):
     return f"{asset}_{side}_counter"
@@ -485,6 +488,16 @@ def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
 
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
+    audit = trade_decision_audit.setdefault((active_window_start, opp_key.lower()), {
+        "window_start": active_window_start, "asset": opp_asset.upper(),
+        "side": side.upper(), "bought": False, "events": [],
+    })
+    event = {"status": status, "detail": detail, "price": opp_price, "time": datetime.now().strftime("%H:%M:%S")}
+    if not audit["events"] or audit["events"][-1] != event:
+        audit["events"].append(event)
+        audit["events"] = audit["events"][-30:]
+    if status == "BOUGHT":
+        audit["bought"] = True
     if status in OPPO_SUPPRESSED_TRIGGER_STATUSES or time.time() < oppo_log_suppressed_until:
         return
     oppo_last_trigger[opp_key] = {
@@ -546,7 +559,7 @@ def _migrate_gap_ratio_names(value):
     return value
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, pump_cross_checks
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -560,6 +573,7 @@ def load_state():
         pnl_history   = saved.get("pnl_history", [])
         asset_history = saved.get("asset_history", {})
         trade_log     = saved.get("trade_log", [])
+        pump_cross_checks = saved.get("pump_cross_checks", [])
         pump_tracker  = {
             k: v for k, v in saved.get("pump_tracker", {}).items()
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
@@ -581,7 +595,7 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, ema_history, cvd_history, pump_cross_checks
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
@@ -590,6 +604,8 @@ def reset_state():
     oppo_dashboard_once_per_window.clear()
     pump_tracker = {}
     pump_log = []
+    pump_cross_checks = []
+    trade_decision_audit.clear()
     optimizer_recommendation_history = []
     pump_finished_tracker_keys = set()
     normal_blacklisted_assets.clear()
@@ -719,6 +735,7 @@ def save_state():
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "pump_cross_checks": list(pump_cross_checks),
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
@@ -1159,6 +1176,34 @@ def _pump_result_from_tracker(tracker):
         return "FAILED"
     return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
 
+_PUMP_BLOCK_STATUSES = {
+    "CVD-BLOCK", "GAP-BLOCK", "GOLDEN-GAP-BLOCK", "RVOL-BLOCK", "RVOL-WAIT",
+    "KNIFE-BLOCK", "DEAD-ZONE", "REBOUND-CAP", "SPREAD", "COOLDOWN", "BUY-FAIL", "SKIP",
+}
+
+
+def _cross_check_successful_pump(key, tracker):
+    """Explain why a successful pump did not receive a matching OPPO buy."""
+    audit = trade_decision_audit.get((tracker.get("window_start"), key.lower()), {})
+    if audit.get("bought"):
+        return
+    blockers = [e for e in audit.get("events", []) if e.get("status") in _PUMP_BLOCK_STATUSES]
+    if blockers:
+        reason, detail = blockers[-1]["status"], blockers[-1].get("detail") or "entry gate blocked"
+    elif audit.get("events"):
+        last = audit["events"][-1]
+        reason, detail = "NO-ENTRY", f"last decision: {last['status']} — {last.get('detail') or 'no detail'}"
+    else:
+        reason, detail = "NO-TRIGGER", "pump succeeded, but no OPPO entry decision was recorded"
+    pump_cross_checks.insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"), "window_start": tracker.get("window_start"),
+        "asset": tracker.get("asset", key.split("_")[0]).upper(),
+        "side": tracker.get("side", key.split("_")[1]).upper(),
+        "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
+        "reason": reason, "detail": detail, "blockers": blockers[-5:],
+    })
+    del pump_cross_checks[200:]
+
 
 def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_kraken_snapshot(tracker)
@@ -1201,6 +1246,8 @@ def _finish_pump_tracker(key, tracker, reason="END"):
         return
     tracker["status"] = _pump_result_from_tracker(tracker)
     tracker["finish_reason"] = reason
+    if tracker["status"] == "SUCCESS":
+        _cross_check_successful_pump(key, tracker)
     pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
     log.info(
@@ -3381,6 +3428,7 @@ def _build_state_snapshot():
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "pump_cross_checks": list(pump_cross_checks),
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
@@ -3813,6 +3861,14 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
+function renderPumpCrossChecks(checks){
+  const rows=(checks||[]).map(c=>{
+    const history=(c.blockers||[]).map(b=>`<div><span class="red">${b.status}</span> — ${b.detail||'—'}</div>`).join('');
+    return `<tr><td>${c.time||'—'}</td><td><strong>${pumpAssetLabel(c.asset,c.side)}</strong></td><td class="green" style="font-weight:700">${Number(c.max_multiple||0).toFixed(2)}x</td><td><span class="badge" style="background:#2a0d0d;color:#f87171;border:1px solid #5c1d1d">${c.reason||'NO-TRIGGER'}</span></td><td>${c.detail||'—'}${history?`<div class="dim" style="margin-top:5px;font-size:11px">${history}</div>`:''}</td></tr>`;
+  }).join('')||'<tr><td colspan="5" class="dim">No successful pumps without a matching buy yet</td></tr>';
+  return `<div style="overflow-x:auto"><table><thead><tr><th>Checked</th><th>Asset</th><th>Pump Max</th><th>Why No Buy?</th><th>Gate Detail / History</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 function renderAssetHistory(assetHist,assets){
   if(!assetHist||!Object.keys(assetHist).length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   return '<div class="asset-grid">'+assets.map(a=>{
@@ -3842,7 +3898,7 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
-  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
+  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[],pumpCrossChecks=s.pump_cross_checks||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
   const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
@@ -4068,6 +4124,11 @@ function render(s){
     <div class="section">
       <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ until stop-buy ${cfg.stop_buy||840}s, milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2,cfg.pump_track_dead_zone_price||0.05)}
+    </div>
+
+    <div class="section">
+      <h2>Pump / Trade Cross-Check <span style="font-size:11px;color:#5a6a85;font-weight:400">successful pumps with no matching OPPO buy, including exact blocking gate values</span></h2>
+      ${renderPumpCrossChecks(pumpCrossChecks)}
     </div>
 
     <div class="section">
@@ -4356,7 +4417,7 @@ def start_http_server():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global last_pnl_snapshot, pnl_history, armed_logged
+    global last_pnl_snapshot, pnl_history, armed_logged, active_window_start
 
     validate_settings()
     load_state()
@@ -4420,6 +4481,7 @@ def main():
         try:
             server_ts    = get_server_time()
             window_start = get_current_window_start(server_ts)
+            active_window_start = window_start
             secs_into    = server_ts - window_start
             secs_left    = WINDOW_SECS - secs_into
             idle_now     = not can_open_new_trades(server_ts)
