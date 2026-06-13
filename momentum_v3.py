@@ -3590,7 +3590,7 @@ function render(s){
   captureHorizontalScroll();
   const st=s.stats||{},pos=s.positions||{},pr=s.prices||{};
   const botStatus=s.bot_status||{active:true,label:'ACTIVE',detail:'New entries enabled'};
-  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{};
+  const cfg=s.settings||{},w=s.window||{},gap=s.gap||{},gapThreshold=s.gap_threshold||{},cvd=s.cvd||{},volumes=s.volume||{},cvdHistory=s.cvd_history||{},goldenRvol=s.golden_rvol||{};
   const assetStatus=s.asset_status||{};
   const oppoLastTrigger=s.oppo_last_trigger||{};
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
