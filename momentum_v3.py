@@ -2158,7 +2158,7 @@ def manage_oppo_target_sells(client, key, pos, current_price):
         _record_trade_log(key, pos, "OPPO-SELL", current_price, pnl)
         parts = key.split("_")
         if len(parts) >= 2:
-            _record_oppo_trigger(parts[0], parts[1], current_price, "SOLD", f"final pnl={pnl:+.4f}")
+            _record_oppo_trigger(parts[0], parts[1], current_price, "OPPO-SELL", f"final pnl={pnl:+.4f}")
         return True
 
     return False
@@ -2361,11 +2361,13 @@ def manage_positions(client, server_ts=None):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
-                _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
+                tp2_cut = bool(pos.get("is_oppo") or key.endswith("_oppo")) and _oppo_tp1_sold(pos)
+                exit_type = "TP2-CUT" if tp2_cut else "CUT-LOSS"
+                _record_trade_log(key, pos, exit_type, current_price, pnl)
                 if pos.get("is_oppo") or key.endswith("_oppo") or pos.get("is_counter") or key.endswith("_counter"):
                     parts = key.split("_")
                     if len(parts) >= 2:
-                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else "CUT-LOSS"
+                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else exit_type
                         _record_oppo_trigger(parts[0], parts[1], current_price, status, f"pnl={pnl:+.4f}")
                 to_close.append(key)
 
@@ -3759,9 +3761,9 @@ function showMoreButton(id,onclick,total,limit,expanded){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a','CVD-BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd','CVD-BREAKEVEN-SELL':'#4ade9f'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155','CVD-BREAKEVEN-SELL':'#166534'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','OPPO-SELL':'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','TP2-CUT':'#2a1e08','BREAKEVEN-SELL':'#0f172a','CVD-BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={SELL:'#4ade9f','OPPO-SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','TP2-CUT':'#fbbf24','BREAKEVEN-SELL':'#93c5fd','CVD-BREAKEVEN-SELL':'#4ade9f'}[e]||'#f87171';
+    const bc={SELL:'#1a5c3a','OPPO-SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','TP2-CUT':'#5c3d08','BREAKEVEN-SELL':'#334155','CVD-BREAKEVEN-SELL':'#166534'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -3900,7 +3902,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[],pumpCrossChecks=s.pump_cross_checks||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','OPPO-SELL','CUT-LOSS','TP2-CUT','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -4011,14 +4013,15 @@ function render(s){
 
   const oppoRows=oppoLog.map(o=>{
     const redStatuses=new Set(['CUT-LOSS','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
-    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
+    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','OPPO-SELL','COUNTER-BOUGHT','COUNTER-SELL']);
     const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
+    const statusStyle=statusCls==='green'?'background:#0d2a1e;color:#4ade9f;border:1px solid #1a5c3a':(statusCls==='red'?'background:#2a0d0d;color:#f87171;border:1px solid #5c1d1d':'background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
     return `<tr>
       <td>${o.time||'—'}</td>
       <td><strong>${o.asset||'—'}-${o.side||'—'}</strong></td>
       <td>${priceTxt}</td>
-      <td class="${statusCls}" style="font-weight:600">${o.status||'—'}</td>
+      <td><span class="badge" style="${statusStyle}">${o.status||'—'}</span></td>
       <td>${o.reason||'—'}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="5" class="dim">No OPPO triggers yet</td></tr>';
