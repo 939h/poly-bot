@@ -442,6 +442,9 @@ oppo_rebound_tracker = {}          # key asset_side -> trough price
 oppo_counter_tracker = {}          # key asset_side -> counter buy tracking armed after OPPO TP2
 oppo_last_trigger = {}             # key asset_side -> latest oppo trigger/status for dashboard
 oppo_log_suppressed_until = 0.0    # unix ts; temporarily suppress OPPO log repopulation after manual reset
+active_window_start = None
+trade_decision_audit = {}
+pump_cross_checks = []
 
 def _counter_key(asset, side):
     return f"{asset}_{side}_counter"
@@ -485,6 +488,16 @@ def _arm_oppo_counter(asset, oppo_side, price, window_start, reason):
 
 
 def record_oppo_trigger(opp_key, opp_asset, side, opp_price, status, detail=""):
+    audit = trade_decision_audit.setdefault((active_window_start, opp_key.lower()), {
+        "window_start": active_window_start, "asset": opp_asset.upper(),
+        "side": side.upper(), "bought": False, "events": [],
+    })
+    event = {"status": status, "detail": detail, "price": opp_price, "time": datetime.now().strftime("%H:%M:%S")}
+    if not audit["events"] or audit["events"][-1] != event:
+        audit["events"].append(event)
+        audit["events"] = audit["events"][-30:]
+    if status == "BOUGHT":
+        audit["bought"] = True
     if status in OPPO_SUPPRESSED_TRIGGER_STATUSES or time.time() < oppo_log_suppressed_until:
         return
     oppo_last_trigger[opp_key] = {
@@ -546,7 +559,7 @@ def _migrate_gap_ratio_names(value):
     return value
 
 def load_state():
-    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot
+    global stats, pnl_history, asset_history, trade_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, pump_cross_checks
     if not os.path.exists(STATE_FILE):
         log.info("[STATE] No saved state — starting fresh")
         return
@@ -560,6 +573,7 @@ def load_state():
         pnl_history   = saved.get("pnl_history", [])
         asset_history = saved.get("asset_history", {})
         trade_log     = saved.get("trade_log", [])
+        pump_cross_checks = saved.get("pump_cross_checks", [])
         pump_tracker  = {
             k: v for k, v in saved.get("pump_tracker", {}).items()
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
@@ -581,7 +595,7 @@ def load_state():
 
 
 def reset_state():
-    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, ema_history, cvd_history
+    global stats, pnl_history, asset_history, trade_log, oppo_trigger_log, pump_tracker, pump_log, pump_finished_tracker_keys, optimizer_recommendation_history, last_pnl_snapshot, ema_history, cvd_history, pump_cross_checks
     stats = {"scans": 0, "triggers": 0, "buys": 0, "wins": 0, "losses": 0, "pnl": 0.0}
     pnl_history   = []
     asset_history = {}
@@ -590,6 +604,8 @@ def reset_state():
     oppo_dashboard_once_per_window.clear()
     pump_tracker = {}
     pump_log = []
+    pump_cross_checks = []
+    trade_decision_audit.clear()
     optimizer_recommendation_history = []
     pump_finished_tracker_keys = set()
     normal_blacklisted_assets.clear()
@@ -719,6 +735,7 @@ def save_state():
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "pump_cross_checks": list(pump_cross_checks),
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
@@ -1159,6 +1176,55 @@ def _pump_result_from_tracker(tracker):
         return "FAILED"
     return "SUCCESS" if current_multiple >= max_multiple * 0.85 else "FAILED"
 
+_PUMP_BLOCK_STATUSES = {
+    "CVD-BLOCK", "GAP-BLOCK", "GOLDEN-GAP-BLOCK", "RVOL-BLOCK", "RVOL-WAIT",
+    "KNIFE-BLOCK", "DEAD-ZONE", "REBOUND-CAP", "SPREAD", "COOLDOWN", "BUY-FAIL", "SKIP",
+}
+
+
+def _cross_check_successful_pump(key, tracker):
+    """Explain why a successful pump had no buy when it first rebounded 2x."""
+    audit = trade_decision_audit.get((tracker.get("window_start"), key.lower()), {})
+    if audit.get("bought"):
+        return
+    decision_events = tracker.get("rebound_2x_decision_events", audit.get("events", []))
+    blockers = [e for e in decision_events if e.get("status") in _PUMP_BLOCK_STATUSES]
+    if not blockers:
+        side = str(tracker.get("side", key.split("_")[1])).lower()
+        rebound_gap = tracker.get("rebound_2x_kraken_gap", tracker.get("entry_kraken_gap"))
+        rebound_gap_ratio = tracker.get("rebound_2x_kraken_gap_ratio", tracker.get("entry_kraken_gap_ratio"))
+        rebound_cvd_slope = tracker.get("rebound_2x_cvd_slope", tracker.get("entry_cvd_slope"))
+        rebound_rvol = tracker.get("rebound_2x_rvol", tracker.get("entry_rvol"))
+        rebound_at = tracker.get("rebound_2x_at", tracker.get("entry_at", ""))
+        if rebound_gap_ratio is not None and float(rebound_gap_ratio) >= OPPO_GAP_MAG:
+            threshold = float(rebound_gap) / float(rebound_gap_ratio) * OPPO_GAP_MAG if rebound_gap is not None and float(rebound_gap_ratio) > 0 else None
+            comparison = (
+                f"{float(rebound_gap):.4f} >= {threshold:.4f} threshold"
+                if threshold is not None else f"ratio {float(rebound_gap_ratio):.3f}x >= {OPPO_GAP_MAG:.3f}x threshold"
+            )
+            blockers.append({"status": "GAP-BLOCK @ 2X", "detail": f"at first 2x rebound: {comparison}", "time": rebound_at})
+        if rebound_cvd_slope is not None and not _oppo_cvd_slope_confirms(side, rebound_cvd_slope):
+            expected = "positive" if side == "yes" else "negative"
+            blockers.append({"status": "CVD-BLOCK @ 2X", "detail": f"at first 2x rebound: slope={float(rebound_cvd_slope):.6f}; expected {expected}", "time": rebound_at})
+        if rebound_rvol is not None and float(rebound_rvol) > OPPO_NORMAL_RVOL_BLACKLIST_MAX:
+            blockers.append({"status": "RVOL-BLOCK @ 2X", "detail": f"at first 2x rebound: {float(rebound_rvol):.3f}x > {OPPO_NORMAL_RVOL_BLACKLIST_MAX:.3f}x threshold", "time": rebound_at})
+    if blockers:
+        reason, detail = blockers[0]["status"], blockers[0].get("detail") or "entry gate blocked"
+    elif decision_events:
+        last = decision_events[-1]
+        reason, detail = "NO-ENTRY @ 2X", f"at first 2x rebound, last decision: {last['status']} — {last.get('detail') or 'no detail'}"
+    else:
+        reason, detail = "NO-TRIGGER @ 2X", "no OPPO entry decision was recorded when price first rebounded 2x from its lowest"
+    pump_cross_checks.insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"), "window_start": tracker.get("window_start"),
+        "asset": tracker.get("asset", key.split("_")[0]).upper(),
+        "side": tracker.get("side", key.split("_")[1]).upper(),
+        "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
+        "rebound_2x_at": tracker.get("rebound_2x_at", ""),
+        "reason": reason, "detail": detail, "blockers": blockers[-5:],
+    })
+    del pump_cross_checks[200:]
+
 
 def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_kraken_snapshot(tracker)
@@ -1201,6 +1267,8 @@ def _finish_pump_tracker(key, tracker, reason="END"):
         return
     tracker["status"] = _pump_result_from_tracker(tracker)
     tracker["finish_reason"] = reason
+    if tracker["status"] == "SUCCESS":
+        _cross_check_successful_pump(key, tracker)
     pump_finished_tracker_keys.add(_pump_finished_id(window_start, key))
     _record_pump_event(key, tracker, reason, tracker["status"])
     log.info(
@@ -1239,8 +1307,15 @@ def _refresh_pump_tracker_price(key, tracker):
             tracker["entry_ts"] = time.time()
             tracker["price_updates"] = 1
             tracker["entry_kraken_gap_ratio"] = entry_snapshot.get("kraken_gap_ratio")
+            tracker["entry_kraken_gap"] = entry_snapshot.get("kraken_gap")
             tracker["entry_cvd_slope"] = entry_snapshot.get("cvd_slope")
             tracker["entry_rvol"] = entry_snapshot.get("rvol")
+            for field in (
+                "rebound_2x_at", "rebound_2x_price", "rebound_2x_kraken_gap",
+                "rebound_2x_kraken_gap_ratio", "rebound_2x_cvd_slope",
+                "rebound_2x_rvol", "rebound_2x_decision_events",
+            ):
+                tracker.pop(field, None)
         trough = float(tracker.get("trough", 0.0))
         multiple = price / trough if trough > 0 else 0.0
         tracker["multiple"] = multiple
@@ -1249,6 +1324,23 @@ def _refresh_pump_tracker_price(key, tracker):
         if multiple > float(tracker.get("max_multiple", 0.0)):
             tracker["max_multiple"] = multiple
     _update_pump_kraken_snapshot(tracker)
+
+
+def _capture_pump_2x_cross_check(key, tracker):
+    """Freeze gate conditions at the first rebound to 2x from the current lowest."""
+    if tracker.get("rebound_2x_at") or float(tracker.get("multiple", 0.0)) < 2.0:
+        return
+    snapshot = _get_pump_kraken_snapshot(tracker.get("asset"))
+    audit = trade_decision_audit.get((tracker.get("window_start"), key.lower()), {})
+    tracker.update({
+        "rebound_2x_at": datetime.now().strftime("%H:%M:%S"),
+        "rebound_2x_price": tracker.get("current"),
+        "rebound_2x_kraken_gap": snapshot.get("kraken_gap"),
+        "rebound_2x_kraken_gap_ratio": snapshot.get("kraken_gap_ratio"),
+        "rebound_2x_cvd_slope": snapshot.get("cvd_slope"),
+        "rebound_2x_rvol": snapshot.get("rvol"),
+        "rebound_2x_decision_events": [dict(event) for event in audit.get("events", [])],
+    })
 
 
 def update_pump_trackers(window_start, secs_into):
@@ -1299,6 +1391,7 @@ def update_pump_trackers(window_start, secs_into):
                         "entry_ts": time.time(),
                         "price_updates": 1,
                         "entry_kraken_gap_ratio": entry_snapshot.get("kraken_gap_ratio"),
+                        "entry_kraken_gap": entry_snapshot.get("kraken_gap"),
                         "entry_cvd_slope": entry_snapshot.get("cvd_slope"),
                         "entry_rvol": entry_snapshot.get("rvol"),
                         **entry_snapshot,
@@ -1306,6 +1399,7 @@ def update_pump_trackers(window_start, secs_into):
                 continue
 
             _refresh_pump_tracker_price(key, tracker)
+            _capture_pump_2x_cross_check(key, tracker)
 
             multiple = float(tracker.get("multiple", 0.0))
             trough = float(tracker.get("trough", 0.0))
@@ -2111,7 +2205,7 @@ def manage_oppo_target_sells(client, key, pos, current_price):
         _record_trade_log(key, pos, "OPPO-SELL", current_price, pnl)
         parts = key.split("_")
         if len(parts) >= 2:
-            _record_oppo_trigger(parts[0], parts[1], current_price, "SOLD", f"final pnl={pnl:+.4f}")
+            _record_oppo_trigger(parts[0], parts[1], current_price, "OPPO-SELL", f"final pnl={pnl:+.4f}")
         return True
 
     return False
@@ -2314,11 +2408,13 @@ def manage_positions(client, server_ts=None):
                 stats["wins" if pnl > 0 else "losses"] += 1
                 stats["pnl"] += pnl
                 _record_closed_trade(key, pnl)
-                _record_trade_log(key, pos, "CUT-LOSS", current_price, pnl)
+                tp2_cut = bool(pos.get("is_oppo") or key.endswith("_oppo")) and _oppo_tp1_sold(pos)
+                exit_type = "TP2-CUT" if tp2_cut else "CUT-LOSS"
+                _record_trade_log(key, pos, exit_type, current_price, pnl)
                 if pos.get("is_oppo") or key.endswith("_oppo") or pos.get("is_counter") or key.endswith("_counter"):
                     parts = key.split("_")
                     if len(parts) >= 2:
-                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else "CUT-LOSS"
+                        status = "COUNTER-CUT-LOSS" if (pos.get("is_counter") or key.endswith("_counter")) else exit_type
                         _record_oppo_trigger(parts[0], parts[1], current_price, status, f"pnl={pnl:+.4f}")
                 to_close.append(key)
 
@@ -3381,6 +3477,7 @@ def _build_state_snapshot():
             } for k, v in pump_tracker.items()
         },
         "pump_log":       list(pump_log),
+        "pump_cross_checks": list(pump_cross_checks),
         "optimizer_recommendation_history": list(optimizer_recommendation_history),
         "settings": {
             "assets":     ASSETS,
@@ -3711,9 +3808,9 @@ function showMoreButton(id,onclick,total,limit,expanded){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a','CVD-BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd','CVD-BREAKEVEN-SELL':'#4ade9f'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155','CVD-BREAKEVEN-SELL':'#166534'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','OPPO-SELL':'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','TP2-CUT':'#2a1e08','BREAKEVEN-SELL':'#0f172a','CVD-BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={SELL:'#4ade9f','OPPO-SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','TP2-CUT':'#fbbf24','BREAKEVEN-SELL':'#93c5fd','CVD-BREAKEVEN-SELL':'#4ade9f'}[e]||'#f87171';
+    const bc={SELL:'#1a5c3a','OPPO-SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','TP2-CUT':'#5c3d08','BREAKEVEN-SELL':'#334155','CVD-BREAKEVEN-SELL':'#166534'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -3813,6 +3910,14 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
+function renderPumpCrossChecks(checks){
+  const rows=(checks||[]).map(c=>{
+    const history=(c.blockers||[]).map(b=>`<div><span class="red">${b.status}</span> — ${b.detail||'—'}</div>`).join('');
+    return `<tr><td>${c.time||'—'}</td><td><strong>${pumpAssetLabel(c.asset,c.side)}</strong></td><td class="green" style="font-weight:700">${Number(c.max_multiple||0).toFixed(2)}x</td><td><span class="badge" style="background:#2a0d0d;color:#f87171;border:1px solid #5c1d1d">${c.reason||'NO-TRIGGER'}</span></td><td>${c.detail||'—'}${history?`<div class="dim" style="margin-top:5px;font-size:11px">${history}</div>`:''}</td></tr>`;
+  }).join('')||'<tr><td colspan="5" class="dim">No successful pumps without a matching buy yet</td></tr>';
+  return `<div style="overflow-x:auto"><table><thead><tr><th>Checked</th><th>Asset</th><th>Pump Max</th><th>Why No Buy?</th><th>Gate Detail / History</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 function renderAssetHistory(assetHist,assets){
   if(!assetHist||!Object.keys(assetHist).length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   return '<div class="asset-grid">'+assets.map(a=>{
@@ -3842,9 +3947,9 @@ function render(s){
   const normalBlacklisted=new Set(s.normal_blacklisted_assets||[]);
   const knifeBlacklisted=new Set(s.oppo_knife_blacklisted_assets||[]);
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
-  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[];
+  const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[],pumpCrossChecks=s.pump_cross_checks||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','CUT-LOSS','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','OPPO-SELL','CUT-LOSS','TP2-CUT','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';
@@ -3955,14 +4060,15 @@ function render(s){
 
   const oppoRows=oppoLog.map(o=>{
     const redStatuses=new Set(['CUT-LOSS','GOLDEN-GAP-BLOCK','KNIFE-BLOCK','COUNTER-CUT-LOSS']);
-    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','COUNTER-BOUGHT','COUNTER-SELL']);
+    const greenStatuses=new Set(['BOUGHT','SOLD','SELL','OPPO-SELL','COUNTER-BOUGHT','COUNTER-SELL']);
     const statusCls=greenStatuses.has(o.status)?'green':(redStatuses.has(o.status)?'red':'amber');
+    const statusStyle=statusCls==='green'?'background:#0d2a1e;color:#4ade9f;border:1px solid #1a5c3a':(statusCls==='red'?'background:#2a0d0d;color:#f87171;border:1px solid #5c1d1d':'background:#2a1e08;color:#fbbf24;border:1px solid #5c3d08');
     const priceTxt=o.price!=null?fmt(o.price,2):'—';
     return `<tr>
       <td>${o.time||'—'}</td>
       <td><strong>${o.asset||'—'}-${o.side||'—'}</strong></td>
       <td>${priceTxt}</td>
-      <td class="${statusCls}" style="font-weight:600">${o.status||'—'}</td>
+      <td><span class="badge" style="${statusStyle}">${o.status||'—'}</span></td>
       <td>${o.reason||'—'}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="5" class="dim">No OPPO triggers yet</td></tr>';
@@ -4068,6 +4174,11 @@ function render(s){
     <div class="section">
       <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump Tracker <span style="font-size:11px;color:#5a6a85;font-weight:400">tracks YES/NO prices from ${Math.round((cfg.pump_track_dead_zone_price||0.05)*100)}–${Math.round((cfg.pump_track_start_price||0.2)*100)}¢ until stop-buy ${cfg.stop_buy||840}s, milestones at 3x/4x/5x+</span><a href="/pump-log.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderPumpTracker(pumpTrackers,pumpLog,cfg.pump_track_start_price||0.2,cfg.pump_track_dead_zone_price||0.05)}
+    </div>
+
+    <div class="section">
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump / Trade Cross-Check <span style="font-size:11px;color:#5a6a85;font-weight:400">checks exact blocking gates when price first rebounds 2x from its lowest</span><a href="/pump-cross-check.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
+      ${renderPumpCrossChecks(pumpCrossChecks)}
     </div>
 
     <div class="section">
@@ -4260,6 +4371,25 @@ def _pump_log_csv_bytes():
         ])
     return buf.getvalue().encode("utf-8")
 
+
+def _pump_cross_check_csv_bytes():
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "window_start", "asset", "side", "max_multiple", "rebound_2x_at", "reason", "detail", "blocker_history"])
+    for check in pump_cross_checks:
+        blocker_history = " | ".join(
+            f"{event.get('status', '')}: {event.get('detail', '')}" for event in check.get("blockers", [])
+        )
+        w.writerow([
+            check.get("time", ""), check.get("window_start", ""), check.get("asset", ""),
+            check.get("side", ""), check.get("max_multiple", ""), check.get("rebound_2x_at", ""), check.get("reason", ""),
+            check.get("detail", ""), blocker_history,
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _safe_write(self, data, context):
         try:
@@ -4316,6 +4446,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(data))
             self.end_headers()
             self._safe_write(data, "/pump-log.csv")
+        elif self.path == "/pump-cross-check.csv":
+            data = _pump_cross_check_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=pump_cross_check.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/pump-cross-check.csv")
         else:
             self.send_response(404)
             self.end_headers()
@@ -4356,7 +4494,7 @@ def start_http_server():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global last_pnl_snapshot, pnl_history, armed_logged
+    global last_pnl_snapshot, pnl_history, armed_logged, active_window_start
 
     validate_settings()
     load_state()
@@ -4420,6 +4558,7 @@ def main():
         try:
             server_ts    = get_server_time()
             window_start = get_current_window_start(server_ts)
+            active_window_start = window_start
             secs_into    = server_ts - window_start
             secs_left    = WINDOW_SECS - secs_into
             idle_now     = not can_open_new_trades(server_ts)
