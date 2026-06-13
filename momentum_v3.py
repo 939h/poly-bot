@@ -2352,23 +2352,40 @@ def manage_positions(client, server_ts=None):
                 log.warning("[CUT-LOSS] %s sell failed — will retry on next loop", key)
             continue
 
-        # Price recovered — reset cooldown. For an OPPO stop delayed by an
-        # improving CVD baseline, report the successful recovery exactly once.
+        # If CVD delayed an OPPO cut-loss and price reaches entry, stop the
+        # countdown and immediately sell every remaining share at breakeven.
         if pos.get("force_stop_triggered") is not None:
             cvd_restarts = int(pos.get("force_stop_cvd_restarts", 0))
-            if (
-                pos.get("is_oppo")
-                and cvd_restarts > 0
-                and current_price >= entry
-                and not pos.get("force_stop_cvd_recovery_logged", False)
-            ):
-                parts = key.split("_")
-                if len(parts) >= 2:
-                    reason = f"cvd saved cut-loss after {cvd_restarts} restart(s); rebound above entry={entry:.4f}"
-                    _record_oppo_trigger(parts[0], parts[1], current_price, "CVD-RECOVERED", reason)
-                    pos["force_stop_cvd_recovery_logged"] = True
-                    log.info("[STOP-CVD-RECOVERED] %s price=%.4f entry=%.4f restarts=%d",
-                             key, current_price, entry, cvd_restarts)
+            cvd_recovered = bool(pos.get("is_oppo") and cvd_restarts > 0 and current_price >= entry)
+            if cvd_recovered:
+                log.info("[CVD-BREAKEVEN-SELL] %s price=%.4f >= entry=%.4f restarts=%d selling %.3f shares",
+                         key, current_price, entry, cvd_restarts, shares)
+                pos["closing"] = True
+                sell = market_sell_with_retries(
+                    client, pos["token_id"], shares, current_price, key.upper(),
+                    simulate=pos.get("is_simulated", False),
+                )
+                pos["last_exit_attempt_ts"] = time.time()
+                if sell["ok"]:
+                    revenue = float(sell.get("filled_quote") or round(shares * current_price, 4))
+                    pos["realized_revenue"] = round(pos.get("realized_revenue", 0.0) + revenue, 4)
+                    pnl = round(pos["realized_revenue"] - pos["cost"], 4)
+                    stats["wins" if pnl > 0 else "losses"] += 1
+                    stats["pnl"] += pnl
+                    _record_closed_trade(key, pnl)
+                    _record_trade_log(key, pos, "CVD-BREAKEVEN-SELL", current_price, pnl)
+                    parts = key.split("_")
+                    if len(parts) >= 2 and not pos.get("force_stop_cvd_recovery_logged", False):
+                        reason = f"cvd saved cut-loss after {cvd_restarts} restart(s); sold all above entry={entry:.4f}; pnl={pnl:+.4f}"
+                        _record_oppo_trigger(parts[0], parts[1], current_price, "CVD-RECOVERED", reason)
+                        pos["force_stop_cvd_recovery_logged"] = True
+                    log.info("[CVD-BREAKEVEN-SELL] %s finalized pnl=$%.4f", key, pnl)
+                    to_close.append(key)
+                else:
+                    pos["closing"] = False
+                    log.warning("[CVD-BREAKEVEN-SELL] %s sell failed — will retry on next loop", key)
+                continue
+
             log.info("[STOP-CANCEL] %s  price=%.4f recovered above cut=%.4f",
                      key, current_price, cut_loss)
             pos["force_stop_triggered"] = None
@@ -3694,9 +3711,9 @@ function showMoreButton(id,onclick,total,limit,expanded){
 function renderTradeLog(log){
   if(!log||!log.length)return'<p class="dim" style="padding:8px 0;font-size:12px">No closed trades yet</p>';
   const exitBadge=e=>{
-    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
-    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd'}[e]||'#f87171';
-    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155'}[e]||'#5c1d1d';
+    const col={SELL:'#0d2a1e','FLIP-SELL':'#0d1a2a','COUNTER-SELL':'#1e1b4b','CUT-LOSS':'#2a0d0d','BREAKEVEN-SELL':'#0f172a','CVD-BREAKEVEN-SELL':'#0f172a'}[e]||'#2a0d0d';
+    const tc={'SELL':'#4ade9f','FLIP-SELL':'#60a5fa','COUNTER-SELL':'#a5b4fc','CUT-LOSS':'#f87171','BREAKEVEN-SELL':'#93c5fd','CVD-BREAKEVEN-SELL':'#4ade9f'}[e]||'#f87171';
+    const bc={'SELL':'#1a5c3a','FLIP-SELL':'#1a3a5c','COUNTER-SELL':'#4338ca','CUT-LOSS':'#5c1d1d','BREAKEVEN-SELL':'#334155','CVD-BREAKEVEN-SELL':'#166534'}[e]||'#5c1d1d';
     return `<span class="badge" style="background:${col};color:${tc};border:1px solid ${bc}">${e}</span>`;
   };
   const rows=log.map((t,i)=>{
@@ -4061,7 +4078,7 @@ function render(s){
     <div class="section">
       <h2>Settings</h2>
       <table><tbody>
-        <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry; OPPO ${cfg.oppo_stop_loss_countdown_secs||15}s countdown snapshots CVD at stop start and restarts whenever CVD improves from the latest baseline until entry recovery</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
+        <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry; OPPO ${cfg.oppo_stop_loss_countdown_secs||15}s countdown snapshots CVD at stop start and restarts whenever CVD improves from the latest baseline; if price recovers to entry after a restart, sell all remaining shares at breakeven</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
         <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}</td><td>Golden-only</td><td>Master ON, Normal OFF, Golden ON</td></tr>
@@ -4358,7 +4375,7 @@ def main():
     log.info("  Force sell: pnl>0 and Kraken gap >= %.2fx staged threshold", FORCE_SELL_GAP_MULT)
     log.info("  EMA dashboard visualization: fast=%d slow=%d (not used for entry gating)", EMA_FAST_PERIOD, EMA_SLOW_PERIOD)
     log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => CVD-BLOCK", CVD_OPPO_ENABLED)
-    log.info("  OPPO stop-loss countdown: %ds; snapshot CVD at stop start and restart whenever in-side CVD improves from latest baseline until entry recovery", OPPO_STOP_LOSS_COUNTDOWN_SECS)
+    log.info("  OPPO stop-loss countdown: %ds; snapshot CVD at stop start and restart whenever in-side CVD improves from latest baseline; sell all remaining shares when price recovers to entry", OPPO_STOP_LOSS_COUNTDOWN_SECS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
     log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(

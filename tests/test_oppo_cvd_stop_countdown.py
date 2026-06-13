@@ -24,15 +24,17 @@ class OppoCvdStopCountdownTests(unittest.TestCase):
         self.assertIn("oppo_stop_active and current_price < entry", source)
         self.assertNotIn("get_short_cvd_slope", source)
 
-    def test_successful_cvd_stop_recovery_is_logged_once_above_entry(self):
+    def test_successful_cvd_stop_recovery_sells_all_at_breakeven_and_logs_once(self):
         source = inspect.getsource(momentum_v3.manage_positions)
 
-        self.assertIn('cvd_restarts > 0', source)
-        self.assertIn('current_price >= entry', source)
+        self.assertIn('cvd_recovered = bool(pos.get("is_oppo") and cvd_restarts > 0 and current_price >= entry)', source)
+        self.assertIn('client, pos["token_id"], shares, current_price, key.upper()', source)
+        self.assertIn('_record_trade_log(key, pos, "CVD-BREAKEVEN-SELL", current_price, pnl)', source)
         self.assertIn('not pos.get("force_stop_cvd_recovery_logged", False)', source)
         self.assertIn('"CVD-RECOVERED"', source)
         self.assertIn('pos["force_stop_cvd_recovery_logged"] = True', source)
         self.assertIn("'CVD-RECOVERED'", momentum_v3._DASHBOARD_HTML)
+        self.assertIn("'CVD-BREAKEVEN-SELL'", momentum_v3._DASHBOARD_HTML)
 
     def test_yes_and_no_use_change_from_stop_baseline(self):
         self.assertTrue(momentum_v3._oppo_cvd_slope_confirms("yes", -0.25 - -0.40))
@@ -45,6 +47,7 @@ class OppoCvdStopCountdownTests(unittest.TestCase):
 
         self.assertIn("oppo_stop_loss_countdown_secs", html)
         self.assertIn("snapshots CVD at stop start", html)
+        self.assertIn("sell all remaining shares at breakeven", html)
         self.assertNotIn("oppo_stop_cvd_window_secs", html)
 
 
