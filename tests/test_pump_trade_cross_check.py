@@ -41,9 +41,57 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
 
         self.assertEqual(momentum_v3.pump_cross_checks, [])
 
+    def test_no_trigger_infers_specific_gap_block_at_first_2x_rebound(self):
+        momentum_v3._cross_check_successful_pump(
+            "btc_no",
+            {
+                "window_start": 123, "asset": "btc", "side": "no", "max_multiple": 18.09,
+                "rebound_2x_at": "17:05:01", "rebound_2x_kraken_gap": 100.0,
+                "rebound_2x_kraken_gap_ratio": 2.5, "rebound_2x_cvd_slope": -0.1,
+                "rebound_2x_rvol": 0.5, "rebound_2x_decision_events": [],
+            },
+        )
+
+        check = momentum_v3.pump_cross_checks[0]
+        self.assertEqual(check["reason"], "GAP-BLOCK @ 2X")
+        self.assertEqual(check["detail"], "at first 2x rebound: 100.0000 >= 48.0000 threshold")
+        self.assertEqual(check["rebound_2x_at"], "17:05:01")
+
+    def test_first_2x_rebound_freezes_gate_snapshot_and_decisions(self):
+        momentum_v3.trade_decision_audit[(123, "btc_no")] = {
+            "events": [{"status": "CVD-BLOCK", "detail": "slope positive"}],
+        }
+        original_snapshot = momentum_v3._get_pump_kraken_snapshot
+        momentum_v3._get_pump_kraken_snapshot = lambda asset: {
+            "kraken_gap": 100.0, "kraken_gap_ratio": 2.5, "cvd_slope": 0.1, "rvol": 0.5,
+        }
+        tracker = {"asset": "btc", "window_start": 123, "multiple": 2.01, "current": 0.12}
+        try:
+            momentum_v3._capture_pump_2x_cross_check("btc_no", tracker)
+        finally:
+            momentum_v3._get_pump_kraken_snapshot = original_snapshot
+
+        self.assertEqual(tracker["rebound_2x_price"], 0.12)
+        self.assertEqual(tracker["rebound_2x_kraken_gap"], 100.0)
+        self.assertEqual(tracker["rebound_2x_decision_events"][0]["status"], "CVD-BLOCK")
+
+    def test_cross_check_csv_exports_specific_reason_and_history(self):
+        momentum_v3.pump_cross_checks = [{
+            "time": "17:15:00", "window_start": 123, "asset": "BTC", "side": "NO",
+            "max_multiple": 18.09, "reason": "GAP-BLOCK",
+            "detail": "at pump tracking start: 100.0000 >= 80.0000 threshold",
+            "blockers": [{"status": "GAP-BLOCK", "detail": "100.0000 >= 80.0000 threshold"}],
+        }]
+
+        csv_text = momentum_v3._pump_cross_check_csv_bytes().decode()
+
+        self.assertIn("rebound_2x_at,reason,detail,blocker_history", csv_text)
+        self.assertIn("GAP-BLOCK,at pump tracking start: 100.0000 >= 80.0000 threshold", csv_text)
+
     def test_dashboard_contains_cross_check_card(self):
         self.assertIn("Pump / Trade Cross-Check", momentum_v3._DASHBOARD_HTML)
         self.assertIn("Why No Buy?", momentum_v3._DASHBOARD_HTML)
+        self.assertIn('href="/pump-cross-check.csv"', momentum_v3._DASHBOARD_HTML)
 
 
 if __name__ == "__main__":

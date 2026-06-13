@@ -346,7 +346,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 # ── Pump tracker ─────────────────────────────────────────────────────────────
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.15"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
-PUMP_TRACK_MILESTONES = (1.9, 4, 5)
+PUMP_TRACK_MILESTONES = (2, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
 PUMP_TRACK_WINDOW_SECS = WINDOW_SECS
 
@@ -1183,23 +1183,44 @@ _PUMP_BLOCK_STATUSES = {
 
 
 def _cross_check_successful_pump(key, tracker):
-    """Explain why a successful pump did not receive a matching OPPO buy."""
+    """Explain why a successful pump had no buy when it first rebounded 2x."""
     audit = trade_decision_audit.get((tracker.get("window_start"), key.lower()), {})
     if audit.get("bought"):
         return
-    blockers = [e for e in audit.get("events", []) if e.get("status") in _PUMP_BLOCK_STATUSES]
+    decision_events = tracker.get("rebound_2x_decision_events", audit.get("events", []))
+    blockers = [e for e in decision_events if e.get("status") in _PUMP_BLOCK_STATUSES]
+    if not blockers:
+        side = str(tracker.get("side", key.split("_")[1])).lower()
+        rebound_gap = tracker.get("rebound_2x_kraken_gap", tracker.get("entry_kraken_gap"))
+        rebound_gap_ratio = tracker.get("rebound_2x_kraken_gap_ratio", tracker.get("entry_kraken_gap_ratio"))
+        rebound_cvd_slope = tracker.get("rebound_2x_cvd_slope", tracker.get("entry_cvd_slope"))
+        rebound_rvol = tracker.get("rebound_2x_rvol", tracker.get("entry_rvol"))
+        rebound_at = tracker.get("rebound_2x_at", tracker.get("entry_at", ""))
+        if rebound_gap_ratio is not None and float(rebound_gap_ratio) >= OPPO_GAP_MAG:
+            threshold = float(rebound_gap) / float(rebound_gap_ratio) * OPPO_GAP_MAG if rebound_gap is not None and float(rebound_gap_ratio) > 0 else None
+            comparison = (
+                f"{float(rebound_gap):.4f} >= {threshold:.4f} threshold"
+                if threshold is not None else f"ratio {float(rebound_gap_ratio):.3f}x >= {OPPO_GAP_MAG:.3f}x threshold"
+            )
+            blockers.append({"status": "GAP-BLOCK @ 2X", "detail": f"at first 2x rebound: {comparison}", "time": rebound_at})
+        if rebound_cvd_slope is not None and not _oppo_cvd_slope_confirms(side, rebound_cvd_slope):
+            expected = "positive" if side == "yes" else "negative"
+            blockers.append({"status": "CVD-BLOCK @ 2X", "detail": f"at first 2x rebound: slope={float(rebound_cvd_slope):.6f}; expected {expected}", "time": rebound_at})
+        if rebound_rvol is not None and float(rebound_rvol) > OPPO_NORMAL_RVOL_BLACKLIST_MAX:
+            blockers.append({"status": "RVOL-BLOCK @ 2X", "detail": f"at first 2x rebound: {float(rebound_rvol):.3f}x > {OPPO_NORMAL_RVOL_BLACKLIST_MAX:.3f}x threshold", "time": rebound_at})
     if blockers:
-        reason, detail = blockers[-1]["status"], blockers[-1].get("detail") or "entry gate blocked"
-    elif audit.get("events"):
-        last = audit["events"][-1]
-        reason, detail = "NO-ENTRY", f"last decision: {last['status']} — {last.get('detail') or 'no detail'}"
+        reason, detail = blockers[0]["status"], blockers[0].get("detail") or "entry gate blocked"
+    elif decision_events:
+        last = decision_events[-1]
+        reason, detail = "NO-ENTRY @ 2X", f"at first 2x rebound, last decision: {last['status']} — {last.get('detail') or 'no detail'}"
     else:
-        reason, detail = "NO-TRIGGER", "pump succeeded, but no OPPO entry decision was recorded"
+        reason, detail = "NO-TRIGGER @ 2X", "no OPPO entry decision was recorded when price first rebounded 2x from its lowest"
     pump_cross_checks.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"), "window_start": tracker.get("window_start"),
         "asset": tracker.get("asset", key.split("_")[0]).upper(),
         "side": tracker.get("side", key.split("_")[1]).upper(),
         "max_multiple": round(float(tracker.get("max_multiple", 0.0)), 3),
+        "rebound_2x_at": tracker.get("rebound_2x_at", ""),
         "reason": reason, "detail": detail, "blockers": blockers[-5:],
     })
     del pump_cross_checks[200:]
@@ -1286,8 +1307,15 @@ def _refresh_pump_tracker_price(key, tracker):
             tracker["entry_ts"] = time.time()
             tracker["price_updates"] = 1
             tracker["entry_kraken_gap_ratio"] = entry_snapshot.get("kraken_gap_ratio")
+            tracker["entry_kraken_gap"] = entry_snapshot.get("kraken_gap")
             tracker["entry_cvd_slope"] = entry_snapshot.get("cvd_slope")
             tracker["entry_rvol"] = entry_snapshot.get("rvol")
+            for field in (
+                "rebound_2x_at", "rebound_2x_price", "rebound_2x_kraken_gap",
+                "rebound_2x_kraken_gap_ratio", "rebound_2x_cvd_slope",
+                "rebound_2x_rvol", "rebound_2x_decision_events",
+            ):
+                tracker.pop(field, None)
         trough = float(tracker.get("trough", 0.0))
         multiple = price / trough if trough > 0 else 0.0
         tracker["multiple"] = multiple
@@ -1296,6 +1324,23 @@ def _refresh_pump_tracker_price(key, tracker):
         if multiple > float(tracker.get("max_multiple", 0.0)):
             tracker["max_multiple"] = multiple
     _update_pump_kraken_snapshot(tracker)
+
+
+def _capture_pump_2x_cross_check(key, tracker):
+    """Freeze gate conditions at the first rebound to 2x from the current lowest."""
+    if tracker.get("rebound_2x_at") or float(tracker.get("multiple", 0.0)) < 2.0:
+        return
+    snapshot = _get_pump_kraken_snapshot(tracker.get("asset"))
+    audit = trade_decision_audit.get((tracker.get("window_start"), key.lower()), {})
+    tracker.update({
+        "rebound_2x_at": datetime.now().strftime("%H:%M:%S"),
+        "rebound_2x_price": tracker.get("current"),
+        "rebound_2x_kraken_gap": snapshot.get("kraken_gap"),
+        "rebound_2x_kraken_gap_ratio": snapshot.get("kraken_gap_ratio"),
+        "rebound_2x_cvd_slope": snapshot.get("cvd_slope"),
+        "rebound_2x_rvol": snapshot.get("rvol"),
+        "rebound_2x_decision_events": [dict(event) for event in audit.get("events", [])],
+    })
 
 
 def update_pump_trackers(window_start, secs_into):
@@ -1346,6 +1391,7 @@ def update_pump_trackers(window_start, secs_into):
                         "entry_ts": time.time(),
                         "price_updates": 1,
                         "entry_kraken_gap_ratio": entry_snapshot.get("kraken_gap_ratio"),
+                        "entry_kraken_gap": entry_snapshot.get("kraken_gap"),
                         "entry_cvd_slope": entry_snapshot.get("cvd_slope"),
                         "entry_rvol": entry_snapshot.get("rvol"),
                         **entry_snapshot,
@@ -1353,6 +1399,7 @@ def update_pump_trackers(window_start, secs_into):
                 continue
 
             _refresh_pump_tracker_price(key, tracker)
+            _capture_pump_2x_cross_check(key, tracker)
 
             multiple = float(tracker.get("multiple", 0.0))
             trough = float(tracker.get("trough", 0.0))
@@ -4130,7 +4177,7 @@ function render(s){
     </div>
 
     <div class="section">
-      <h2>Pump / Trade Cross-Check <span style="font-size:11px;color:#5a6a85;font-weight:400">successful pumps with no matching OPPO buy, including exact blocking gate values</span></h2>
+      <h2 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">Pump / Trade Cross-Check <span style="font-size:11px;color:#5a6a85;font-weight:400">checks exact blocking gates when price first rebounds 2x from its lowest</span><a href="/pump-cross-check.csv" style="padding:4px 10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;font-size:11px;text-decoration:none;font-family:monospace">Export CSV</a></h2>
       ${renderPumpCrossChecks(pumpCrossChecks)}
     </div>
 
@@ -4324,6 +4371,25 @@ def _pump_log_csv_bytes():
         ])
     return buf.getvalue().encode("utf-8")
 
+
+def _pump_cross_check_csv_bytes():
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "window_start", "asset", "side", "max_multiple", "rebound_2x_at", "reason", "detail", "blocker_history"])
+    for check in pump_cross_checks:
+        blocker_history = " | ".join(
+            f"{event.get('status', '')}: {event.get('detail', '')}" for event in check.get("blockers", [])
+        )
+        w.writerow([
+            check.get("time", ""), check.get("window_start", ""), check.get("asset", ""),
+            check.get("side", ""), check.get("max_multiple", ""), check.get("rebound_2x_at", ""), check.get("reason", ""),
+            check.get("detail", ""), blocker_history,
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _safe_write(self, data, context):
         try:
@@ -4380,6 +4446,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(data))
             self.end_headers()
             self._safe_write(data, "/pump-log.csv")
+        elif self.path == "/pump-cross-check.csv":
+            data = _pump_cross_check_csv_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=pump_cross_check.csv")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self._safe_write(data, "/pump-cross-check.csv")
         else:
             self.send_response(404)
             self.end_headers()
