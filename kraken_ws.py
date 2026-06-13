@@ -65,6 +65,7 @@ _closed_closes = {asset: deque(maxlen=CANDLE_HISTORY_LIMIT) for asset in ASSETS}
 _cvd_points = {asset: deque(maxlen=300) for asset in ASSETS}
 _cvd_window_start = {asset: None for asset in ASSETS}
 _started = False
+_optimizer_cache = {}
 
 
 def _parse_rfc3339_ms(value):
@@ -287,6 +288,92 @@ def get_rvol_reversal_snapshot(asset, period=20, lookback=3, min_high_rvol=2, th
         "threshold": threshold,
     }
 
+
+def get_golden_optimizer_snapshot(
+    asset, period=20, current=None, thresholds=(0.9, 1.0, 1.1, 1.2),
+    lookbacks=(3, 4, 5), gap_magnitudes=(1.5, 2.0, 3.0, 4.0, 5.0),
+    validation_fraction=0.30, min_validation_samples=8,
+):
+    """Recommend golden OPPO settings in shadow mode using held-out Kraken candles."""
+    period = max(1, int(period))
+    with _lock:
+        rows = [dict(row) for row in candle_history.get(asset, []) if row.get("closed")]
+    current_key = tuple(sorted((current or {}).items()))
+    cache_key = (asset, len(rows), rows[-1].get("ts") if rows else None, period, current_key, tuple(thresholds), tuple(lookbacks), tuple(gap_magnitudes), float(validation_fraction), int(min_validation_samples))
+    cached = _optimizer_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if len(rows) < period + max(lookbacks) + min_validation_samples:
+        return {"mode": "shadow-recommend-only", "ready": False, "candles": len(rows)}
+
+    def volume(row):
+        return float(row.get("quote_volume", row.get("volume", 0.0)) or 0.0)
+
+    rvols = []
+    for index, row in enumerate(rows):
+        if index < period:
+            rvols.append(None)
+            continue
+        average = sum(volume(item) for item in rows[index - period:index]) / period
+        rvols.append(volume(row) / average if average > 0 else 0.0)
+
+    validation_start = max(period + max(lookbacks), int(len(rows) * (1 - float(validation_fraction))))
+
+    def evaluate(config):
+        sections = {"train": {"samples": 0, "wins": 0}, "validation": {"samples": 0, "wins": 0}}
+        lookback = config["lookback"]
+        for index in range(period + lookback, len(rows)):
+            previous = rows[index - lookback:index]
+            net_move = float(previous[-1].get("close", 0.0)) - float(previous[0].get("open", 0.0))
+            if net_move == 0:
+                continue
+            high_count = sum(rvols[pos] is not None and rvols[pos] > config["threshold"] for pos in range(index - lookback, index))
+            if high_count < config["min_high"]:
+                continue
+            result = rows[index]
+            result_open = float(result.get("open", 0.0) or 0.0)
+            result_close = float(result.get("close", 0.0) or 0.0)
+            if result_open <= 0:
+                continue
+            # Historical proxy for the live gap guard: use the fourth candle's close gap.
+            if abs(result_close - result_open) >= result_open * 0.001 * config["gap_magnitude"]:
+                continue
+            bucket = sections["validation" if index >= validation_start else "train"]
+            bucket["samples"] += 1
+            if (net_move < 0 and result_close > result_open) or (net_move > 0 and result_close < result_open):
+                bucket["wins"] += 1
+        for bucket in sections.values():
+            bucket["rate"] = bucket["wins"] / bucket["samples"] if bucket["samples"] else None
+        val = sections["validation"]
+        # Conservative score rewards held-out wins while penalizing sparse candidates.
+        sections["score"] = (val["wins"] - (val["samples"] - val["wins"])) if val["samples"] >= min_validation_samples else None
+        return sections
+
+    candidates = []
+    for lookback in lookbacks:
+        for min_high in range(2, int(lookback) + 1):
+            for threshold in thresholds:
+                for gap_magnitude in gap_magnitudes:
+                    config = {"lookback": int(lookback), "min_high": min_high, "threshold": float(threshold), "gap_magnitude": float(gap_magnitude)}
+                    metrics = evaluate(config)
+                    if metrics["score"] is not None:
+                        candidates.append({"config": config, **metrics})
+    candidates.sort(key=lambda item: (item["score"], item["validation"]["rate"] or 0, item["validation"]["samples"]), reverse=True)
+    current_result = evaluate(current) if current else None
+    result = {
+        "mode": "shadow-recommend-only",
+        "ready": bool(candidates),
+        "candles": len(rows),
+        "validation_start_index": validation_start,
+        "candidate_count": len(candidates),
+        "recommendation": candidates[0] if candidates else None,
+        "current": {"config": current, **current_result} if current and current_result else None,
+        "note": "Kraken fourth-candle direction/gap proxy; does not auto-apply or replay Polymarket token prices",
+    }
+    if len(_optimizer_cache) > 100:
+        _optimizer_cache.clear()
+    _optimizer_cache[cache_key] = result
+    return result
 
 
 def get_volume_snapshot(asset, period=20, rvol_min=1.5):
