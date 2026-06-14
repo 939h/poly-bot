@@ -579,6 +579,11 @@ def load_state():
         asset_history = saved.get("asset_history", {})
         trade_log     = saved.get("trade_log", [])
         pump_cross_checks = saved.get("pump_cross_checks", [])
+        if not CVD_OPPO_ENABLED:
+            pump_cross_checks = [
+                check for check in pump_cross_checks
+                if not str(check.get("reason", "")).startswith("CVD-BLOCK")
+            ]
         pump_tracker  = {
             k: v for k, v in saved.get("pump_tracker", {}).items()
             if float(v.get("current", v.get("base_price", 0.0)) or 0.0) >= PUMP_TRACK_DEAD_ZONE_PRICE
@@ -1194,6 +1199,8 @@ def _cross_check_successful_pump(key, tracker):
     if audit.get("bought"):
         return
     decision_events = tracker.get("rebound_2x_decision_events", audit.get("events", []))
+    if not CVD_OPPO_ENABLED:
+        decision_events = [event for event in decision_events if event.get("status") != "CVD-BLOCK"]
     blockers = [e for e in decision_events if e.get("status") in _PUMP_BLOCK_STATUSES]
     if not blockers:
         side = str(tracker.get("side", key.split("_")[1])).lower()
@@ -1209,7 +1216,7 @@ def _cross_check_successful_pump(key, tracker):
                 if threshold is not None else f"ratio {float(rebound_gap_ratio):.3f}x >= {OPPO_GAP_MAG:.3f}x threshold"
             )
             blockers.append({"status": "GAP-BLOCK @ 2X", "detail": f"at first 2x rebound: {comparison}", "time": rebound_at})
-        if rebound_cvd_slope is not None and not _oppo_cvd_slope_confirms(side, rebound_cvd_slope):
+        if CVD_OPPO_ENABLED and rebound_cvd_slope is not None and not _oppo_cvd_slope_confirms(side, rebound_cvd_slope):
             expected = "positive" if side == "yes" else "negative"
             blockers.append({"status": "CVD-BLOCK @ 2X", "detail": f"at first 2x rebound: slope={float(rebound_cvd_slope):.6f}; expected {expected}", "time": rebound_at})
         if rebound_rvol is not None and float(rebound_rvol) > OPPO_NORMAL_RVOL_BLACKLIST_MAX:

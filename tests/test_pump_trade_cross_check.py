@@ -8,6 +8,7 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         self.original_window = momentum_v3.active_window_start
         self.original_audit = momentum_v3.trade_decision_audit
         self.original_checks = momentum_v3.pump_cross_checks
+        self.original_cvd_enabled = momentum_v3.CVD_OPPO_ENABLED
         momentum_v3.active_window_start = 123
         momentum_v3.trade_decision_audit = {}
         momentum_v3.pump_cross_checks = []
@@ -16,6 +17,7 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         momentum_v3.active_window_start = self.original_window
         momentum_v3.trade_decision_audit = self.original_audit
         momentum_v3.pump_cross_checks = self.original_checks
+        momentum_v3.CVD_OPPO_ENABLED = self.original_cvd_enabled
 
     def test_successful_unbought_pump_reports_exact_gap_block(self):
         momentum_v3.record_oppo_trigger(
@@ -74,6 +76,24 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         self.assertEqual(tracker["rebound_2x_price"], 0.12)
         self.assertEqual(tracker["rebound_2x_kraken_gap"], 100.0)
         self.assertEqual(tracker["rebound_2x_decision_events"][0]["status"], "CVD-BLOCK")
+
+    def test_disabled_cvd_guard_is_not_reported_as_missed_buy_reason(self):
+        momentum_v3.CVD_OPPO_ENABLED = False
+        momentum_v3._cross_check_successful_pump(
+            "xrp_no",
+            {
+                "window_start": 123, "asset": "xrp", "side": "no", "max_multiple": 10.46,
+                "rebound_2x_at": "19:00:01", "rebound_2x_cvd_slope": 0.0,
+                "rebound_2x_decision_events": [
+                    {"status": "CVD-BLOCK", "detail": "slope=0.000000 expected=negative"},
+                ],
+            },
+        )
+
+        check = momentum_v3.pump_cross_checks[0]
+        self.assertEqual(check["reason"], "NO-TRIGGER @ 2X")
+        self.assertNotIn("CVD", check["detail"])
+        self.assertEqual(check["blockers"], [])
 
     def test_cross_check_csv_exports_specific_reason_and_history(self):
         momentum_v3.pump_cross_checks = [{
