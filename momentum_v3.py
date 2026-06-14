@@ -242,6 +242,7 @@ OPPO_NORMAL_ENABLED    = os.getenv("OPPO_NORMAL_ENABLED", "true").lower() == "tr
 OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.07"))
+OPPO_MIN_EFFECTIVE_BASE = float(os.getenv("OPPO_MIN_EFFECTIVE_BASE", "0.07"))
 OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.30"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
@@ -378,6 +379,10 @@ def validate_settings():
         errors.append("REBOUND_MAX_TARGET_PRICE must be between 0 and 1")
     if OPPO_REBOUND_MAX_PRICE <= OPPO_MAX_PRICE:
         errors.append("OPPO_REBOUND_MAX_PRICE must be greater than OPPO_MAX_PRICE")
+    if not 0 < OPPO_MIN_EFFECTIVE_BASE < 1:
+        errors.append("OPPO_MIN_EFFECTIVE_BASE must be between 0 and 1")
+    if OPPO_MIN_EFFECTIVE_BASE > OPPO_MAX_PRICE:
+        errors.append("OPPO_MIN_EFFECTIVE_BASE must be <= OPPO_MAX_PRICE")
     if OPPO_REBOUND_MAX_PRICE >= 1.0:
         errors.append("OPPO_REBOUND_MAX_PRICE must be < 1.0")
     if OPPO_COUNTER_BUY_AMOUNT <= 0:
@@ -749,6 +754,7 @@ def save_state():
             "oppo_stop_loss_countdown_secs": OPPO_STOP_LOSS_COUNTDOWN_SECS,
             "oppo_min_price": OPPO_MIN_PRICE,
             "oppo_max_price": OPPO_MAX_PRICE,
+            "oppo_min_effective_base": OPPO_MIN_EFFECTIVE_BASE,
             "oppo_rebound_mult": OPPO_REBOUND_MULT,
             "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
@@ -1506,10 +1512,18 @@ def _oppo_cvd_slope_confirms(side, slope):
     return float(slope) > 0 if side == "yes" else float(slope) < 0
 
 
+def _oppo_rebound_state(trough, price):
+    """Return the capped base, trigger price, and progress ratio for an OPPO rebound."""
+    effective_base = max(float(trough), OPPO_MIN_EFFECTIVE_BASE)
+    entry_trigger = effective_base * OPPO_REBOUND_MULT
+    rebound_ratio = float(price) / effective_base if effective_base > 0 else 0.0
+    return effective_base, entry_trigger, rebound_ratio
+
+
 def _oppo_rvol_guard_ok(asset, side, price, secs_into):
-    """Final OPPO buy gate: select normal or flexi size from minute-scaled Kraken RVOL."""
+    """Final OPPO buy gate: normal entries require RVOL within the configured range."""
     minute = get_rvol_minute(secs_into)
-    rvol_min = get_rvol_min(secs_into=secs_into)
+    rvol_min = 0.15
     vol = get_volume_snapshot(asset, VOLUME_AVG_PERIOD, rvol_min)
     rvol = vol.get("rvol")
     avg = vol.get("average")
@@ -1524,9 +1538,6 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
         _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
         return False, vol, None, False
 
-    if not OPPO_RVOL_GUARD_ENABLED:
-        return True, vol, BUY_AMOUNT, False
-
     if rvol is None:
         detail = f"not-ready; needs {VOLUME_AVG_PERIOD} candles"
         record_oppo_trigger(opp_key, asset, side, price, "RVOL-WAIT", detail)
@@ -1538,25 +1549,25 @@ def _oppo_rvol_guard_ok(asset, side, price, secs_into):
         return False, vol, None, False
 
     rvol = float(rvol)
-    rvol_confirmed = rvol > rvol_min
+    rvol_confirmed = rvol >= rvol_min
     if rvol_confirmed:
         log.info(
-            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx > %.3fx  volume=%.2f avg=%.2f order=$%.2f",
+            "[OPPO-RVOL-PASS] %s_%s minute=%d rvol=%.3fx >= %.3fx  volume=%.2f avg=%.2f order=$%.2f",
             asset.upper(), side.upper(), minute, rvol, rvol_min, float(current or 0.0), float(avg or 0.0), BUY_AMOUNT,
         )
         return True, vol, BUY_AMOUNT, False
 
     if not FLEXI_RVOL_ENABLED:
-        detail = f"{rvol:.3f}x <= {rvol_min:.3f}x (minute {minute}); flexi disabled"
+        detail = f"{rvol:.3f}x < {rvol_min:.3f}x normal OPPO minimum; flexi disabled"
         record_oppo_trigger(opp_key, asset, side, price, "RVOL-BLOCK", detail)
         _record_oppo_trigger(asset, side, price, "RVOL-BLOCK", detail)
         return False, vol, None, False
 
-    detail = f"{rvol:.3f}x <= {rvol_min:.3f}x; using ${FLEXI_RVOL_BUY_AMOUNT:g} order"
+    detail = f"{rvol:.3f}x < {rvol_min:.3f}x normal OPPO minimum; using ${FLEXI_RVOL_BUY_AMOUNT:g} order"
     record_oppo_trigger(opp_key, asset, side, price, "RVOL-FLEXI", detail)
     _record_oppo_trigger(asset, side, price, "RVOL-FLEXI", detail)
     log.info(
-        "[OPPO-RVOL-FLEXI] %s minute=%d rvol=%.3fx <= %.3fx  volume=%.2f avg=%.2f order=$%.2f",
+        "[OPPO-RVOL-FLEXI] %s minute=%d rvol=%.3fx < %.3fx  volume=%.2f avg=%.2f order=$%.2f",
         opp_key, minute, rvol, rvol_min, float(current or 0.0), float(avg or 0.0), FLEXI_RVOL_BUY_AMOUNT,
     )
     return True, vol, FLEXI_RVOL_BUY_AMOUNT, True
@@ -3027,12 +3038,16 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     log.info("[OPPO-WAIT] %s new trough=%.4f", opp_key, opp_price)
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", "trough-lower")
                     continue
-                rebound_ratio = opp_price / trough if trough > 0 else 0.0
+                effective_base, entry_trigger, rebound_ratio = _oppo_rebound_state(trough, opp_price)
                 if rebound_ratio < OPPO_REBOUND_MULT:
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x")
-                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f need>=%.4f)",
-                             opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, trough * OPPO_REBOUND_MULT)
-                    _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", f"rebound {rebound_ratio:.2f}x")
+                    detail = (
+                        f"rebound {rebound_ratio:.3f}x/{OPPO_REBOUND_MULT:.2f}x; "
+                        f"trough={trough:.4f} effective_base={effective_base:.4f} trigger={entry_trigger:.4f}"
+                    )
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "WAIT", detail)
+                    log.debug("[OPPO-WAIT] %s waiting %.3fx/%.2fx (price=%.4f trough=%.4f effective_base=%.4f need>=%.4f)",
+                             opp_key, rebound_ratio, OPPO_REBOUND_MULT, opp_price, trough, effective_base, entry_trigger)
+                    _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", detail)
                     continue
 
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
@@ -3491,6 +3506,7 @@ def _build_state_snapshot():
             "oppo_stop_loss_countdown_secs": OPPO_STOP_LOSS_COUNTDOWN_SECS,
             "oppo_min_price": OPPO_MIN_PRICE,
             "oppo_max_price": OPPO_MAX_PRICE,
+            "oppo_min_effective_base": OPPO_MIN_EFFECTIVE_BASE,
             "oppo_rebound_mult": OPPO_REBOUND_MULT,
             "oppo_falling_knife_min_move": OPPO_FALLING_KNIFE_MIN_MOVE,
             "flip_min":   FLIP_MIN,
@@ -4195,8 +4211,8 @@ function render(s){
         <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}</td><td>Golden-only</td><td>Master ON, Normal OFF, Golden ON</td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
-        <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.03)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from tracked trough</td></tr>
-        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — OUT-RVOL uses $${cfg.flexi_rvol_buy_amount||1}; normal OPPO RVOL above x${Number(cfg.oppo_normal_rvol_blacklist_max||1).toFixed(2)} blacklists for the window; CVD always blocks; OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s and at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)}</td><td>RVOL threshold</td><td>${Number(cfg.rvol_min_per_min||0.0666).toFixed(4)}x × current minute (1–15)</td></tr>
+        <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.07)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from effective base; base never below ${((cfg.oppo_min_effective_base||0.07)*100).toFixed(0)}¢</td></tr>
+        <tr><td>OPPO flexi guards</td><td>${cfg.flexi_rvol_enabled?'ON':'OFF'} — RVOL below x0.15 uses OUT-RVOL flexi or blocks; RVOL above x${Number(cfg.oppo_normal_rvol_blacklist_max||1).toFixed(2)} blacklists for the window; CVD always blocks; OUT-GAP flexi only through ${cfg.oppo_gap_flexi_end_sec||600}s and at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)}</td><td>Normal OPPO RVOL</td><td>x0.15–x${Number(cfg.oppo_normal_rvol_blacklist_max||1).toFixed(2)} inclusive</td></tr>
         <tr><td>OPPO gap guards</td><td>Normal Kraken gap ratio x${Number(cfg.oppo_gap_mag||1).toFixed(2)}</td><td>Golden Kraken gap ratio</td><td>x${Number(cfg.oppo_golden_gap_mag||3).toFixed(2)} — OUT-GAP flexi requires ratio at or below x${Number(cfg.oppo_gap_flexi_max_mag||2).toFixed(2)} through ${cfg.oppo_gap_flexi_end_sec||600}s; otherwise it blocks</td></tr>
         <tr><td>OPPO knife guard</td><td>Blocks the whole asset for the current window after a pump+dump knife signal</td><td>Pass</td><td>Requires pump +$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)} then peak drop -$${Number(cfg.oppo_falling_knife_min_move||0.3).toFixed(2)}</td></tr>
       </tbody></table>
@@ -4515,11 +4531,12 @@ def main():
     log.info("  OPPO CVD direction (Kraken): enabled=%s  YES positive / NO negative; opposite direction => CVD-BLOCK", CVD_OPPO_ENABLED)
     log.info("  OPPO stop-loss countdown: %ds; snapshot CVD at stop start and restart whenever in-side CVD improves from latest baseline; sell all remaining shares when price recovers to entry", OPPO_STOP_LOSS_COUNTDOWN_SECS)
     log.info("  OPPO falling-knife guard: blacklist asset after pump +$%.2f and peak drop -$%.2f", OPPO_FALLING_KNIFE_MIN_MOVE, OPPO_FALLING_KNIFE_MIN_MOVE)
-    log.info("  OPPO rebound: initial zone %.0f–%.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
+    log.info("  OPPO rebound: initial zone %.0f–%.0f¢  effective base >= %.0f¢  rebound max %.0f¢  rebound x%.2f", OPPO_MIN_PRICE * 100, OPPO_MAX_PRICE * 100, OPPO_MIN_EFFECTIVE_BASE * 100, OPPO_REBOUND_MAX_PRICE * 100, OPPO_REBOUND_MULT)
     log.info(
         "  OPPO flexi guards: enabled=%s  RVOL/gap outside threshold may use order=$%.2f; CVD always blocks; RVOL avg_period=%d threshold>%.4fx × minute",
         FLEXI_RVOL_ENABLED, FLEXI_RVOL_BUY_AMOUNT, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
     )
+    log.info("  Normal OPPO RVOL range: 0.150x–%.3fx inclusive", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info("  OPPO modes: master=%s normal=%s golden=%s", OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED)
     log.info("  OPPO normal RVOL blacklist: rvol > %.2fx blacklists asset for current window; Golden bypasses", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info(
