@@ -27,6 +27,7 @@ Requirements:
     DRY_RUN=true
     SIMULATE_NORMAL_BUY_ONLY=false
     BUY_AMOUNT=2
+    OPPO_GOLDEN_BUY_AMOUNT=3
     OPPO_MODE_ENABLED=true
     OPPO_NORMAL_ENABLED=true
     OPPO_GOLDEN_RVOL_ENABLED=true
@@ -168,6 +169,7 @@ DRY_RUN        = os.getenv("DRY_RUN", "true").lower() != "false"
 SIMULATE_NORMAL_BUY_ONLY = os.getenv("SIMULATE_NORMAL_BUY_ONLY", "false").lower() == "true"
 SIMULATE_REBOUND_MODE_ENABLED = os.getenv("SIMULATE_REBOUND_MODE_ENABLED", "false").lower() == "true"
 BUY_AMOUNT     = float(os.getenv("BUY_AMOUNT", "3"))   # USDC per trade
+OPPO_GOLDEN_BUY_AMOUNT = float(os.getenv("OPPO_GOLDEN_BUY_AMOUNT", str(BUY_AMOUNT)))
 REBOUND_BUY_AMOUNT = float(os.getenv("REBOUND_BUY_AMOUNT", str(BUY_AMOUNT)))  # USDC for rebound trades; defaults to BUY_AMOUNT if not set
 FLEXI_RVOL_BUY_AMOUNT = float(os.getenv("FLEXI_RVOL_BUY_AMOUNT", "1"))  # USDC for OPPO orders outside RVOL/gap thresholds
 FLEXI_RVOL_ENABLED = os.getenv("FLEXI_RVOL_ENABLED", "false").lower() == "true"
@@ -357,6 +359,8 @@ def validate_settings():
     errors = []
     if REBOUND_BUY_AMOUNT <= 0:
         errors.append("REBOUND_BUY_AMOUNT must be > 0")
+    if OPPO_GOLDEN_BUY_AMOUNT <= 0:
+        errors.append("OPPO_GOLDEN_BUY_AMOUNT must be > 0")
     if FLEXI_RVOL_BUY_AMOUNT <= 0:
         errors.append("FLEXI_RVOL_BUY_AMOUNT must be > 0")
     if OPPO_STOP_LOSS_COUNTDOWN_SECS <= 0:
@@ -782,6 +786,7 @@ def save_state():
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_golden_buy_amount": OPPO_GOLDEN_BUY_AMOUNT,
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
@@ -3129,15 +3134,15 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if golden_opportunity:
                     rvol_snapshot = get_volume_snapshot(opp_asset, VOLUME_AVG_PERIOD, get_rvol_min(secs_into))
-                    oppo_buy_amount = BUY_AMOUNT
+                    oppo_buy_amount = OPPO_GOLDEN_BUY_AMOUNT
                     probability = golden_setup.get("probability")
                     probability_text = f"{probability:.1%}" if probability is not None else "n/a"
                     prior_rvols = ",".join(f"{value:.2f}" for value in golden_setup.get("rvols", []) if value is not None)
                     log.info(
-                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) — bypassing knife/current-RVOL guards",
+                        "[OPPO-GOLDEN] %s_%s fourth-window reversal armed: high-rvol=%d/%d prior=[%s] historical=%s (%d/%d) order=$%.2f — bypassing knife/current-RVOL guards",
                         opp_asset.upper(), side.upper(), golden_setup.get("high_rvol_count", 0),
                         OPPO_GOLDEN_RVOL_LOOKBACK, prior_rvols, probability_text,
-                        golden_setup.get("wins", 0), golden_setup.get("samples", 0),
+                        golden_setup.get("wins", 0), golden_setup.get("samples", 0), oppo_buy_amount,
                     )
                     golden_detail = (
                         f"{golden_setup.get('high_rvol_count', 0)}/{OPPO_GOLDEN_RVOL_LOOKBACK} high RVOL; "
@@ -3536,6 +3541,7 @@ def _build_state_snapshot():
             "oppo_counter_min_price": OPPO_COUNTER_MIN_PRICE,
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
+            "oppo_golden_buy_amount": OPPO_GOLDEN_BUY_AMOUNT,
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
@@ -3590,6 +3596,9 @@ h2{font-size:15px;font-weight:600;margin:0 0 14px;color:#e8edf5}
 .card{background:#161b27;border:1px solid #2a3347;border-radius:10px;padding:14px}
 .card .lbl{font-size:11px;color:#5a6a85;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .card .val{font-size:22px;font-weight:600}
+.pnl-split{border-top:1px solid #2a3347;margin-top:9px;padding-top:7px;display:grid;gap:4px}
+.pnl-split div{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:#8795ad}
+.pnl-split strong{font-size:12px}
 .green{color:#4ade9f}.red{color:#f87171}.amber{color:#fbbf24}.blue{color:#60a5fa}.dim{color:#5a6a85}
 .section{background:#161b27;border:1px solid #2a3347;border-radius:10px;padding:16px;margin-bottom:16px}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -3982,6 +3991,8 @@ function render(s){
   const total=(st.wins||0)+(st.losses||0);
   const wr=total>0?Math.round(st.wins/total*100)+'%':'—';
   const pnl=st.pnl||0;
+  const normalOppoPnl=tLog.reduce((sum,t)=>t.is_oppo&&!t.is_golden_oppo?sum+(Number(t.pnl)||0):sum,0);
+  const goldenOppoPnl=tLog.reduce((sum,t)=>t.is_golden_oppo?sum+(Number(t.pnl)||0):sum,0);
   const roiCost=tLog.reduce((sum,t)=>sum+Math.max(0,Number(t.cost)||0),0);
   const roiPnl=tLog.reduce((sum,t)=>(Number(t.cost)||0)>0?sum+(Number(t.pnl)||0):sum,0);
   const roi=roiCost>0?roiPnl/roiCost*100:null;
@@ -4128,7 +4139,7 @@ function render(s){
       <div class="card"><div class="lbl">Losses</div><div class="val ${(st.losses||0)>0?'red':'dim'}">${st.losses||0}</div></div>
       <div class="card"><div class="lbl">Win rate</div><div class="val ${total>0?'green':'dim'}">${wr}</div></div>
       <div class="card"><div class="lbl">Open</div><div class="val blue">${Object.keys(pos).length}</div></div>
-      <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnlColor(pnl)}">${pnl>=0?'+':''}$${pnl.toFixed(4)}</div></div>
+      <div class="card"><div class="lbl">Net PnL</div><div class="val ${pnlColor(pnl)}">${pnl>=0?'+':''}$${pnl.toFixed(4)}</div><div class="pnl-split"><div><span>Normal OPPO</span><strong class="${pnlColor(normalOppoPnl)}">${normalOppoPnl>=0?'+':''}$${normalOppoPnl.toFixed(4)}</strong></div><div><span>Golden OPPO</span><strong class="${pnlColor(goldenOppoPnl)}">${goldenOppoPnl>=0?'+':''}$${goldenOppoPnl.toFixed(4)}</strong></div></div></div>
       <div class="card"><div class="lbl">ROI</div><div class="val ${roi!=null?pnlColor(roi):'dim'}">${roiTxt}</div></div>
       <div class="card"><div class="lbl">Bot Status</div><div class="val ${botStatus.active?'green':'amber'}">${botStatus.label}</div><div class="dim" style="font-size:11px;margin-top:4px">${botStatus.detail}</div></div>
     </div>
@@ -4215,7 +4226,7 @@ function render(s){
         <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry; OPPO ${cfg.oppo_stop_loss_countdown_secs||15}s countdown snapshots CVD at stop start and restarts whenever CVD improves from the latest baseline; if price recovers to entry after a restart, sell all remaining shares at breakeven</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
-        <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}</td><td>Golden-only</td><td>Master ON, Normal OFF, Golden ON</td></tr>
+        <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}; Golden-only: Master ON, Normal OFF, Golden ON</td><td>Golden order</td><td>$${Number(cfg.oppo_golden_buy_amount||cfg.order||3).toFixed(2)}</td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.07)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from effective base; base never below ${((cfg.oppo_min_effective_base||0.07)*100).toFixed(0)}¢</td></tr>
@@ -4545,6 +4556,7 @@ def main():
     )
     log.info("  Normal OPPO RVOL range: 0.150x–%.3fx inclusive", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info("  OPPO modes: master=%s normal=%s golden=%s", OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED)
+    log.info("  Golden OPPO order: $%.2f", OPPO_GOLDEN_BUY_AMOUNT)
     log.info("  OPPO normal RVOL blacklist: rvol > %.2fx blacklists asset for current window; Golden bypasses", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info(
         "  OPPO golden fourth-window: enabled=%s  prior-high=%d/%d > %.2fx  historical reversal >= %.0f%% over >=%d samples",
