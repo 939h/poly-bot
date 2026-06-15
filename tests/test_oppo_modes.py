@@ -37,6 +37,14 @@ class OppoModeTests(unittest.TestCase):
         self.assertIn('"oppo_normal_enabled"', snapshot_source)
         self.assertIn("Master ON, Normal OFF, Golden ON", html)
 
+    def test_golden_entries_use_dedicated_buy_amount(self):
+        source = inspect.getsource(momentum_v3.scan_markets)
+        snapshot_source = inspect.getsource(momentum_v3._build_state_snapshot)
+
+        self.assertIn("oppo_buy_amount = OPPO_GOLDEN_BUY_AMOUNT", source)
+        self.assertIn('"oppo_golden_buy_amount"', snapshot_source)
+        self.assertIn("cfg.oppo_golden_buy_amount", momentum_v3._DASHBOARD_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

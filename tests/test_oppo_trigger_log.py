@@ -52,6 +52,14 @@ class OppoTriggerLogTests(unittest.TestCase):
         self.assertEqual(len(momentum_v3.oppo_trigger_log), 2)
         self.assertEqual(momentum_v3.oppo_trigger_log[0]["reason"], "new window")
 
+    def test_dashboard_uses_expected_boxes_for_tp2_cut_and_oppo_sell(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("'OPPO-SELL':'#0d2a1e'", html)
+        self.assertIn("'TP2-CUT':'#2a1e08'", html)
+        self.assertIn("'OPPO-SELL','CUT-LOSS','TP2-CUT'", html)
+        self.assertIn('class="badge" style="${statusStyle}"', html)
+
 
 if __name__ == "__main__":
     unittest.main()

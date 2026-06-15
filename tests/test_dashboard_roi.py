@@ -26,7 +26,21 @@ class DashboardRoiTests(unittest.TestCase):
         self.assertIn("const roi=roiCost>0?roiPnl/roiCost*100:null", html)
         self.assertGreater(html.index(roi), html.index(net_pnl))
         self.assertNotIn(net_pnl + roi, html)  # Cards include their displayed values between labels.
-        self.assertLess(html.index(roi) - html.index(net_pnl), 300)
+        self.assertLess(html.index(roi) - html.index(net_pnl), 700)
+
+    def test_net_pnl_card_separates_normal_and_golden_oppo(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn(
+            "const normalOppoPnl=tLog.reduce((sum,t)=>t.is_oppo&&!t.is_golden_oppo",
+            html,
+        )
+        self.assertIn(
+            "const goldenOppoPnl=tLog.reduce((sum,t)=>t.is_golden_oppo",
+            html,
+        )
+        self.assertIn("<span>Normal OPPO</span>", html)
+        self.assertIn("<span>Golden OPPO</span>", html)
 
     def test_bot_status_card_is_immediately_after_roi(self):
         html = momentum_v3._DASHBOARD_HTML
