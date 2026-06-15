@@ -864,6 +864,7 @@ def _record_trade_log(key, pos, exit_type, close_price, pnl):
         "is_counter": pos.get("is_counter", False),
         "is_oppo": pos.get("is_oppo", key.endswith("_oppo")),
         "is_golden_oppo": bool(pos.get("is_golden_oppo", False)),
+        "entry_golden_status": pos.get("entry_golden_status"),
         "pnl":      round(pnl, 4),
         "cost":     round(float(pos.get("cost", 0.0)), 4),
         "entry_rvol": round(float(entry_rvol), 3) if entry_rvol is not None else None,
@@ -1504,6 +1505,21 @@ def _oppo_golden_rvol_setup(asset, side):
     return snapshot
 
 
+def _golden_status_at_buy(asset, bought_side, is_golden_oppo=False):
+    """Snapshot Golden's actual state and YES/NO side when an OPPO buy is placed."""
+    setup = _oppo_golden_rvol_setup(asset, bought_side)
+    golden_side = setup.get("side") if setup.get("side") in ("yes", "no") else bought_side
+    if not OPPO_GOLDEN_RVOL_ENABLED:
+        state = "OFF"
+    elif setup.get("qualified") and is_golden_oppo:
+        state = "GOLDEN"
+    elif setup.get("armed"):
+        state = "ARMED"
+    else:
+        state = "WATCHING"
+    return f"{state} {golden_side.upper()}"
+
+
 def _oppo_gap_flexi_allowed(secs_into, gap_ratio):
     """Allow OUT-GAP flexi only in its time window and at or below the max magnitude."""
     return (
@@ -1937,7 +1953,8 @@ def force_sell_gap_triggered(asset, secs_into):
 def open_position(key, token_id, entry_price, filled_shares=None, window_start=None,
                   is_flip=False, is_rebound=False, buy_amount=None, is_simulated=False,
                   entry_rvol=None, entry_kraken_gap=None, entry_kraken_gap_ratio=None, entry_rebound_ratio=None,
-                  entry_cvd_slope=None, is_golden_oppo=False, entry_out_conditions=None):
+                  entry_cvd_slope=None, is_golden_oppo=False, entry_out_conditions=None,
+                  entry_golden_status=None):
     amount = buy_amount if buy_amount is not None else BUY_AMOUNT
     requested_out_conditions = set(entry_out_conditions or [])
     entry_out_conditions = [condition for condition in OPPO_OUT_CONDITIONS if condition in requested_out_conditions]
@@ -2031,6 +2048,7 @@ def open_position(key, token_id, entry_price, filled_shares=None, window_start=N
         "entry_rebound_ratio":   round(float(entry_rebound_ratio), 3) if entry_rebound_ratio is not None else None,
         "entry_cvd_slope":       round(float(entry_cvd_slope), 6) if entry_cvd_slope is not None else None,
         "is_golden_oppo":        bool(is_golden_oppo),
+        "entry_golden_status":   entry_golden_status,
         "entry_out_conditions":  entry_out_conditions,
     }
     last_entry_ts[base_asset] = time.time()
@@ -3164,6 +3182,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 base_gap = c_open * GAP_SWING.get(opp_asset, 0.001) if c_open > 0 else None
                 entry_kraken_gap_ratio = actual_gap / base_gap if base_gap and base_gap > 0 else None
                 _, _, entry_cvd_slope = get_cvd_snapshot(opp_asset)
+                entry_golden_status = _golden_status_at_buy(opp_asset, side, golden_opportunity)
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
                 if buy["ok"]:
@@ -3179,7 +3198,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   entry_rebound_ratio=rebound_ratio,
                                   entry_cvd_slope=entry_cvd_slope,
                                   is_golden_oppo=golden_opportunity,
-                                  entry_out_conditions=entry_out_conditions)
+                                  entry_out_conditions=entry_out_conditions,
+                                  entry_golden_status=entry_golden_status)
                     traded_this_window.add(opp_asset)
                     oppo_rebound_tracker.pop(opp_key, None)
                     record_oppo_trigger(opp_key, opp_asset, side, opp_price, "BOUGHT", "success")
@@ -3857,6 +3877,8 @@ function renderTradeLog(log){
     const krakenGapRatio=t.entry_kraken_gap_ratio!=null?Number(t.entry_kraken_gap_ratio):null;
     const krakenGapRatioTxt=krakenGapRatio!=null?krakenGapRatio.toFixed(3)+'x':'—';
     const krakenGapRatioCls=krakenGapRatio!=null?'amber':'dim';
+    const goldenStatus=t.entry_golden_status||'—';
+    const goldenStatusCls=goldenStatus.startsWith('GOLDEN')?'amber':goldenStatus.startsWith('ARMED')?'blue':'dim';
     return `<tr class="tl-row" style="${i>=TL_COLLAPSE&&!_tlExpanded?'display:none':''}">
       <td>${t.time||'—'}</td>
       <td><strong>${t.asset}-${t.side}</strong>${flipTag}${counterTag}${goldenTag}${outTags}</td>
@@ -3867,12 +3889,13 @@ function renderTradeLog(log){
       <td class="${p>0?'green':p<0?'red':'dim'}" style="font-weight:600">$${ps}</td>
       <td class="${rvolCls}" style="font-weight:600">${rvolTxt}</td>
       <td class="${krakenGapRatioCls}" style="font-weight:600">${krakenGapRatioTxt}</td>
+      <td class="${goldenStatusCls}" style="font-weight:600">${goldenStatus}</td>
     </tr>`;
   }).join('');
   const extra=log.length-TL_COLLAPSE;
   const btn=extra>0?`<button id="tlToggle" onclick="tlToggle()" style="margin-top:10px;background:#1e2533;border:1px solid #2a3347;color:#60a5fa;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer">${_tlExpanded?'▲ Show less':'▼ Show '+extra+' more'}</button>`:'';
   return `<div id="tradeLogWrap" style="overflow-x:auto"><table>
-    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th><th>Buy Kraken Gap Ratio</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Entry</th><th>Target</th><th>Exit</th><th>Exit $</th><th>PnL</th><th>Buy RVOL</th><th>Buy Kraken Gap Ratio</th><th>Golden Status</th></tr></thead>
     <tbody>${rows}</tbody></table></div>${btn}`;
 }
 
@@ -4309,14 +4332,14 @@ def _trade_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "is_golden_oppo", "pnl", "cost", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_out_conditions"])
+    w.writerow(["time", "asset", "side", "entry", "target", "exit", "exit_px", "is_flip", "is_rebound", "is_counter", "is_golden_oppo", "pnl", "cost", "entry_rvol", "entry_kraken_gap", "entry_kraken_gap_ratio", "entry_golden_status", "entry_out_conditions"])
     for t in trade_log:
         w.writerow([
             t.get("time", ""), t.get("asset", ""), t.get("side", ""),
             t.get("entry", ""), t.get("target", ""), t.get("exit", ""),
             t.get("exit_px", ""), t.get("is_flip", False), t.get("is_rebound", False),
             t.get("is_counter", False), t.get("is_golden_oppo", False), t.get("pnl", ""), t.get("cost", ""), t.get("entry_rvol", ""),
-            t.get("entry_kraken_gap", ""), t.get("entry_kraken_gap_ratio", ""), "|".join(t.get("entry_out_conditions", [])),
+            t.get("entry_kraken_gap", ""), t.get("entry_kraken_gap_ratio", ""), t.get("entry_golden_status", ""), "|".join(t.get("entry_out_conditions", [])),
         ])
     return buf.getvalue().encode("utf-8")
 
