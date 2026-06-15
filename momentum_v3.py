@@ -245,7 +245,7 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.07"))
 OPPO_MIN_EFFECTIVE_BASE = float(os.getenv("OPPO_MIN_EFFECTIVE_BASE", "0.07"))
-OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
+OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.24"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
 OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
@@ -260,7 +260,7 @@ OPPO_DEAD_ZONE         = float(os.getenv("OPPO_DEAD_ZONE", "0.04"))
 OPPO_FIRST_SELL_FRACTION = 0.50
 OPPO_FIRST_SELL_MULTIPLIER = 2.0
 OPPO_FINAL_SELL_MULTIPLIER = 10.0
-OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.80"))
+OPPO_TP2_TRAIL_PCT = float(os.getenv("OPPO_TP2_TRAIL_PCT", "0.50")) #0.80 Means price -80% from peak
 OPPO_COUNTER_ENABLED = os.getenv("OPPO_COUNTER_ENABLED", "false").lower() == "true"
 OPPO_COUNTER_MIN_PRICE = float(os.getenv("OPPO_COUNTER_MIN_PRICE", "0.05"))
 OPPO_COUNTER_MAX_PRICE = float(os.getenv("OPPO_COUNTER_MAX_PRICE", "0.08"))
@@ -268,7 +268,7 @@ OPPO_COUNTER_BUY_AMOUNT = float(os.getenv("OPPO_COUNTER_BUY_AMOUNT", "1"))
 OPPO_COUNTER_SELL_MULTIPLIER = float(os.getenv("OPPO_COUNTER_SELL_MULTIPLIER", "7"))
 OPPO_COUNTER_SELL_CAP = float(os.getenv("OPPO_COUNTER_SELL_CAP", "0.5"))
 OPPO_COUNTER_CUT_LOSS_PCT = float(os.getenv("OPPO_COUNTER_CUT_LOSS_PCT", "0.5"))
-CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "true").lower() == "true"
+CVD_OPPO_ENABLED = os.getenv("CVD_OPPO_ENABLED", "false").lower() == "true"
 VOLUME_AVG_PERIOD = max(1, int(os.getenv("VOLUME_AVG_PERIOD", "20")))
 RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
@@ -337,7 +337,7 @@ def _format_trading_windows(windows):
 
 TRADING_WINDOWS_ENABLED = os.getenv("TRADING_WINDOWS_ENABLED", "false").lower() == "true"
 TRADING_TZ_OFFSET_HRS = float(os.getenv("TRADING_TZ_OFFSET_HRS", "8"))
-TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "630-731,830-931,1130-1231,1900-2101"))
+TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "300-401,630-731,830-901,1130-1231,1830-2001,2100-2331"))
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 EXIT_RETRY_COOLDOWN_SECS = 1
@@ -349,7 +349,7 @@ CRYPTO_TAKER_FEE_RATE    = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.072"))
 # ── Pump tracker ─────────────────────────────────────────────────────────────
 PUMP_TRACK_START_PRICE = float(os.getenv("PUMP_TRACK_START_PRICE", "0.15"))
 PUMP_TRACK_DEAD_ZONE_PRICE = float(os.getenv("PUMP_TRACK_DEAD_ZONE_PRICE", "0.04"))
-PUMP_TRACK_MILESTONES = (1.9, 4, 5)
+PUMP_TRACK_MILESTONES = (2, 4, 5)
 PUMP_TRACK_SUCCESS_MIN_MULTIPLE = float(os.getenv("PUMP_TRACK_SUCCESS_MIN_MULTIPLE", "2.0"))
 PUMP_TRACK_WINDOW_SECS = WINDOW_SECS
 
