@@ -335,7 +335,7 @@ def _format_trading_windows(windows):
     return ", ".join(f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}" for sh, sm, eh, em in windows)
 
 
-TRADING_WINDOWS_ENABLED = os.getenv("TRADING_WINDOWS_ENABLED", "true").lower() == "true"
+TRADING_WINDOWS_ENABLED = os.getenv("TRADING_WINDOWS_ENABLED", "false").lower() == "true"
 TRADING_TZ_OFFSET_HRS = float(os.getenv("TRADING_TZ_OFFSET_HRS", "8"))
 TRADING_WINDOWS = _parse_trading_windows(os.getenv("TRADING_WINDOWS", "300-401,630-731,830-901,1130-1231,1830-2001,2100-2331"))
 
