@@ -245,7 +245,7 @@ OPPO_WINDOW_START_SEC  = int(os.getenv("OPPO_WINDOW_START_SEC", "60"))
 OPPO_MAX_PRICE         = float(os.getenv("OPPO_MAX_PRICE", "0.15"))
 OPPO_MIN_PRICE         = float(os.getenv("OPPO_MIN_PRICE", "0.07"))
 OPPO_MIN_EFFECTIVE_BASE = float(os.getenv("OPPO_MIN_EFFECTIVE_BASE", "0.07"))
-OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.24"))
+OPPO_REBOUND_MAX_PRICE = float(os.getenv("OPPO_REBOUND_MAX_PRICE", "0.25"))
 OPPO_GAP_MAG           = float(os.getenv("OPPO_GAP_MAG", "1.2"))
 OPPO_GOLDEN_GAP_MAG    = float(os.getenv("OPPO_GOLDEN_GAP_MAG", "2.2"))
 OPPO_GAP_FLEXI_END_SEC = 600  # OUT-GAP flexi buys allowed only during seconds 0–600
@@ -1195,7 +1195,7 @@ def _pump_result_from_tracker(tracker):
 
 _PUMP_BLOCK_STATUSES = {
     "CVD-BLOCK", "GAP-BLOCK", "GOLDEN-GAP-BLOCK", "RVOL-BLOCK", "RVOL-WAIT",
-    "KNIFE-BLOCK", "DEAD-ZONE", "REBOUND-CAP", "SPREAD", "COOLDOWN", "BUY-FAIL", "SKIP",
+    "GOLDEN-DIR-BLOCK", "KNIFE-BLOCK", "DEAD-ZONE", "REBOUND-CAP", "SPREAD", "COOLDOWN", "BUY-FAIL", "SKIP",
 }
 
 
@@ -1518,6 +1518,12 @@ def _golden_status_at_buy(asset, bought_side, is_golden_oppo=False):
     else:
         state = "WATCHING"
     return f"{state} {golden_side.upper()}"
+
+
+def _golden_direction_allows_normal_oppo(asset, side, golden_setup):
+    """Normal OPPO may only enter when Golden's current direction matches the OPPO side."""
+    golden_side = golden_setup.get("side")
+    return bool(golden_side == side), golden_side
 
 
 def _oppo_gap_flexi_allowed(secs_into, gap_ratio):
@@ -3080,6 +3086,18 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", detail)
                     continue
 
+                if not golden_opportunity:
+                    golden_direction_ok, golden_side = _golden_direction_allows_normal_oppo(opp_asset, side, golden_setup)
+                    if not golden_direction_ok:
+                        golden_side_txt = (golden_side or "unknown").upper()
+                        detail = f"normal OPPO side {side.upper()} blocked; Golden direction={golden_side_txt}"
+                        normal_blacklisted_assets.add(opp_asset)
+                        record_oppo_trigger(opp_key, opp_asset, side, opp_price, "GOLDEN-DIR-BLOCK", detail)
+                        _record_oppo_trigger(opp_asset, side, opp_price, "GOLDEN-DIR-BLOCK", detail)
+                        log.info("[OPPO-GOLDEN-DIR-BLOCK] %s %s — asset blacklisted this window", opp_key, detail)
+                        _clear_oppo_tracking_for_asset(opp_asset)
+                        continue
+
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
                 if falling_knife and not golden_opportunity:
                     pump_move = pump_peak - pump_trough
@@ -4004,7 +4022,7 @@ function render(s){
   const trendGuarded=new Set(s.trend_guarded_assets||[]);
   const pnlHist=s.pnl_history||[],assetHist=s.asset_history||{},tLog=s.trade_log||[],pumpTrackers=s.pump_tracker||{},pumpLog=s.pump_log||[],pumpCrossChecks=s.pump_cross_checks||[];
   const emaNow=s.ema_now||{},emaHistory=s.ema_history||{},krakenCandles=s.kraken_candles||{},goldenRvol=s.golden_rvol||{},goldenOptimizer=s.golden_optimizer||{},oppoTradeOptimizer=s.oppo_trade_optimizer||{};
-  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','OPPO-SELL','CUT-LOSS','TP2-CUT','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
+  const oppoLog=(s.oppo_trigger_log||[]).filter(o=>['GOLDEN','GOLDEN-DIR-BLOCK','GOLDEN-GAP-BLOCK','GOLDEN-GAP-FLEXI','GAP-FLEXI','RVOL-FLEXI','BOUGHT','SELL','SOLD','OPPO-SELL','CUT-LOSS','TP2-CUT','KNIFE-BLOCK','COUNTER-ARM','COUNTER-BOUGHT','COUNTER-SELL','COUNTER-CUT-LOSS','CVD-RECOVERED'].includes(o.status));
   const assets=cfg.assets||['btc','eth','sol','xrp'];
   const mode=s.dry_run?'<span class="badge dry">DRY RUN</span>':'<span class="badge live">LIVE</span>';
   const period=w.period||'early';

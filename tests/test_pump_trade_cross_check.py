@@ -59,6 +59,21 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         self.assertEqual(check["detail"], "at first 2x rebound: 100.0000 >= 48.0000 threshold")
         self.assertEqual(check["rebound_2x_at"], "17:05:01")
 
+    def test_successful_unbought_pump_reports_golden_direction_block(self):
+        momentum_v3.record_oppo_trigger(
+            "btc_yes", "btc", "yes", 0.14, "GOLDEN-DIR-BLOCK",
+            "normal OPPO side YES blocked; Golden direction=NO",
+        )
+
+        momentum_v3._cross_check_successful_pump(
+            "btc_yes", {"window_start": 123, "asset": "btc", "side": "yes", "max_multiple": 5.7},
+        )
+
+        check = momentum_v3.pump_cross_checks[0]
+        self.assertEqual(check["reason"], "GOLDEN-DIR-BLOCK")
+        self.assertIn("Golden direction=NO", check["detail"])
+        self.assertEqual(check["blockers"][0]["status"], "GOLDEN-DIR-BLOCK")
+
     def test_first_2x_rebound_freezes_gate_snapshot_and_decisions(self):
         momentum_v3.trade_decision_audit[(123, "btc_no")] = {
             "events": [{"status": "CVD-BLOCK", "detail": "slope positive"}],
