@@ -156,6 +156,14 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         self.assertIn("const showGoldenAlign=(status==='SUCCESS'||status==='FAILED')", html)
         self.assertIn("`${goldenAlign} ${goldenDir}`", html)
 
+    def test_pump_tracker_displays_gap_ratio_not_raw_kraken_gap(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("p.kraken_gap_ratio", html)
+        self.assertIn("e.kraken_gap_ratio", html)
+        self.assertIn("<th>Gap Ratio</th><th>CVD Slope</th>", html)
+        self.assertNotIn("<th>Kraken Gap</th><th>CVD Slope</th>", html)
+
     def test_dashboard_contains_cross_check_card(self):
         self.assertIn("Pump / Trade Cross-Check", momentum_v3._DASHBOARD_HTML)
         self.assertIn("Why No Buy?", momentum_v3._DASHBOARD_HTML)

@@ -3946,7 +3946,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const activeRows=active.map((p,i)=>{
     const mult=Number(p.multiple||0), maxMult=Number(p.max_multiple||0);
     const cls=maxMult>=5?'red':maxMult>=4?'amber':maxMult>=3?'blue':'dim';
-    const gap=p.kraken_gap!=null?Number(p.kraken_gap).toFixed(4):'—';
+    const gapRatio=p.kraken_gap_ratio!=null?Number(p.kraken_gap_ratio).toFixed(2)+'x':'—';
     const slope=p.cvd_slope!=null?Number(p.cvd_slope).toFixed(4):'—';
     const slopeCls=p.cvd_slope>0?'green':p.cvd_slope<0?'red':'dim';
     const rvol=p.rvol!=null?Number(p.rvol).toFixed(2)+'x':'—';
@@ -3961,7 +3961,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td>${fmtCents(p.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${mult.toFixed(2)}x</td>
       <td class="${cls}" style="font-weight:600">${maxMult.toFixed(2)}x</td>
-      <td style="font-family:monospace">${gap}</td>
+      <td style="font-family:monospace">${gapRatio}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td class="${statusCls}" style="font-weight:600">${status}</td>
@@ -3973,7 +3973,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   let nextWindowColor=0;
   const eventRows=(log||[]).map((e,i)=>{
     const m=Number(e.multiple||0),cls=m>=5?'red':m>=4?'amber':'blue';
-    const gap=e.kraken_gap!=null?Number(e.kraken_gap).toFixed(4):'—';
+    const gapRatio=e.kraken_gap_ratio!=null?Number(e.kraken_gap_ratio).toFixed(2)+'x':'—';
     const slope=e.cvd_slope!=null?Number(e.cvd_slope).toFixed(4):'—';
     const slopeCls=e.cvd_slope>0?'green':e.cvd_slope<0?'red':'dim';
     const rvol=e.rvol!=null?Number(e.rvol).toFixed(2)+'x':'—';
@@ -3995,7 +3995,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td>${fmtCents(e.base_price,1)}</td>
       <td>${fmtCents(e.current,1)}</td>
       <td class="${cls}" style="font-weight:600">${m.toFixed(2)}x</td>
-      <td style="font-family:monospace">${gap}</td>
+      <td style="font-family:monospace">${gapRatio}</td>
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td class="${statusCls}" style="font-weight:600">${status}</td>
@@ -4005,11 +4005,11 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
+    <thead><tr><th>Active</th><th>Started</th><th>Base</th><th>Trough</th><th>Current</th><th>Now</th><th>Max</th><th>Gap Ratio</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Hit</th></tr></thead>
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Golden Direction</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Gap Ratio</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Golden Direction</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
