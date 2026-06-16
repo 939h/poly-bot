@@ -1247,6 +1247,14 @@ def _cross_check_successful_pump(key, tracker):
 
 def _record_pump_event(key, tracker, milestone, status=None):
     _update_pump_kraken_snapshot(tracker)
+    event_status = status or tracker.get("status", "TRACKING")
+    golden_alignment = (
+        _pump_golden_direction_alignment(
+            tracker.get("asset", key.split("_")[0]),
+            tracker.get("side", key.split("_")[1] if "_" in key else ""),
+        )
+        if event_status in ("SUCCESS", "FAILED") else {}
+    )
     event = {
         "time": datetime.now().strftime("%H:%M"),
         "window_start": tracker.get("window_start"),
@@ -1269,7 +1277,9 @@ def _record_pump_event(key, tracker, milestone, status=None):
         "entry_kraken_gap_ratio": tracker.get("entry_kraken_gap_ratio", tracker.get("kraken_gap_ratio")),
         "entry_cvd_slope": tracker.get("entry_cvd_slope", tracker.get("cvd_slope")),
         "entry_rvol": tracker.get("entry_rvol", tracker.get("rvol")),
-        "status": status or tracker.get("status", "TRACKING"),
+        "status": event_status,
+        "golden_direction": golden_alignment.get("golden_direction"),
+        "golden_alignment": golden_alignment.get("golden_alignment"),
         "finish_reason": tracker.get("finish_reason"),
         "milestone": f"{milestone}x" if isinstance(milestone, int) else str(milestone),
     }
@@ -1524,6 +1534,20 @@ def _golden_direction_allows_normal_oppo(asset, side, golden_setup):
     """Normal OPPO may only enter when Golden's current direction matches the OPPO side."""
     golden_side = golden_setup.get("side")
     return bool(golden_side == side), golden_side
+
+
+def _pump_golden_direction_alignment(asset, side):
+    """Return Golden YES/NO direction alignment for a completed pump event."""
+    try:
+        setup = _oppo_golden_rvol_setup(str(asset).lower(), str(side).lower())
+        golden_side = setup.get("side") if setup.get("side") in ("yes", "no") else None
+    except Exception:
+        golden_side = None
+    aligned = bool(golden_side == str(side).lower())
+    return {
+        "golden_direction": golden_side.upper() if golden_side else "UNKNOWN",
+        "golden_alignment": "ALIGNED" if aligned else "NOT ALIGNED",
+    }
 
 
 def _oppo_gap_flexi_allowed(secs_into, gap_ratio):
@@ -3956,6 +3980,11 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     const rvolCls=e.rvol!=null?'blue':'dim';
     const status=e.status||'TRACKING';
     const statusCls=status==='SUCCESS'?'green':status==='FAILED'?'red':'dim';
+    const showGoldenAlign=(status==='SUCCESS'||status==='FAILED');
+    const goldenAlign=showGoldenAlign?(e.golden_alignment||'NOT ALIGNED'):'';
+    const goldenDir=showGoldenAlign?(e.golden_direction||'UNKNOWN'):'';
+    const goldenAlignTxt=showGoldenAlign?`${goldenAlign} ${goldenDir}`:'—';
+    const goldenAlignCls=goldenAlign==='ALIGNED'?'green':showGoldenAlign?'red':'dim';
     const windowKey=e.window_start!=null?String(e.window_start):`unknown-${e.time||i}`;
     if(!windowColorIndex.has(windowKey))windowColorIndex.set(windowKey,nextWindowColor++%windowTimeColors.length);
     const timeColor=windowTimeColors[windowColorIndex.get(windowKey)];
@@ -3970,8 +3999,9 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
       <td class="${slopeCls}" style="font-family:monospace">${slope}</td>
       <td class="${rvolCls}" style="font-family:monospace">${rvol}</td>
       <td class="${statusCls}" style="font-weight:600">${status}</td>
+      <td class="${goldenAlignCls}" style="font-weight:600">${goldenAlignTxt}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="10" class="dim">No 3x+ pump milestones yet</td></tr>';
+  }).join('') || '<tr><td colspan="11" class="dim">No 3x+ pump milestones yet</td></tr>';
   const activeBtn=showMoreButton('pumpActiveToggle',"pumpToggle('active')",active.length,PUMP_ACTIVE_COLLAPSE,_pumpActiveExpanded);
   const logBtn=showMoreButton('pumpLogToggle',"pumpToggle('log')",(log||[]).length,PUMP_LOG_COLLAPSE,_pumpLogExpanded);
   return `<div id="pumpActiveWrap" style="overflow-x:auto"><table class="pump-table">
@@ -3979,7 +4009,7 @@ function renderPumpTracker(trackers,log,startPrice,deadZonePrice){
     <tbody>${activeRows}</tbody></table></div>${activeBtn}
     <div style="height:10px"></div>
     <div id="pumpLogWrap" style="overflow-x:auto"><table class="pump-table">
-    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th></tr></thead>
+    <thead><tr><th>Time</th><th>Asset</th><th>Milestone</th><th>Base</th><th>Price</th><th>Multiple</th><th>Kraken Gap</th><th>CVD Slope</th><th>RVOL</th><th>Status</th><th>Golden Direction</th></tr></thead>
     <tbody>${eventRows}</tbody></table></div>${logBtn}`;
 }
 
@@ -4435,14 +4465,14 @@ def _pump_log_csv_bytes():
     import csv
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_ratio", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_kraken_gap_ratio", "entry_cvd_slope", "entry_rvol", "status", "finish_reason", "milestone"])
+    w.writerow(["time", "window_start", "asset", "side", "base_price", "trough", "current", "multiple", "max_price", "max_multiple", "kraken_gap", "kraken_gap_ratio", "cvd_slope", "rvol", "entry_at", "observation_secs", "price_updates", "entry_kraken_gap_ratio", "entry_cvd_slope", "entry_rvol", "status", "golden_direction", "golden_alignment", "finish_reason", "milestone"])
     for e in pump_log:
         w.writerow([
             e.get("time", ""), e.get("window_start", ""), e.get("asset", ""),
             e.get("side", ""), e.get("base_price", ""), e.get("trough", ""),
             e.get("current", ""), e.get("multiple", ""), e.get("max_price", ""),
             e.get("max_multiple", ""), e.get("kraken_gap", ""), e.get("kraken_gap_ratio", ""), e.get("cvd_slope", ""),
-            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_kraken_gap_ratio", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("finish_reason", ""), e.get("milestone", ""),
+            e.get("rvol", ""), e.get("entry_at", ""), e.get("observation_secs", ""), e.get("price_updates", ""), e.get("entry_kraken_gap_ratio", ""), e.get("entry_cvd_slope", ""), e.get("entry_rvol", ""), e.get("status", ""), e.get("golden_direction", ""), e.get("golden_alignment", ""), e.get("finish_reason", ""), e.get("milestone", ""),
         ])
     return buf.getvalue().encode("utf-8")
 

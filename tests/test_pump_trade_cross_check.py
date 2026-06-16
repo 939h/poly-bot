@@ -8,15 +8,18 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
         self.original_window = momentum_v3.active_window_start
         self.original_audit = momentum_v3.trade_decision_audit
         self.original_checks = momentum_v3.pump_cross_checks
+        self.original_pump_log = momentum_v3.pump_log
         self.original_cvd_enabled = momentum_v3.CVD_OPPO_ENABLED
         momentum_v3.active_window_start = 123
         momentum_v3.trade_decision_audit = {}
         momentum_v3.pump_cross_checks = []
+        momentum_v3.pump_log = []
 
     def tearDown(self):
         momentum_v3.active_window_start = self.original_window
         momentum_v3.trade_decision_audit = self.original_audit
         momentum_v3.pump_cross_checks = self.original_checks
+        momentum_v3.pump_log = self.original_pump_log
         momentum_v3.CVD_OPPO_ENABLED = self.original_cvd_enabled
 
     def test_successful_unbought_pump_reports_exact_gap_block(self):
@@ -122,6 +125,36 @@ class PumpTradeCrossCheckTests(unittest.TestCase):
 
         self.assertIn("rebound_2x_at,reason,detail,blocker_history", csv_text)
         self.assertIn("GAP-BLOCK,at pump tracking start: 100.0000 >= 80.0000 threshold", csv_text)
+
+    def test_finished_pump_log_records_golden_direction_alignment(self):
+        original_setup = momentum_v3._oppo_golden_rvol_setup
+        original_update = momentum_v3._update_pump_kraken_snapshot
+        momentum_v3._oppo_golden_rvol_setup = lambda asset, side: {
+            "side": "yes", "armed": True, "qualified": False,
+        }
+        momentum_v3._update_pump_kraken_snapshot = lambda tracker: None
+        try:
+            momentum_v3._record_pump_event(
+                "btc_yes",
+                {"window_start": 123, "asset": "btc", "side": "yes", "base_price": 0.05,
+                 "trough": 0.05, "current": 0.2, "multiple": 4.0, "max_price": 0.2,
+                 "max_multiple": 4.0, "status": "SUCCESS"},
+                "END",
+                "SUCCESS",
+            )
+        finally:
+            momentum_v3._oppo_golden_rvol_setup = original_setup
+            momentum_v3._update_pump_kraken_snapshot = original_update
+
+        self.assertEqual(momentum_v3.pump_log[0]["golden_direction"], "YES")
+        self.assertEqual(momentum_v3.pump_log[0]["golden_alignment"], "ALIGNED")
+
+    def test_dashboard_shows_finished_pump_golden_direction_not_tracking(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("<th>Status</th><th>Golden Direction</th>", html)
+        self.assertIn("const showGoldenAlign=(status==='SUCCESS'||status==='FAILED')", html)
+        self.assertIn("`${goldenAlign} ${goldenDir}`", html)
 
     def test_dashboard_contains_cross_check_card(self):
         self.assertIn("Pump / Trade Cross-Check", momentum_v3._DASHBOARD_HTML)
