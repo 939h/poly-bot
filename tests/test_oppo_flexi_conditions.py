@@ -43,7 +43,7 @@ class OppoFlexiConditionTests(unittest.TestCase):
     def test_golden_entries_also_run_cvd_guard(self):
         source = inspect.getsource(momentum_v3.scan_markets)
         cvd_guard_index = source.index("if CVD_OPPO_ENABLED:")
-        golden_branch_index = source.index("if golden_opportunity:", cvd_guard_index)
+        golden_branch_index = source.index("if golden_order_allowed:", cvd_guard_index)
 
         self.assertLess(cvd_guard_index, golden_branch_index)
         self.assertNotIn("and not golden_opportunity", source[cvd_guard_index:golden_branch_index])

@@ -30,6 +30,7 @@ Requirements:
     OPPO_GOLDEN_BUY_AMOUNT=3
     OPPO_MODE_ENABLED=true
     OPPO_NORMAL_ENABLED=true
+    OPPO_GOLDEN_ORDER_ENABLED=true
     OPPO_GOLDEN_RVOL_ENABLED=true
     OPPO_COUNTER_ENABLED=false
     OPPO_COUNTER_MIN_PRICE=0.05
@@ -274,6 +275,7 @@ RVOL_MIN_PER_MIN = float(os.getenv("RVOL_MIN_PER_MIN", str(1 / 15)))
 RVOL_MIN = RVOL_MIN_PER_MIN * 15
 OPPO_RVOL_GUARD_ENABLED = os.getenv("OPPO_RVOL_GUARD_ENABLED", "false").lower() == "true"
 OPPO_GOLDEN_RVOL_ENABLED = os.getenv("OPPO_GOLDEN_RVOL_ENABLED", "true").lower() == "true"
+OPPO_GOLDEN_ORDER_ENABLED = os.getenv("OPPO_GOLDEN_ORDER_ENABLED", "false").lower() == "true"
 OPPO_GOLDEN_RVOL_LOOKBACK = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_LOOKBACK", "4")))
 OPPO_GOLDEN_RVOL_MIN_HIGH = max(1, int(os.getenv("OPPO_GOLDEN_RVOL_MIN_HIGH", "2")))
 OPPO_GOLDEN_RVOL_THRESHOLD = float(os.getenv("OPPO_GOLDEN_RVOL_THRESHOLD", "1.0"))
@@ -787,6 +789,7 @@ def save_state():
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
             "oppo_golden_buy_amount": OPPO_GOLDEN_BUY_AMOUNT,
+            "oppo_golden_order_enabled": OPPO_GOLDEN_ORDER_ENABLED,
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
@@ -1560,9 +1563,9 @@ def _oppo_gap_flexi_allowed(secs_into, gap_ratio):
     )
 
 
-def _oppo_entry_mode_allowed(golden_opportunity):
-    """Allow Golden independently while the OPPO master scanner remains enabled."""
-    return bool(golden_opportunity or OPPO_NORMAL_ENABLED)
+def _oppo_entry_mode_allowed(golden_order_allowed):
+    """Allow Golden orders independently while the OPPO master scanner remains enabled."""
+    return bool(golden_order_allowed or OPPO_NORMAL_ENABLED)
 
 
 def _oppo_cvd_slope_confirms(side, slope):
@@ -3057,8 +3060,10 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 opp_key = f"{opp_asset}_{side}"
                 golden_setup = _oppo_golden_rvol_setup(opp_asset, side)
                 golden_opportunity = golden_setup.get("qualified", False)
-                if not _oppo_entry_mode_allowed(golden_opportunity):
-                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", "normal OPPO disabled; waiting for Golden")
+                golden_order_allowed = bool(golden_opportunity and OPPO_GOLDEN_ORDER_ENABLED)
+                if not _oppo_entry_mode_allowed(golden_order_allowed):
+                    detail = "normal OPPO disabled; Golden orders disabled" if golden_opportunity else "normal OPPO disabled; waiting for Golden"
+                    record_oppo_trigger(opp_key, opp_asset, side, opp_price, "SKIP", detail)
                     continue
 
                 if opp_asset in traded_this_window:
@@ -3067,8 +3072,8 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
 
                 if (
                     opp_asset in oppo_dead_zone_blacklisted_assets
-                    or (not golden_opportunity and opp_asset in oppo_rvol_blacklisted_assets)
-                    or (not golden_opportunity and opp_asset in oppo_knife_blacklisted_assets)
+                    or (not golden_order_allowed and opp_asset in oppo_rvol_blacklisted_assets)
+                    or (not golden_order_allowed and opp_asset in oppo_knife_blacklisted_assets)
                 ):
                     _clear_oppo_tracking_for_asset(opp_asset)
                     continue
@@ -3110,7 +3115,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     _record_oppo_trigger(opp_asset, side, opp_price, "TRACKING", detail)
                     continue
 
-                if not golden_opportunity:
+                if not golden_order_allowed:
                     golden_direction_ok, golden_side = _golden_direction_allows_normal_oppo(opp_asset, side, golden_setup)
                     if not golden_direction_ok:
                         golden_side_txt = (golden_side or "unknown").upper()
@@ -3123,7 +3128,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                         continue
 
                 falling_knife, pump_trough, pump_peak, drop, min_ok_price = _oppo_falling_knife_blocked(opp_key, window_start, opp_price)
-                if falling_knife and not golden_opportunity:
+                if falling_knife and not golden_order_allowed:
                     pump_move = pump_peak - pump_trough
                     detail = (
                         f"pump +{pump_move:.4f} then drop -{drop:.4f} from peak {pump_peak:.4f}; "
@@ -3162,16 +3167,16 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 c_live = live_close.get(opp_asset)
                 actual_gap = abs(c_live - c_open) if c_open > 0 and c_live is not None else None
                 if actual_gap is not None:
-                    gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_opportunity else OPPO_GAP_MAG
+                    gap_magnitude = OPPO_GOLDEN_GAP_MAG if golden_order_allowed else OPPO_GAP_MAG
                     gap_unit = c_open * GAP_SWING.get(opp_asset, 0.001)
                     gap_ratio = actual_gap / gap_unit if gap_unit > 0 else None
                     oppo_gap_threshold = gap_unit * gap_magnitude
                     if actual_gap >= oppo_gap_threshold:
-                        status = "GOLDEN-GAP-FLEXI" if golden_opportunity else "GAP-FLEXI"
+                        status = "GOLDEN-GAP-FLEXI" if golden_order_allowed else "GAP-FLEXI"
                         ratio_detail = f" ratio={gap_ratio:.2f}x" if gap_ratio is not None else ""
                         detail = f"{actual_gap:.4f}>={oppo_gap_threshold:.4f} mag={gap_magnitude:.2f}x{ratio_detail}"
                         if not _oppo_gap_flexi_allowed(secs_into, gap_ratio):
-                            blocked_status = "GOLDEN-GAP-BLOCK" if golden_opportunity else "GAP-BLOCK"
+                            blocked_status = "GOLDEN-GAP-BLOCK" if golden_order_allowed else "GAP-BLOCK"
                             record_oppo_trigger(opp_key, opp_asset, side, opp_price, blocked_status, detail)
                             _record_oppo_trigger(opp_asset, side, opp_price, blocked_status, detail)
                             continue
@@ -3192,7 +3197,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                     else:
                         log.info("[OPPO-CVD-PASS] %s_%s slope=%.6f win=%.2f", opp_asset.upper(), side.upper(), cvd_slope, cvd_window)
 
-                if golden_opportunity:
+                if golden_order_allowed:
                     rvol_snapshot = get_volume_snapshot(opp_asset, VOLUME_AVG_PERIOD, get_rvol_min(secs_into))
                     oppo_buy_amount = OPPO_GOLDEN_BUY_AMOUNT
                     probability = golden_setup.get("probability")
@@ -3224,7 +3229,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                 base_gap = c_open * GAP_SWING.get(opp_asset, 0.001) if c_open > 0 else None
                 entry_kraken_gap_ratio = actual_gap / base_gap if base_gap and base_gap > 0 else None
                 _, _, entry_cvd_slope = get_cvd_snapshot(opp_asset)
-                entry_golden_status = _golden_status_at_buy(opp_asset, side, golden_opportunity)
+                entry_golden_status = _golden_status_at_buy(opp_asset, side, golden_order_allowed)
                 label = f"{opp_asset.upper()}-{side.upper()}-OPPO"
                 buy = market_buy(client, opp_token, label, price_hint=opp_price, amount=oppo_buy_amount)
                 if buy["ok"]:
@@ -3239,7 +3244,7 @@ def scan_markets(client, window_start, secs_into, server_ts, executor):
                                   entry_kraken_gap_ratio=entry_kraken_gap_ratio,
                                   entry_rebound_ratio=rebound_ratio,
                                   entry_cvd_slope=entry_cvd_slope,
-                                  is_golden_oppo=golden_opportunity,
+                                  is_golden_oppo=golden_order_allowed,
                                   entry_out_conditions=entry_out_conditions,
                                   entry_golden_status=entry_golden_status)
                     traded_this_window.add(opp_asset)
@@ -3604,6 +3609,7 @@ def _build_state_snapshot():
             "oppo_counter_max_price": OPPO_COUNTER_MAX_PRICE,
             "oppo_counter_buy_amount": OPPO_COUNTER_BUY_AMOUNT,
             "oppo_golden_buy_amount": OPPO_GOLDEN_BUY_AMOUNT,
+            "oppo_golden_order_enabled": OPPO_GOLDEN_ORDER_ENABLED,
             "oppo_counter_sell_multiplier": OPPO_COUNTER_SELL_MULTIPLIER,
             "oppo_counter_sell_cap": OPPO_COUNTER_SELL_CAP,
             "oppo_counter_cut_loss_pct": OPPO_COUNTER_CUT_LOSS_PCT,
@@ -4297,7 +4303,7 @@ function render(s){
         <tr><td>Cut loss</td><td>Normal ${((cfg.cut_loss||0.6)*100).toFixed(0)}% / OPPO ${((cfg.oppo_cut_loss||0.7)*100).toFixed(0)}% of entry; OPPO ${cfg.oppo_stop_loss_countdown_secs||15}s countdown snapshots CVD at stop start and restarts whenever CVD improves from the latest baseline; if price recovers to entry after a restart, sell all remaining shares at breakeven</td><td>Order size</td><td>$${cfg.order||2}</td></tr>
         <tr><td>Flip range</td><td>${(cfg.flip_min||0.5)*100|0}–${(cfg.flip_max||0.75)*100|0}¢</td><td>Poll</td><td>${cfg.poll||2}s</td></tr>
         <tr><td>Entry window</td><td>${(cfg.entry_after||600)/60|0}–${(cfg.stop_buy||780)/60|0} min</td><td></td><td></td></tr>
-        <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'}; Golden-only: Master ON, Normal OFF, Golden ON</td><td>Golden order</td><td>$${Number(cfg.oppo_golden_buy_amount||cfg.order||3).toFixed(2)}</td></tr>
+        <tr><td>OPPO modes</td><td>Master ${cfg.oppo_mode_enabled?'ON':'OFF'} / Normal ${cfg.oppo_normal_enabled?'ON':'OFF'} / Golden signal ${cfg.oppo_golden_rvol_enabled?'ON':'OFF'} / Golden orders ${cfg.oppo_golden_order_enabled?'ON':'OFF'}; signal stays active when orders are OFF</td><td>Golden order</td><td>$${Number(cfg.oppo_golden_buy_amount||cfg.order||3).toFixed(2)}</td></tr>
         <tr><td>OPPO counter</td><td>${cfg.oppo_counter_enabled?'ON':'OFF'} buy ${(cfg.oppo_counter_min_price||0.05)*100|0}–${(cfg.oppo_counter_max_price||0.08)*100|0}¢ / sell x${Number(cfg.oppo_counter_sell_multiplier||1.4).toFixed(2)} cap ${((cfg.oppo_counter_sell_cap||0.94)*100|0)}¢ / cut ${((cfg.oppo_counter_cut_loss_pct||0.6)*100).toFixed(0)}%</td><td>Counter order</td><td>$${cfg.oppo_counter_buy_amount||cfg.order||2}</td></tr>
         <tr><td>Buy zone</td><td>${(cfg.buy_min||0)*100|0}–${(cfg.buy_max||0)*100|0}¢</td><td>Sell target</td><td>${cfg.sell_multiplier ? ('x'+Number(cfg.sell_multiplier).toFixed(2)+' (cap '+((cfg.sell_cap||0.99)*100|0)+'¢)') : (((cfg.sell||0.99)*100|0)+'¢')}</td></tr>
         <tr><td>OPPO rebound cap</td><td>Initial OPPO zone ${((cfg.oppo_min_price||0.07)*100).toFixed(0)}–${((cfg.oppo_max_price||0.15)*100).toFixed(0)}¢; tracked rebound can buy up to ${((cfg.oppo_rebound_max_price||0.25)*100).toFixed(0)}¢</td><td>Rebound</td><td>Requires x${Number(cfg.oppo_rebound_mult||2).toFixed(2)} from effective base; base never below ${((cfg.oppo_min_effective_base||0.07)*100).toFixed(0)}¢</td></tr>
@@ -4626,7 +4632,10 @@ def main():
         FLEXI_RVOL_ENABLED, FLEXI_RVOL_BUY_AMOUNT, VOLUME_AVG_PERIOD, RVOL_MIN_PER_MIN,
     )
     log.info("  Normal OPPO RVOL range: 0.150x–%.3fx inclusive", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
-    log.info("  OPPO modes: master=%s normal=%s golden=%s", OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED)
+    log.info(
+        "  OPPO modes: master=%s normal=%s golden_signal=%s golden_orders=%s",
+        OPPO_MODE_ENABLED, OPPO_NORMAL_ENABLED, OPPO_GOLDEN_RVOL_ENABLED, OPPO_GOLDEN_ORDER_ENABLED,
+    )
     log.info("  Golden OPPO order: $%.2f", OPPO_GOLDEN_BUY_AMOUNT)
     log.info("  OPPO normal RVOL blacklist: rvol > %.2fx blacklists asset for current window; Golden bypasses", OPPO_NORMAL_RVOL_BLACKLIST_MAX)
     log.info(
