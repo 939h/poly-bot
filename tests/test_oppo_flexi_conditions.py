@@ -43,7 +43,7 @@ class OppoFlexiConditionTests(unittest.TestCase):
     def test_golden_entries_also_run_cvd_guard(self):
         source = inspect.getsource(momentum_v3.scan_markets)
         cvd_guard_index = source.index("if CVD_OPPO_ENABLED:")
-        golden_branch_index = source.index("if golden_opportunity:", cvd_guard_index)
+        golden_branch_index = source.index("if golden_order_allowed:", cvd_guard_index)
 
         self.assertLess(cvd_guard_index, golden_branch_index)
         self.assertNotIn("and not golden_opportunity", source[cvd_guard_index:golden_branch_index])
@@ -60,6 +60,68 @@ class OppoFlexiConditionTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(is_out)
         self.assertEqual(amount, momentum_v3.FLEXI_RVOL_BUY_AMOUNT)
+
+    def test_oppo_rvol_guard_never_uses_threshold_below_point_fifteen(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
+        momentum_v3.FLEXI_RVOL_ENABLED = False
+        observed_thresholds = []
+
+        def snapshot(asset, period, threshold):
+            observed_thresholds.append(threshold)
+            return {"rvol": 0.14, "average": 100.0, "current": 14.0}
+
+        momentum_v3.get_volume_snapshot = snapshot
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 0)
+
+        self.assertFalse(ok)
+        self.assertIsNone(amount)
+        self.assertFalse(is_out)
+        self.assertEqual(observed_thresholds, [0.15])
+
+    def test_fixed_normal_oppo_minimum_has_no_environment_setting(self):
+        source = inspect.getsource(momentum_v3)
+
+        self.assertNotIn("OPPO_RVOL_MIN", source)
+        self.assertNotIn("oppo_rvol_min", momentum_v3._DASHBOARD_HTML)
+
+    def test_point_fifteen_rvol_is_allowed_as_normal_oppo(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = False
+        momentum_v3.FLEXI_RVOL_ENABLED = False
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 0.15, "average": 100.0, "current": 15.0,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 0)
+
+        self.assertTrue(ok)
+        self.assertEqual(amount, momentum_v3.BUY_AMOUNT)
+        self.assertFalse(is_out)
+
+    def test_normal_oppo_uses_fixed_minimum_even_late_in_window(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = True
+        momentum_v3.FLEXI_RVOL_ENABLED = False
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 0.20, "average": 100.0, "current": 20.0,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 840)
+
+        self.assertTrue(ok)
+        self.assertEqual(amount, momentum_v3.BUY_AMOUNT)
+        self.assertFalse(is_out)
+
+    def test_below_point_fifteen_blocks_even_when_legacy_guard_flag_is_disabled(self):
+        momentum_v3.OPPO_RVOL_GUARD_ENABLED = False
+        momentum_v3.FLEXI_RVOL_ENABLED = False
+        momentum_v3.get_volume_snapshot = lambda *args: {
+            "rvol": 0.149, "average": 100.0, "current": 14.9,
+        }
+
+        ok, _, amount, is_out = momentum_v3._oppo_rvol_guard_ok("btc", "yes", 0.1, 0)
+
+        self.assertFalse(ok)
+        self.assertIsNone(amount)
+        self.assertFalse(is_out)
 
     def test_confirmed_rvol_at_or_below_one_returns_normal_amount_without_out_flag(self):
         momentum_v3.OPPO_RVOL_GUARD_ENABLED = True

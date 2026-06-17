@@ -69,6 +69,24 @@ class TradeLogEntryGapTests(unittest.TestCase):
 
         self.assertTrue(momentum_v3.trade_log[0]["is_golden_oppo"])
 
+    def test_normal_oppo_snapshots_actual_golden_status_and_side(self):
+        original_setup = momentum_v3._oppo_golden_rvol_setup
+        momentum_v3._oppo_golden_rvol_setup = lambda asset, side: {
+            "armed": True, "qualified": False, "side": "yes",
+        }
+        try:
+            status = momentum_v3._golden_status_at_buy("btc", "no", False)
+        finally:
+            momentum_v3._oppo_golden_rvol_setup = original_setup
+
+        self.assertEqual(status, "ARMED YES")
+
+    def test_trade_log_shows_recorded_buy_time_golden_status_after_gap_ratio(self):
+        html = momentum_v3._DASHBOARD_HTML
+
+        self.assertIn("<th>Buy Kraken Gap Ratio</th><th>Golden Status</th>", html)
+        self.assertIn("t.entry_golden_status", html)
+
     def test_trade_log_csv_exports_buy_time_kraken_gap(self):
         momentum_v3.trade_log = [{"entry_kraken_gap": 125.25, "entry_kraken_gap_ratio": 1.2525}]
 
