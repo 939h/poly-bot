@@ -1,20 +1,5 @@
 """
 Polymarket World Cup Exact Score Spread Bot
-===========================================
-
-Focus: current-day World Cup exact-score markets only.
-
-Strategy:
-  1. Find active exact-score World Cup markets for matches ending today (UTC by default).
-  2. For each configured exact-score outcome (or every exact-score outcome if none are
-     configured), read the CLOB order book.
-  3. Place a BUY limit order only when best_ask / best_bid > SPREAD_RATIO_MIN.
-  4. Place that BUY at the current best-bid price.
-  5. While the BUY is open, cancel it if best_ask / best_bid drops below SPREAD_RATIO_MIN.
-  6. Once shares are bought, immediately place a GTC SELL limit order at 2x entry price.
-
-.env keys:
-    DRY_RUN=true
     POLY_PRIVATE_KEY=0x...
     POLY_API_KEY=...
     POLY_API_SECRET=...
