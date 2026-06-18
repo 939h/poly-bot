@@ -18,6 +18,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_MAX_MARKETS=5
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_MIN_SCORE_OUTCOMES=3             # exact-score markets have outcomes like 0-0, 0-1, 1-0, 3-3
+    WORLD_CUP_SCORE_SEARCH_TERMS=0-0,1-1,2-2,3-3  # extra score-line searches if exact score is split into binary markets
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
 """
@@ -50,7 +51,7 @@ EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split("
 SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup exact score").strip()
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
-SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.3"))
+SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.8"))
 TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
 UPCOMING_MATCHES = int(os.getenv("WORLD_CUP_UPCOMING_MATCHES", "3"))
 MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", str(UPCOMING_MATCHES)))
@@ -60,6 +61,12 @@ DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 MIN_SCORE_OUTCOMES = int(os.getenv("WORLD_CUP_MIN_SCORE_OUTCOMES", "3"))
+DEFAULT_SCORE_SEARCH_TERMS = "0-0,1-1,2-2,3-3"
+SCORE_SEARCH_TERMS = [
+    term.strip()
+    for term in os.getenv("WORLD_CUP_SCORE_SEARCH_TERMS", DEFAULT_SCORE_SEARCH_TERMS).split(",")
+    if term.strip()
+]
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 SCORE_OUTCOME_RE = re.compile(r"\b\d+\s*[-–]\s*\d+\b")
 
@@ -328,13 +335,61 @@ def related_exact_score_market_slugs(event_slug: str) -> list[str]:
     return candidates
 
 
+def add_related_market(markets: list[dict[str, Any]], market: dict[str, Any] | None, event_slug: str) -> None:
+    if not market:
+        return
+    market_with_event = {**market, "_event_slug": event_slug}
+    if is_exact_score_world_cup_market(market_with_event):
+        markets.append(market_with_event)
+
+
+def direct_scoreline_market_slugs(event_slug: str, score: str) -> list[str]:
+    normalized = slug_from_value(event_slug)
+    normalized_score = score.replace("–", "-").replace(" ", "")
+    return [
+        f"{normalized}-{normalized_score}",
+        f"{normalized}-exact-score-{normalized_score}",
+        f"{normalized}-correct-score-{normalized_score}",
+    ]
+
+
+def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    normalized = slug_from_value(event_slug)
+    for score in SCORE_SEARCH_TERMS:
+        for direct_slug in direct_scoreline_market_slugs(normalized, score):
+            add_related_market(markets, fetch_market_by_slug(direct_slug), normalized)
+
+        payload = gamma_get(
+            "/markets",
+            search=f"{normalized} {score}",
+            active="true",
+            closed="false",
+            limit=20,
+        )
+        for market in as_list_payload(payload, "markets"):
+            add_related_market(markets, market, normalized)
+    return markets
+
+
+def dedupe_markets(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for market in markets:
+        key = str(market.get("conditionId") or market.get("condition_id") or market.get("slug") or id(market))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(market)
+    return deduped
+
+
 def fetch_related_exact_score_markets(event_slug: str) -> list[dict[str, Any]]:
     markets: list[dict[str, Any]] = []
     for market_slug in related_exact_score_market_slugs(event_slug):
-        market = fetch_market_by_slug(market_slug)
-        if market and is_exact_score_world_cup_market({**market, "_event_slug": event_slug}):
-            market["_event_slug"] = event_slug
-            markets.append(market)
+        add_related_market(markets, fetch_market_by_slug(market_slug), event_slug)
+    markets.extend(search_scoreline_markets(event_slug))
+    markets = dedupe_markets(markets)
     if markets:
         log.info("Fetched %s related exact-score market(s) for event slug: %s", len(markets), event_slug)
     return markets
