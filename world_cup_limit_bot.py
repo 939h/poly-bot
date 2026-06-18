@@ -178,8 +178,51 @@ def is_world_cup_market(market: dict[str, Any]) -> bool:
     return event_slug.startswith("fifwc-") or "world cup" in text or "fifa world cup" in text
 
 
-def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
+
+def token_ids_from_market(market: dict[str, Any]) -> list[str]:
+    token_ids = parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
+    if token_ids:
+        return token_ids
+    tokens = market.get("tokens") or market.get("clobTokens") or []
+    if isinstance(tokens, str):
+        try:
+            tokens = json.loads(tokens)
+        except json.JSONDecodeError:
+            tokens = []
+    if isinstance(tokens, list):
+        ids: list[str] = []
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            token_id = token.get("token_id") or token.get("tokenId") or token.get("asset_id") or token.get("assetId") or token.get("id")
+            if token_id:
+                ids.append(str(token_id).strip())
+        return ids
+    return []
+
+
+def outcomes_from_market(market: dict[str, Any]) -> list[str]:
     outcomes = parse_json_list(market.get("outcomes"))
+    if outcomes:
+        return outcomes
+    tokens = market.get("tokens") or market.get("clobTokens") or []
+    if isinstance(tokens, str):
+        try:
+            tokens = json.loads(tokens)
+        except json.JSONDecodeError:
+            tokens = []
+    if isinstance(tokens, list):
+        parsed: list[str] = []
+        for token in tokens:
+            if isinstance(token, dict):
+                outcome = token.get("outcome") or token.get("name")
+                if outcome:
+                    parsed.append(str(outcome).strip())
+        return parsed
+    return []
+
+def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
+    outcomes = outcomes_from_market(market)
     if any(outcome.lower() == "any other score" for outcome in outcomes):
         return True
     score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.search(outcome))
@@ -189,7 +232,8 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
     text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
     text_match = any(marker in text for marker in ("exact score", "correct score", "any other score", "actual score is not"))
-    return is_world_cup_market(market) and (text_match or has_exact_score_outcomes(market))
+    score_in_market_text = SCORE_OUTCOME_RE.search(text) is not None
+    return is_world_cup_market(market) and (text_match or score_in_market_text or has_exact_score_outcomes(market))
 
 
 def as_list_payload(data: Any, key: str) -> list[dict[str, Any]]:
@@ -234,9 +278,8 @@ def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
 
 def looks_like_market(data: dict[str, Any]) -> bool:
     return bool(
-        data.get("clobTokenIds")
-        or data.get("clob_token_ids")
-        or (data.get("outcomes") and (data.get("conditionId") or data.get("condition_id") or data.get("slug")))
+        token_ids_from_market(data)
+        or (outcomes_from_market(data) and (data.get("conditionId") or data.get("condition_id") or data.get("slug")))
     )
 
 
@@ -358,13 +401,13 @@ def collect_markets() -> list[dict[str, Any]]:
         if not key or key in seen:
             continue
         if not is_exact_score_world_cup_market(market):
-            log.info("Skipping non-exact-score/non-World-Cup market: %s", market.get("slug"))
+            log.info("Skipping non-exact-score/non-World-Cup market: %s | question=%s | outcomes=%s", market.get("slug"), market.get("question"), market.get("outcomes"))
             continue
         if not is_upcoming_market(market):
             log.info("Skipping past/non-upcoming market: %s", market.get("slug"))
             continue
-        if not market.get("clobTokenIds") and not market.get("clob_token_ids"):
-            log.info("Skipping market without CLOB tokens: %s", market.get("slug"))
+        if not token_ids_from_market(market):
+            log.info("Skipping market without CLOB tokens: %s | token_fields=%s", market.get("slug"), list(market.keys()))
             continue
         markets.append(market)
         seen.add(key)
@@ -392,14 +435,18 @@ def parse_json_list(raw: Any) -> list[str]:
 
 
 def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
-    outcomes = parse_json_list(market.get("outcomes"))
-    token_ids = parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
+    outcomes = outcomes_from_market(market)
+    token_ids = token_ids_from_market(market)
     if len(outcomes) != len(token_ids) or not token_ids:
         raise ValueError(f"Cannot match outcomes to token IDs for {market.get('slug')}")
 
     pairs = [(outcome, token_id) for outcome, token_id in zip(outcomes, token_ids, strict=True)]
     if OUTCOME_FILTERS:
         pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() in OUTCOME_FILTERS]
+    elif {outcome.lower() for outcome in outcomes} >= {"yes", "no"}:
+        # Sports exact-score tabs commonly expose each score as a binary market.
+        # In that shape, the exact-score bet is the YES token for that score.
+        pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes"]
     return pairs[:MAX_OUTCOMES_PER_MARKET]
 
 
