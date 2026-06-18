@@ -56,6 +56,7 @@ DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
+SCORE_OUTCOME_RE = re.compile(r"^\s*\d+\s*[-–]\s*\d+\s*$")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,19 +147,43 @@ def is_world_cup_market(market: dict[str, Any]) -> bool:
     return event_slug.startswith("fifwc-") or "world cup" in text or "fifa world cup" in text
 
 
+def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
+    outcomes = parse_json_list(market.get("outcomes"))
+    if any(outcome.lower() == "any other score" for outcome in outcomes):
+        return True
+    score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.match(outcome))
+    return score_like >= 6
+
+
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
     text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
-    return is_world_cup_market(market) and ("exact score" in text or "correct score" in text or "any other score" in text)
+    text_match = any(marker in text for marker in ("exact score", "correct score", "any other score", "actual score is not"))
+    return is_world_cup_market(market) and (text_match or has_exact_score_outcomes(market))
+
+
+def as_list_payload(data: Any, key: str) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        nested = data.get(key)
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        if key == "events" and data.get("slug"):
+            return [data]
+        if key == "markets" and (data.get("conditionId") or data.get("condition_id") or data.get("slug")):
+            return [data]
+    return []
 
 
 def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
     data = gamma_get("/markets", slug=slug)
-    markets = data if isinstance(data, list) else data.get("markets", [])
+    markets = as_list_payload(data, "markets")
     if markets:
         return markets[0]
     events = gamma_get("/events", slug=slug)
-    if isinstance(events, list) and events:
-        nested = events[0].get("markets") or []
+    event_list = as_list_payload(events, "events")
+    if event_list:
+        nested = event_list[0].get("markets") or []
         return nested[0] if nested else None
     return None
 
@@ -166,20 +191,24 @@ def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
     event_slug = slug_from_value(slug)
     events = gamma_get("/events", slug=event_slug)
-    if not isinstance(events, list):
+    event_list = as_list_payload(events, "events")
+    if not event_list:
+        log.warning("No event payload found for match/event slug: %s", event_slug)
         return []
     markets: list[dict[str, Any]] = []
-    for event in events:
+    for event in event_list:
         parent_slug = event.get("slug") or event_slug
         for market in event.get("markets") or []:
             market["_event_slug"] = parent_slug
             markets.append(market)
+    if not markets:
+        log.warning("No nested markets found for match/event slug: %s", event_slug)
     return markets
 
 
 def search_match_events() -> list[dict[str, Any]]:
     data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-    events = data if isinstance(data, list) else data.get("events", [])
+    events = as_list_payload(data, "events")
     today_events: list[dict[str, Any]] = []
     for event in events:
         slug = str(event.get("slug") or "")
@@ -206,7 +235,7 @@ def search_exact_score_markets() -> list[dict[str, Any]]:
         return markets
 
     data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-    found = data if isinstance(data, list) else data.get("markets", [])
+    found = as_list_payload(data, "markets")
     return [m for m in found if is_exact_score_world_cup_market(m) and is_today_market(m)]
 
 
@@ -228,6 +257,9 @@ def collect_markets() -> list[dict[str, Any]]:
     if not candidates:
         candidates.extend(search_exact_score_markets())
 
+    if candidates:
+        log.info("Scanning %s candidate market(s) from configured/discovered World Cup match sources", len(candidates))
+
     for market in candidates:
         key = market.get("conditionId") or market.get("condition_id") or market.get("slug") or ""
         if not key or key in seen:
@@ -246,6 +278,10 @@ def collect_markets() -> list[dict[str, Any]]:
         if len(markets) >= MAX_MARKETS:
             break
 
+    if not markets:
+        log.warning("No current-day World Cup exact-score CLOB markets found after filtering")
+    else:
+        log.info("Found %s current-day World Cup exact-score market(s)", len(markets))
     return markets
 
 
