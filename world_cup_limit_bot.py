@@ -7,7 +7,7 @@ Polymarket World Cup Exact Score Spread Bot
     POLY_FUNDER_ADDRESS=0x...
 
     WORLD_CUP_MARKET_SLUGS=slug1,slug2        # optional; must be exact-score markets
-    WORLD_CUP_MATCH_SLUGS=fifwc-cze-rsa-2026-06-18  # optional Polymarket match/event slugs or URLs
+    WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # Gamma /sports slug, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     WORLD_CUP_SEARCH_QUERY=world cup exact score
     WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
@@ -29,6 +29,7 @@ import sys
 import re
 import time
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 from typing import Any
 
 import requests
@@ -102,10 +103,28 @@ def gamma_get(path: str, **params: Any) -> Any:
         return []
 
 
+def sports_slug_from_value(value: str) -> str:
+    """Return the Gamma sports slug, e.g. world-cup/fifwc-cze-rsa-2026-06-18."""
+    cleaned = value.strip().strip("/")
+    parsed = urlparse(cleaned)
+    path = parsed.path.strip("/") if parsed.scheme or parsed.netloc else cleaned.split("?", 1)[0].strip("/")
+    if path.startswith("sports/"):
+        path = path[len("sports/"):]
+    return path
+
+
 def slug_from_value(value: str) -> str:
-    """Accept either a bare slug or a Polymarket URL and return the final path segment."""
+    """Accept a bare slug, sports path, or Polymarket URL and return the final event slug.
+
+    Examples accepted:
+      - fifwc-cze-rsa-2026-06-18
+      - world-cup/fifwc-cze-rsa-2026-06-18
+      - https://polymarket.com/sports/world-cup/fifwc-cze-rsa-2026-06-18
+    """
     cleaned = value.strip().rstrip("/")
-    return cleaned.split("/")[-1]
+    parsed = urlparse(cleaned)
+    path = parsed.path if parsed.scheme or parsed.netloc else cleaned.split("?", 1)[0]
+    return path.rstrip("/").split("/")[-1]
 
 
 def event_date_from_slug(slug: str) -> datetime | None:
@@ -190,7 +209,48 @@ def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
     return None
 
 
+def looks_like_market(data: dict[str, Any]) -> bool:
+    return bool(
+        data.get("clobTokenIds")
+        or data.get("clob_token_ids")
+        or (data.get("outcomes") and (data.get("conditionId") or data.get("condition_id") or data.get("slug")))
+    )
+
+
+def extract_nested_markets(data: Any) -> list[dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        for item in data:
+            markets.extend(extract_nested_markets(item))
+    elif isinstance(data, dict):
+        if looks_like_market(data):
+            markets.append(data)
+        for key in ("markets", "children", "items", "events"):
+            nested = data.get(key)
+            if nested is not None:
+                markets.extend(extract_nested_markets(nested))
+    return markets
+
+
+def fetch_sports_markets(slug: str) -> list[dict[str, Any]]:
+    sports_slug = sports_slug_from_value(slug)
+    event_slug = slug_from_value(slug)
+    payload = gamma_get("/sports", slug=sports_slug)
+    markets = extract_nested_markets(payload)
+    for market in markets:
+        market["_event_slug"] = market.get("_event_slug") or event_slug
+    if not markets:
+        log.warning("No sports markets found for sports slug: %s", sports_slug)
+    else:
+        log.info("Fetched %s nested sports market(s) for %s", len(markets), sports_slug)
+    return markets
+
+
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
+    sports_markets = fetch_sports_markets(slug)
+    if sports_markets:
+        return sports_markets
+
     event_slug = slug_from_value(slug)
     events = gamma_get("/events", slug=event_slug)
     event_list = as_list_payload(events, "events")
