@@ -74,6 +74,8 @@ SCORE_SEARCH_TERMS = [
 ]
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 SCORE_OUTCOME_RE = re.compile(r"\b\d+\s*[-–]\s*\d+\b")
+# Match exact/correct score variants with optional punctuation (handles "exact-score", "Exact Score", "exact.score", etc.)
+EXACT_KW_RE = re.compile(r"exact.?score|correct.?score", re.I)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,12 +305,21 @@ def outcomes_from_market(market: dict[str, Any]) -> list[str]:
         return parsed
     return []
 
+
 def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
     outcomes = outcomes_from_market(market)
-    if any(outcome.lower() == "any other score" for outcome in outcomes):
+    # Accept "Any Other Score" variants
+    if any("any other" in outcome.lower() for outcome in outcomes):
         return True
+    # Count score-like outcomes (e.g. "1-0")
     score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.search(outcome))
-    return score_like >= MIN_SCORE_OUTCOMES
+    if score_like >= MIN_SCORE_OUTCOMES:
+        return True
+    # Handle binary markets where each score is a separate YES/NO market and the question contains the score
+    question = str(market.get("question") or "")
+    if {o.lower() for o in outcomes} >= {"yes", "no"} and SCORE_OUTCOME_RE.search(question):
+        return True
+    return False
 
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
@@ -316,7 +327,10 @@ def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
         str(market.get(k, ""))
         for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
     ).lower()
-    text_match = any(marker in text for marker in ("exact score", "correct score", "any other score", "actual score is not"))
+    # normalize common punctuation to improve substring/regex matches
+    normalized_text = text.replace("-", " ").replace("–", " ").replace("_", " ")
+    # match "exact score" / "correct score" allowing hyphens/dots/spaces
+    text_match = bool(EXACT_KW_RE.search(text)) or "any other score" in text or "actual score is not" in text
     score_in_market_text = SCORE_OUTCOME_RE.search(text) is not None
     return is_world_cup_market(market) and (text_match or score_in_market_text or has_exact_score_outcomes(market))
 
