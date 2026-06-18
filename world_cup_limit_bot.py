@@ -12,6 +12,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     WORLD_CUP_SEARCH_QUERY=world cup exact score
+    WORLD_CUP_TAG_ID=102232                   # Polymarket World Cup tag used for paginated Gamma /events discovery
     WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
     WORLD_CUP_ORDER_SIZE=5
     WORLD_CUP_SPREAD_RATIO_MIN=1.8
@@ -52,6 +53,7 @@ MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split
 MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
 SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup exact score").strip()
+TAG_ID = os.getenv("WORLD_CUP_TAG_ID", "102232").strip()
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.8"))
@@ -132,6 +134,31 @@ def match_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> 
 def sports_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> str:
     """Build the Gamma /sports slug for a World Cup fixture."""
     return f"world-cup/{match_slug_from_fixture(home_code, away_code, match_date)}"
+
+
+def fetch_tag_events(tag_id: str = TAG_ID, page_size: int = 100) -> list[dict[str, Any]]:
+    if not tag_id:
+        return []
+    events: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        payload = gamma_get(
+            "/events",
+            tag_id=tag_id,
+            closed="false",
+            limit=page_size,
+            offset=offset,
+        )
+        page = as_list_payload(payload, "events")
+        if not page:
+            break
+        events.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    if events:
+        log.info("Fetched %s event(s) from World Cup tag_id=%s", len(events), tag_id)
+    return events
 
 
 def gamma_public_search(query: str, limit_per_type: int = 50) -> dict[str, Any]:
@@ -226,7 +253,10 @@ def is_upcoming_market(market: dict[str, Any]) -> bool:
 
 def is_world_cup_market(market: dict[str, Any]) -> bool:
     event_slug = str(market.get("_event_slug") or market.get("slug") or "").lower()
-    text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
+    text = " ".join(
+        str(market.get(k, ""))
+        for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
+    ).lower()
     return event_slug.startswith("fifwc-") or "world cup" in text or "fifa world cup" in text
 
 
@@ -282,7 +312,10 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
 
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
-    text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
+    text = " ".join(
+        str(market.get(k, ""))
+        for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
+    ).lower()
     text_match = any(marker in text for marker in ("exact score", "correct score", "any other score", "actual score is not"))
     score_in_market_text = SCORE_OUTCOME_RE.search(text) is not None
     return is_world_cup_market(market) and (text_match or score_in_market_text or has_exact_score_outcomes(market))
@@ -499,7 +532,9 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
 
 
 def search_match_events() -> list[dict[str, Any]]:
-    events = public_search_events(SEARCH_QUERY)
+    events = fetch_tag_events()
+    if not events:
+        events = public_search_events(SEARCH_QUERY)
     if not events:
         data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
         events = as_list_payload(data, "events")
@@ -507,7 +542,8 @@ def search_match_events() -> list[dict[str, Any]]:
     start, _ = local_day_window_utc()
     for event in events:
         slug = str(event.get("slug") or "")
-        if not slug.lower().startswith("fifwc-"):
+        title = str(event.get("title") or "")
+        if not slug.lower().startswith("fifwc-") and "world cup" not in title.lower():
             continue
         event_dt = market_datetime({**event, "_event_slug": slug})
         if event_dt is None or event_dt < start:
@@ -521,8 +557,13 @@ def search_exact_score_markets() -> list[dict[str, Any]]:
     markets: list[dict[str, Any]] = []
     for event in search_match_events():
         slug = str(event.get("slug") or "")
+        title = str(event.get("title") or "")
+        event_dt_raw = event.get("endDate") or event.get("endDateIso") or event.get("startDate")
         for market in event.get("markets") or []:
             market["_event_slug"] = slug
+            market["_event_title"] = title
+            if event_dt_raw and not any(market.get(key) for key in ("endDate", "endDateIso", "startDate")):
+                market["endDate"] = event_dt_raw
             if is_exact_score_world_cup_market(market) and is_upcoming_market(market):
                 markets.append(market)
 
