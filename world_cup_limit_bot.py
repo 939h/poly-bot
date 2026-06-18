@@ -52,7 +52,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split(",") if s.strip()]
 MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
-SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup exact score").strip()
+SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "exact score").strip()
 TAG_ID = os.getenv("WORLD_CUP_TAG_ID", "102232").strip()
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
