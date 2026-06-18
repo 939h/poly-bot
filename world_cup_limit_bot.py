@@ -14,6 +14,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_ORDER_SIZE=5
     WORLD_CUP_SPREAD_RATIO_MIN=1.8
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
+    WORLD_CUP_UPCOMING_MATCHES=3              # scan exact-score markets for the next 3 matches
     WORLD_CUP_MAX_MARKETS=5
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_MIN_SCORE_OUTCOMES=3             # exact-score markets have outcomes like 0-0, 0-1, 1-0, 3-3
@@ -51,7 +52,8 @@ OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_O
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.8"))
 TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
-MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", "5"))
+UPCOMING_MATCHES = int(os.getenv("WORLD_CUP_UPCOMING_MATCHES", "3"))
+MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", str(UPCOMING_MATCHES)))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
@@ -152,14 +154,22 @@ def parse_dt(raw: Any) -> datetime | None:
         return None
 
 
-def is_today_market(market: dict[str, Any]) -> bool:
-    start, end = local_day_window_utc()
-    market_dt = parse_dt(market.get("endDateIso") or market.get("end_date_iso") or market.get("endDate"))
-    if market_dt is None:
-        market_dt = event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+def market_datetime(market: dict[str, Any]) -> datetime | None:
+    for key in ("startDateIso", "start_date_iso", "startDate", "endDateIso", "end_date_iso", "endDate"):
+        market_dt = parse_dt(market.get(key))
+        if market_dt is not None:
+            return market_dt
+    return event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+
+
+def is_upcoming_market(market: dict[str, Any]) -> bool:
+    # Slug dates only encode the match date, not kickoff time. Compare against the
+    # configured local-day start so today's remaining matches are still eligible.
+    start, _ = local_day_window_utc()
+    market_dt = market_datetime(market)
     if market_dt is None:
         return False
-    return start <= market_dt < end
+    return market_dt >= start
 
 
 def is_world_cup_market(market: dict[str, Any]) -> bool:
@@ -197,15 +207,28 @@ def as_list_payload(data: Any, key: str) -> list[dict[str, Any]]:
 
 
 def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
-    data = gamma_get("/markets", slug=slug)
-    markets = as_list_payload(data, "markets")
-    if markets:
-        return markets[0]
-    events = gamma_get("/events", slug=slug)
-    event_list = as_list_payload(events, "events")
-    if event_list:
-        nested = event_list[0].get("markets") or []
-        return nested[0] if nested else None
+    market_slug = slug_from_value(slug)
+
+    # Docs-supported market slug forms:
+    #   GET /markets?slug={slug}
+    #   GET /markets/slug/{slug}
+    for payload in (
+        gamma_get("/markets", slug=market_slug),
+        gamma_get(f"/markets/slug/{market_slug}"),
+    ):
+        markets = as_list_payload(payload, "markets")
+        if markets:
+            return markets[0]
+
+    # If the supplied slug is actually an event slug, pull the first nested market.
+    for payload in (
+        gamma_get("/events", slug=market_slug),
+        gamma_get(f"/events/slug/{market_slug}"),
+    ):
+        event_list = as_list_payload(payload, "events")
+        if event_list:
+            nested = event_list[0].get("markets") or []
+            return nested[0] if nested else None
     return None
 
 
@@ -252,8 +275,15 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
         return sports_markets
 
     event_slug = slug_from_value(slug)
-    events = gamma_get("/events", slug=event_slug)
-    event_list = as_list_payload(events, "events")
+    event_payloads = (
+        gamma_get("/events", slug=event_slug),
+        gamma_get(f"/events/slug/{event_slug}"),
+    )
+    event_list: list[dict[str, Any]] = []
+    for payload in event_payloads:
+        event_list = as_list_payload(payload, "events")
+        if event_list:
+            break
     if not event_list:
         log.warning("No event payload found for match/event slug: %s", event_slug)
         return []
@@ -271,17 +301,18 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
 def search_match_events() -> list[dict[str, Any]]:
     data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
     events = as_list_payload(data, "events")
-    today_events: list[dict[str, Any]] = []
+    upcoming_events: list[tuple[datetime, dict[str, Any]]] = []
+    start, _ = local_day_window_utc()
     for event in events:
         slug = str(event.get("slug") or "")
         if not slug.lower().startswith("fifwc-"):
             continue
-        event_date = event_date_from_slug(slug)
-        start, end = local_day_window_utc()
-        if event_date is None or not (start <= event_date < end):
+        event_dt = market_datetime({**event, "_event_slug": slug})
+        if event_dt is None or event_dt < start:
             continue
-        today_events.append(event)
-    return today_events
+        upcoming_events.append((event_dt, event))
+    upcoming_events.sort(key=lambda item: item[0])
+    return [event for _, event in upcoming_events[:UPCOMING_MATCHES]]
 
 
 def search_exact_score_markets() -> list[dict[str, Any]]:
@@ -290,7 +321,7 @@ def search_exact_score_markets() -> list[dict[str, Any]]:
         slug = str(event.get("slug") or "")
         for market in event.get("markets") or []:
             market["_event_slug"] = slug
-            if is_exact_score_world_cup_market(market) and is_today_market(market):
+            if is_exact_score_world_cup_market(market) and is_upcoming_market(market):
                 markets.append(market)
 
     if markets:
@@ -298,7 +329,7 @@ def search_exact_score_markets() -> list[dict[str, Any]]:
 
     data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
     found = as_list_payload(data, "markets")
-    return [m for m in found if is_exact_score_world_cup_market(m) and is_today_market(m)]
+    return [m for m in found if is_exact_score_world_cup_market(m) and is_upcoming_market(m)]
 
 
 def collect_markets() -> list[dict[str, Any]]:
@@ -329,8 +360,8 @@ def collect_markets() -> list[dict[str, Any]]:
         if not is_exact_score_world_cup_market(market):
             log.info("Skipping non-exact-score/non-World-Cup market: %s", market.get("slug"))
             continue
-        if not is_today_market(market):
-            log.info("Skipping non-current-day market: %s", market.get("slug"))
+        if not is_upcoming_market(market):
+            log.info("Skipping past/non-upcoming market: %s", market.get("slug"))
             continue
         if not market.get("clobTokenIds") and not market.get("clob_token_ids"):
             log.info("Skipping market without CLOB tokens: %s", market.get("slug"))
@@ -341,9 +372,9 @@ def collect_markets() -> list[dict[str, Any]]:
             break
 
     if not markets:
-        log.warning("No current-day World Cup exact-score CLOB markets found after filtering")
+        log.warning("No upcoming World Cup exact-score CLOB markets found after filtering")
     else:
-        log.info("Found %s current-day World Cup exact-score market(s)", len(markets))
+        log.info("Found %s upcoming World Cup exact-score market(s)", len(markets))
     return markets
 
 
@@ -553,8 +584,9 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | current-day exact-score only | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
+        "Mode=%s | upcoming_matches=%s | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
+        UPCOMING_MATCHES,
         SPREAD_RATIO_MIN,
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
