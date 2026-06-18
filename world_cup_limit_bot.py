@@ -16,6 +16,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
     WORLD_CUP_MAX_MARKETS=5
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
+    WORLD_CUP_MIN_SCORE_OUTCOMES=3             # exact-score markets have outcomes like 0-0, 0-1, 1-0, 3-3
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
 """
@@ -55,8 +56,9 @@ POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
+MIN_SCORE_OUTCOMES = int(os.getenv("WORLD_CUP_MIN_SCORE_OUTCOMES", "3"))
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
-SCORE_OUTCOME_RE = re.compile(r"^\s*\d+\s*[-–]\s*\d+\s*$")
+SCORE_OUTCOME_RE = re.compile(r"\b\d+\s*[-–]\s*\d+\b")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,8 +153,8 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
     outcomes = parse_json_list(market.get("outcomes"))
     if any(outcome.lower() == "any other score" for outcome in outcomes):
         return True
-    score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.match(outcome))
-    return score_like >= 6
+    score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.search(outcome))
+    return score_like >= MIN_SCORE_OUTCOMES
 
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
