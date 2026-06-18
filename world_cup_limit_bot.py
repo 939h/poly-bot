@@ -73,7 +73,9 @@ SCORE_SEARCH_TERMS = [
     if term.strip()
 ]
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
-SCORE_OUTCOME_RE = re.compile(r"\b\d+\s*[-–]\s*\d+\b")
+# Match score lines like "0-0", "0 - 0", or "10–9" without treating the
+# month/day portion of dates like "2026-06-18" as a score.
+SCORE_OUTCOME_RE = re.compile(r"(?<![\d.][-–])(?<!\d{4}[-–])\b\d{1,2}\s*[-–]\s*\d{1,2}\b(?![-–]\d)(?!\.\d)")
 # Match exact/correct score variants with optional punctuation (handles "exact-score", "Exact Score", "exact.score", etc.)
 EXACT_KW_RE = re.compile(r"exact.?score|correct.?score", re.I)
 
@@ -236,7 +238,18 @@ def parse_dt(raw: Any) -> datetime | None:
 
 
 def market_datetime(market: dict[str, Any]) -> datetime | None:
-    for key in ("startDateIso", "start_date_iso", "startDate", "endDateIso", "end_date_iso", "endDate"):
+    # Sports markets often use startDate/startDateIso for market creation or
+    # listing dates, while gameStartTime/endDate carry the actual fixture time.
+    for key in (
+        "gameStartTime",
+        "game_start_time",
+        "endDateIso",
+        "end_date_iso",
+        "endDate",
+        "startDateIso",
+        "start_date_iso",
+        "startDate",
+    ):
         market_dt = parse_dt(market.get(key))
         if market_dt is not None:
             return market_dt
@@ -323,6 +336,9 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
 
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
+    sports_market_type = str(market.get("sportsMarketType") or market.get("sports_market_type") or "").lower()
+    if sports_market_type and "exact_score" not in sports_market_type and "correct_score" not in sports_market_type:
+        return False
     text = " ".join(
         str(market.get(k, ""))
         for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
@@ -451,7 +467,8 @@ def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
             add_related_market(markets, fetch_market_by_slug(direct_slug), normalized)
 
         for market in public_search_markets(f"{normalized} {score}"):
-            add_related_market(markets, market, normalized)
+            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
+                add_related_market(markets, market, normalized)
 
         payload = gamma_get(
             "/markets",
@@ -461,7 +478,8 @@ def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
             limit=20,
         )
         for market in as_list_payload(payload, "markets"):
-            add_related_market(markets, market, normalized)
+            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
+                add_related_market(markets, market, normalized)
     return markets
 
 
