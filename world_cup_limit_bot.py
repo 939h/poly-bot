@@ -7,6 +7,8 @@ Polymarket World Cup Exact Score Spread Bot
     POLY_FUNDER_ADDRESS=0x...
 
     WORLD_CUP_MARKET_SLUGS=slug1,slug2        # optional; must be exact-score markets
+    # Match slug rule: fifwc-{home FIFA code}-{away FIFA code}-{YYYY-MM-DD}, lower-case
+    # Example from CZE vs RSA on 2026-06-18: world-cup/fifwc-cze-rsa-2026-06-18
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     WORLD_CUP_SEARCH_QUERY=world cup exact score
@@ -43,6 +45,7 @@ load_dotenv()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+USER_AGENT = "poly-bot/world-cup-limit-bot (+https://github.com/cemini23/world-cup-bot scanner-compatible)"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split(",") if s.strip()]
@@ -104,12 +107,52 @@ def build_client() -> ClobClient | None:
 
 def gamma_get(path: str, **params: Any) -> Any:
     try:
-        response = requests.get(f"{GAMMA_API}{path}", params=params, timeout=15)
+        response = requests.get(
+            f"{GAMMA_API}{path}",
+            params=params,
+            timeout=15,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
         log.error("Gamma API request failed for %s with %s: %s", path, params, exc)
         return []
+
+
+def match_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> str:
+    """Build a Polymarket World Cup match slug from FIFA codes and date.
+
+    World Cup sports pages use lower-case FIFA team codes in match order:
+    fifwc-{home}-{away}-{YYYY-MM-DD}.
+    """
+    return f"fifwc-{home_code.strip().lower()}-{away_code.strip().lower()}-{match_date.strip()}"
+
+
+def sports_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> str:
+    """Build the Gamma /sports slug for a World Cup fixture."""
+    return f"world-cup/{match_slug_from_fixture(home_code, away_code, match_date)}"
+
+
+def gamma_public_search(query: str, limit_per_type: int = 50) -> dict[str, Any]:
+    data = gamma_get("/public-search", q=query, limit_per_type=str(limit_per_type))
+    return data if isinstance(data, dict) else {}
+
+
+def public_search_events(query: str) -> list[dict[str, Any]]:
+    return as_list_payload(gamma_public_search(query), "events")
+
+
+def public_search_markets(query: str) -> list[dict[str, Any]]:
+    payload = gamma_public_search(query)
+    markets = as_list_payload(payload, "markets")
+    for event in as_list_payload(payload, "events"):
+        event_slug = str(event.get("slug") or "")
+        for market in event.get("markets") or []:
+            if isinstance(market, dict):
+                market["_event_slug"] = market.get("_event_slug") or event_slug
+                markets.append(market)
+    return markets
 
 
 def sports_slug_from_value(value: str) -> str:
@@ -360,6 +403,9 @@ def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
         for direct_slug in direct_scoreline_market_slugs(normalized, score):
             add_related_market(markets, fetch_market_by_slug(direct_slug), normalized)
 
+        for market in public_search_markets(f"{normalized} {score}"):
+            add_related_market(markets, market, normalized)
+
         payload = gamma_get(
             "/markets",
             search=f"{normalized} {score}",
@@ -395,6 +441,23 @@ def fetch_related_exact_score_markets(event_slug: str) -> list[dict[str, Any]]:
     return markets
 
 
+def fetch_event_markets_from_public_search(event_slug: str) -> list[dict[str, Any]]:
+    normalized = slug_from_value(event_slug).lower()
+    tokens = [token for token in normalized.replace("fifwc-", "").split("-") if token and not token.isdigit()]
+    queries = tuple(dict.fromkeys([normalized, " ".join(tokens[:2]), *tokens[:2]]))
+    markets: list[dict[str, Any]] = []
+    for query in queries:
+        for event in public_search_events(query):
+            found_slug = str(event.get("slug") or "").lower()
+            if not found_slug.startswith(normalized):
+                continue
+            for market in event.get("markets") or []:
+                if isinstance(market, dict):
+                    market["_event_slug"] = event.get("slug") or normalized
+                    add_related_market(markets, market, normalized)
+    return dedupe_markets(markets)
+
+
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
     sports_markets = fetch_sports_markets(slug)
     if sports_markets:
@@ -403,6 +466,11 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
             return sports_markets
 
     event_slug = slug_from_value(slug)
+    public_search_markets_found = fetch_event_markets_from_public_search(event_slug)
+    if public_search_markets_found:
+        log.info("Fetched %s exact-score market(s) from Gamma public-search for event slug: %s", len(public_search_markets_found), event_slug)
+        return public_search_markets_found
+
     related_markets = fetch_related_exact_score_markets(event_slug)
     if related_markets:
         return related_markets
@@ -431,8 +499,10 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
 
 
 def search_match_events() -> list[dict[str, Any]]:
-    data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-    events = as_list_payload(data, "events")
+    events = public_search_events(SEARCH_QUERY)
+    if not events:
+        data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
+        events = as_list_payload(data, "events")
     upcoming_events: list[tuple[datetime, dict[str, Any]]] = []
     start, _ = local_day_window_utc()
     for event in events:
@@ -459,8 +529,10 @@ def search_exact_score_markets() -> list[dict[str, Any]]:
     if markets:
         return markets
 
-    data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-    found = as_list_payload(data, "markets")
+    found = public_search_markets(SEARCH_QUERY)
+    if not found:
+        data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
+        found = as_list_payload(data, "markets")
     return [m for m in found if is_exact_score_world_cup_market(m) and is_upcoming_market(m)]
 
 
