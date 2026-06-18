@@ -56,7 +56,8 @@ SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup exact score").stri
 TAG_ID = os.getenv("WORLD_CUP_TAG_ID", "102232").strip()
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
-SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.3"))TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
+SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
+TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
 UPCOMING_MATCHES = int(os.getenv("WORLD_CUP_UPCOMING_MATCHES", "3"))
 MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", str(UPCOMING_MATCHES)))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
