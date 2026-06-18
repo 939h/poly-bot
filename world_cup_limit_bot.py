@@ -7,7 +7,7 @@ Polymarket World Cup Exact Score Spread Bot
     POLY_FUNDER_ADDRESS=0x...
 
     WORLD_CUP_MARKET_SLUGS=slug1,slug2        # optional; must be exact-score markets
-    WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # Gamma /sports slug, bare event slug, path, or URL
+    WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     WORLD_CUP_SEARCH_QUERY=world cup exact score
     WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
@@ -112,6 +112,8 @@ def sports_slug_from_value(value: str) -> str:
     path = parsed.path.strip("/") if parsed.scheme or parsed.netloc else cleaned.split("?", 1)[0].strip("/")
     if path.startswith("sports/"):
         path = path[len("sports/"):]
+    if path.startswith("event/"):
+        path = path[len("event/"):]
     return path
 
 
@@ -312,12 +314,44 @@ def fetch_sports_markets(slug: str) -> list[dict[str, Any]]:
     return markets
 
 
+def related_exact_score_market_slugs(event_slug: str) -> list[str]:
+    """Return known companion market slugs for sports exact-score tabs.
+
+    Polymarket's match page can show an Exact Score tab that is not present in
+    the base /events?slug=<match> response. For the World Cup sports pages,
+    that tab is commonly exposed as the companion "-more-markets" market slug.
+    """
+    normalized = slug_from_value(event_slug)
+    candidates = [normalized]
+    if not normalized.endswith("-more-markets"):
+        candidates.append(f"{normalized}-more-markets")
+    return candidates
+
+
+def fetch_related_exact_score_markets(event_slug: str) -> list[dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    for market_slug in related_exact_score_market_slugs(event_slug):
+        market = fetch_market_by_slug(market_slug)
+        if market and is_exact_score_world_cup_market({**market, "_event_slug": event_slug}):
+            market["_event_slug"] = event_slug
+            markets.append(market)
+    if markets:
+        log.info("Fetched %s related exact-score market(s) for event slug: %s", len(markets), event_slug)
+    return markets
+
+
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
     sports_markets = fetch_sports_markets(slug)
     if sports_markets:
-        return sports_markets
+        exact_sports_markets = [market for market in sports_markets if is_exact_score_world_cup_market(market)]
+        if exact_sports_markets:
+            return sports_markets
 
     event_slug = slug_from_value(slug)
+    related_markets = fetch_related_exact_score_markets(event_slug)
+    if related_markets:
+        return related_markets
+
     event_payloads = (
         gamma_get("/events", slug=event_slug),
         gamma_get(f"/events/slug/{event_slug}"),
