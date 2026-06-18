@@ -1,27 +1,23 @@
 """
-Simple Polymarket World Cup Match Limit Order Bot
-=================================================
-
-Places BUY limit orders only. It can target specific Polymarket market slugs,
-event slugs, or search Gamma for World Cup match markets.
-
-Recommended .env values:
-    DRY_RUN=true
-    WORLD_CUP_MARKET_SLUGS=market-slug-1,market-slug-2
-    # or WORLD_CUP_EVENT_SLUGS=event-slug-1,event-slug-2
-    # or WORLD_CUP_SEARCH_QUERY=world cup
-    WORLD_CUP_OUTCOME=YES
-    WORLD_CUP_ORDER_PRICE=0.10
-    WORLD_CUP_ORDER_SIZE=5
-    WORLD_CUP_MAX_MARKETS=5
-
-Live trading additionally needs the same Polymarket credentials used by
-eth_limit_v2.py:
+Polymarket World Cup Exact Score Spread Bot
     POLY_PRIVATE_KEY=0x...
     POLY_API_KEY=...
     POLY_API_SECRET=...
     POLY_API_PASSPHRASE=...
     POLY_FUNDER_ADDRESS=0x...
+
+    WORLD_CUP_MARKET_SLUGS=slug1,slug2        # optional; must be exact-score markets
+    WORLD_CUP_MATCH_SLUGS=fifwc-cze-rsa-2026-06-18  # optional Polymarket match/event slugs or URLs
+    WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
+    WORLD_CUP_SEARCH_QUERY=world cup exact score
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
+    WORLD_CUP_ORDER_SIZE=5
+    WORLD_CUP_SPREAD_RATIO_MIN=1.8
+    WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
+    WORLD_CUP_MAX_MARKETS=5
+    WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
+    WORLD_CUP_POLL_SECS=30
+    WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
 """
 
 import json
@@ -29,7 +25,9 @@ import logging
 import math
 import os
 import sys
+import re
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -43,14 +41,21 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-ORDER_PRICE = float(os.getenv("WORLD_CUP_ORDER_PRICE", os.getenv("ORDER_PRICE", "0.10")))
-ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
-OUTCOME = os.getenv("WORLD_CUP_OUTCOME", "YES").strip()
 MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split(",") if s.strip()]
+MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
-SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup").strip()
+SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "world cup exact score").strip()
+OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
+ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
+SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.8"))
+TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
 MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", "5"))
+MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
+POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
+DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
+RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
+FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,12 +66,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _csv(value: str) -> list[str]:
-    return [part.strip() for part in value.split(",") if part.strip()]
-
-
 def build_client() -> ClobClient | None:
-    """Build the Polymarket CLOB client, or return None for dry-runs without credentials."""
     private_key = os.getenv("POLY_PRIVATE_KEY")
     api_key = os.getenv("POLY_API_KEY")
     api_secret = os.getenv("POLY_API_SECRET")
@@ -77,19 +77,13 @@ def build_client() -> ClobClient | None:
         if DRY_RUN:
             log.info("[DRY RUN] Missing Polymarket credentials; running without CLOB client.")
             return None
-        raise SystemExit(
-            "Missing POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, or POLY_API_PASSPHRASE."
-        )
+        raise SystemExit("Missing POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, or POLY_API_PASSPHRASE.")
 
     return ClobClient(
         host=CLOB_API,
         chain_id=POLYGON,
         key=private_key,
-        creds=ApiCreds(
-            api_key=api_key,
-            api_secret=api_secret,
-            api_passphrase=api_passphrase,
-        ),
+        creds=ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase),
         signature_type=1,
         funder=funder or None,
     )
@@ -105,6 +99,58 @@ def gamma_get(path: str, **params: Any) -> Any:
         return []
 
 
+def slug_from_value(value: str) -> str:
+    """Accept either a bare slug or a Polymarket URL and return the final path segment."""
+    cleaned = value.strip().rstrip("/")
+    return cleaned.split("/")[-1]
+
+
+def event_date_from_slug(slug: str) -> datetime | None:
+    match = FIFWC_EVENT_RE.search(slug_from_value(slug))
+    if not match:
+        return None
+    year, month, day = (int(part) for part in match.groups())
+    return datetime(year, month, day, tzinfo=UTC)
+
+
+def local_day_window_utc() -> tuple[datetime, datetime]:
+    now = datetime.now(UTC) + timedelta(hours=DAY_TZ_OFFSET)
+    day_start_local = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    start_utc = day_start_local - timedelta(hours=DAY_TZ_OFFSET)
+    end_utc = start_utc + timedelta(days=1)
+    return start_utc, end_utc
+
+
+def parse_dt(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def is_today_market(market: dict[str, Any]) -> bool:
+    start, end = local_day_window_utc()
+    market_dt = parse_dt(market.get("endDateIso") or market.get("end_date_iso") or market.get("endDate"))
+    if market_dt is None:
+        market_dt = event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+    if market_dt is None:
+        return False
+    return start <= market_dt < end
+
+
+def is_world_cup_market(market: dict[str, Any]) -> bool:
+    event_slug = str(market.get("_event_slug") or market.get("slug") or "").lower()
+    text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
+    return event_slug.startswith("fifwc-") or "world cup" in text or "fifa world cup" in text
+
+
+def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
+    text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description", "groupItemTitle")).lower()
+    return is_world_cup_market(market) and ("exact score" in text or "correct score" in text or "any other score" in text)
+
+
 def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
     data = gamma_get("/markets", slug=slug)
     markets = data if isinstance(data, list) else data.get("markets", [])
@@ -118,27 +164,89 @@ def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
 
 
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
-    events = gamma_get("/events", slug=slug)
-    if not isinstance(events, list) or not events:
+    event_slug = slug_from_value(slug)
+    events = gamma_get("/events", slug=event_slug)
+    if not isinstance(events, list):
         return []
-    return [m for event in events for m in (event.get("markets") or [])]
+    markets: list[dict[str, Any]] = []
+    for event in events:
+        parent_slug = event.get("slug") or event_slug
+        for market in event.get("markets") or []:
+            market["_event_slug"] = parent_slug
+            markets.append(market)
+    return markets
 
 
-def search_world_cup_markets() -> list[dict[str, Any]]:
-    """Search Gamma and keep active CLOB-enabled markets that look like World Cup matches."""
-    data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 4)
-    markets = data if isinstance(data, list) else data.get("markets", [])
-    filtered: list[dict[str, Any]] = []
-    for market in markets:
-        text = " ".join(str(market.get(k, "")) for k in ("question", "slug", "description")).lower()
-        if "world cup" not in text:
+def search_match_events() -> list[dict[str, Any]]:
+    data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
+    events = data if isinstance(data, list) else data.get("events", [])
+    today_events: list[dict[str, Any]] = []
+    for event in events:
+        slug = str(event.get("slug") or "")
+        if not slug.lower().startswith("fifwc-"):
+            continue
+        event_date = event_date_from_slug(slug)
+        start, end = local_day_window_utc()
+        if event_date is None or not (start <= event_date < end):
+            continue
+        today_events.append(event)
+    return today_events
+
+
+def search_exact_score_markets() -> list[dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    for event in search_match_events():
+        slug = str(event.get("slug") or "")
+        for market in event.get("markets") or []:
+            market["_event_slug"] = slug
+            if is_exact_score_world_cup_market(market) and is_today_market(market):
+                markets.append(market)
+
+    if markets:
+        return markets
+
+    data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
+    found = data if isinstance(data, list) else data.get("markets", [])
+    return [m for m in found if is_exact_score_world_cup_market(m) and is_today_market(m)]
+
+
+def collect_markets() -> list[dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    candidates: list[dict[str, Any]] = []
+    for slug in MARKET_SLUGS:
+        market = fetch_market_by_slug(slug_from_value(slug))
+        if market:
+            candidates.append(market)
+        else:
+            log.warning("Market not found for slug: %s", slug)
+
+    for event_slug in [*MATCH_SLUGS, *EVENT_SLUGS]:
+        candidates.extend(fetch_event_markets(event_slug))
+
+    if not candidates:
+        candidates.extend(search_exact_score_markets())
+
+    for market in candidates:
+        key = market.get("conditionId") or market.get("condition_id") or market.get("slug") or ""
+        if not key or key in seen:
+            continue
+        if not is_exact_score_world_cup_market(market):
+            log.info("Skipping non-exact-score/non-World-Cup market: %s", market.get("slug"))
+            continue
+        if not is_today_market(market):
+            log.info("Skipping non-current-day market: %s", market.get("slug"))
             continue
         if not market.get("clobTokenIds") and not market.get("clob_token_ids"):
+            log.info("Skipping market without CLOB tokens: %s", market.get("slug"))
             continue
-        filtered.append(market)
-        if len(filtered) >= MAX_MARKETS:
+        markets.append(market)
+        seen.add(key)
+        if len(markets) >= MAX_MARKETS:
             break
-    return filtered
+
+    return markets
 
 
 def parse_json_list(raw: Any) -> list[str]:
@@ -150,34 +258,59 @@ def parse_json_list(raw: Any) -> list[str]:
             if isinstance(value, list):
                 return [str(x).strip() for x in value]
         except json.JSONDecodeError:
-            return _csv(raw)
+            return [part.strip() for part in raw.split(",") if part.strip()]
     return []
 
 
-def token_for_outcome(market: dict[str, Any], desired_outcome: str) -> tuple[str, str]:
+def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
     outcomes = parse_json_list(market.get("outcomes"))
     token_ids = parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
     if len(outcomes) != len(token_ids) or not token_ids:
         raise ValueError(f"Cannot match outcomes to token IDs for {market.get('slug')}")
 
-    wanted = desired_outcome.strip().lower()
-    for outcome, token_id in zip(outcomes, token_ids, strict=True):
-        if outcome.lower() == wanted:
-            return outcome, token_id
+    pairs = [(outcome, token_id) for outcome, token_id in zip(outcomes, token_ids, strict=True)]
+    if OUTCOME_FILTERS:
+        pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() in OUTCOME_FILTERS]
+    return pairs[:MAX_OUTCOMES_PER_MARKET]
 
-    available = ", ".join(outcomes)
-    raise ValueError(
-        f"Outcome '{desired_outcome}' not found for {market.get('slug')}; available outcomes: {available}"
-    )
+
+def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
+    raw_levels = book.get(side_name) if isinstance(book, dict) else getattr(book, side_name, None)
+    levels: list[tuple[float, float]] = []
+    for level in raw_levels or []:
+        price = level.get("price") if isinstance(level, dict) else getattr(level, "price", None)
+        size = level.get("size") if isinstance(level, dict) else getattr(level, "size", None)
+        if price is not None:
+            levels.append((float(price), float(size or 0)))
+    return levels
+
+
+def best_bid_ask(client: ClobClient | None, token_id: str) -> tuple[float | None, float | None]:
+    if client is None or DRY_RUN:
+        dry_bid = float(os.getenv("WORLD_CUP_DRY_BEST_BID", "0.022"))
+        dry_ask = float(os.getenv("WORLD_CUP_DRY_BEST_ASK", "0.044"))
+        return dry_bid, dry_ask
+
+    book = client.get_order_book(token_id)
+    bids = get_levels(book, "bids")
+    asks = get_levels(book, "asks")
+    best_bid = max((price for price, _ in bids), default=None)
+    best_ask = min((price for price, _ in asks), default=None)
+    return best_bid, best_ask
+
+
+def spread_ratio(client: ClobClient | None, token_id: str) -> tuple[float | None, float | None, float | None]:
+    bid, ask = best_bid_ask(client, token_id)
+    if bid is None or ask is None or bid <= 0:
+        return bid, ask, None
+    return bid, ask, ask / bid
 
 
 def tick_size(client: ClobClient | None, token_id: str, market: dict[str, Any]) -> float:
     for key in ("minimumTickSize", "minimum_tick_size", "minTickSize", "tickSize"):
         raw = market.get(key)
-        if raw is not None:
-            value = float(raw)
-            if value > 0:
-                return value
+        if raw is not None and float(raw) > 0:
+            return float(raw)
 
     if client is not None and not DRY_RUN:
         book = client.get_order_book(token_id)
@@ -192,7 +325,7 @@ def snap_price(price: float, tick: float) -> float:
     return round(math.ceil(round(price / tick, 10)) * tick, 10)
 
 
-def existing_buy_order(client: ClobClient | None, condition_id: str, token_id: str) -> str | None:
+def open_buy_order_id(client: ClobClient | None, condition_id: str, token_id: str) -> str | None:
     if client is None or DRY_RUN or not SKIP_EXISTING:
         return None
     orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
@@ -202,91 +335,143 @@ def existing_buy_order(client: ClobClient | None, condition_id: str, token_id: s
     return None
 
 
-def place_limit_buy(client: ClobClient | None, market: dict[str, Any]) -> str | None:
-    slug = str(market.get("slug", ""))
-    question = str(market.get("question", slug))
-    condition_id = market.get("conditionId") or market.get("condition_id") or ""
-    outcome, token_id = token_for_outcome(market, OUTCOME)
+def order_is_open(client: ClobClient | None, condition_id: str, order_id: str) -> bool:
+    if client is None or DRY_RUN:
+        return True
+    orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
+    return any((order.get("id") or order.get("orderID")) == order_id for order in orders)
 
-    existing_id = existing_buy_order(client, condition_id, token_id)
-    if existing_id:
-        log.info("Skipping %s | %s; existing BUY order %s", slug, outcome, existing_id)
-        return existing_id
 
-    price = snap_price(ORDER_PRICE, tick_size(client, token_id, market))
-    cost = round(price * ORDER_SIZE, 4)
-    label = f"{question} | {outcome}"
+def get_filled_shares(client: ClobClient | None, order_id: str) -> float:
+    if client is None or DRY_RUN:
+        return ORDER_SIZE
+    details = client.get_order(order_id)
+    if isinstance(details, dict):
+        for field in ("size_matched", "sizeMatched", "sizeFilled", "size_filled", "filledSize"):
+            if details.get(field) is not None:
+                return float(details[field])
+    return 0.0
 
+
+def cancel_order(client: ClobClient | None, order_id: str, label: str) -> bool:
+    if client is None or DRY_RUN:
+        log.info("[DRY RUN] CANCEL %s | order_id=%s", label, order_id)
+        return True
+    try:
+        client.cancel(order_id)
+        log.info("Cancelled %s | order_id=%s", label, order_id)
+        return True
+    except Exception as exc:
+        log.warning("Cancel failed for %s | order_id=%s | %s", label, order_id, exc)
+        return False
+
+
+def place_order(client: ClobClient | None, token_id: str, label: str, price: float, size: float, side: Side) -> str | None:
+    side_name = "BUY" if side == Side.BUY else "SELL"
     if DRY_RUN:
-        dry_id = f"dry-world-cup-{int(time.time())}"
-        log.info("[DRY RUN] LIMIT BUY %s | price=$%.4f | size=%s | cost=$%.4f", label, price, ORDER_SIZE, cost)
+        dry_id = f"dry-{side_name.lower()}-{int(time.time() * 1000)}"
+        log.info("[DRY RUN] LIMIT %s %s | price=$%.4f | size=%s | order_id=%s", side_name, label, price, size, dry_id)
         return dry_id
-
     if client is None:
         raise RuntimeError("CLOB client is required when DRY_RUN=false")
 
     response = client.create_and_post_order(
-        order_args=OrderArgs(token_id=token_id, price=price, size=ORDER_SIZE, side=Side.BUY),
+        order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side),
         order_type=OrderType.GTC,
     )
     if isinstance(response, dict) and not response.get("success", True):
-        log.error("Order rejected for %s: %s", slug, response.get("errorMsg", "unknown"))
+        log.error("%s rejected for %s: %s", side_name, label, response.get("errorMsg", "unknown"))
         return None
     order_id = response.get("orderID") or response.get("id") or str(response)
-    log.info("LIMIT BUY placed %s | price=$%.4f | size=%s | order_id=%s", label, price, ORDER_SIZE, order_id)
+    log.info("LIMIT %s placed %s | price=$%.4f | size=%s | order_id=%s", side_name, label, price, size, order_id)
     return order_id
 
 
-def collect_markets() -> list[dict[str, Any]]:
-    markets: list[dict[str, Any]] = []
-    seen: set[str] = set()
+def place_take_profit(client: ClobClient | None, market: dict[str, Any], token_id: str, label: str, entry_price: float, shares: float) -> str | None:
+    sell_price = snap_price(entry_price * TAKE_PROFIT_MULTIPLIER, tick_size(client, token_id, market))
+    return place_order(client, token_id, f"TP {label}", sell_price, shares, Side.SELL)
 
-    for slug in MARKET_SLUGS:
-        market = fetch_market_by_slug(slug)
-        if market:
-            key = market.get("conditionId") or market.get("slug") or slug
-            if key not in seen:
-                markets.append(market)
-                seen.add(key)
-        else:
-            log.warning("Market not found for slug: %s", slug)
 
-    for event_slug in EVENT_SLUGS:
-        for market in fetch_event_markets(event_slug):
-            key = market.get("conditionId") or market.get("slug") or ""
-            if key and key not in seen:
-                markets.append(market)
-                seen.add(key)
+def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
+    for market in collect_markets():
+        condition_id = market.get("conditionId") or market.get("condition_id") or ""
+        question = str(market.get("question") or market.get("slug"))
+        for outcome, token_id in market_outcomes(market):
+            key = f"{condition_id}:{token_id}"
+            label = f"{question} | {outcome}"
+            if key in sold or any(order["key"] == key for order in pending.values()):
+                continue
 
-    if not markets:
-        for market in search_world_cup_markets():
-            key = market.get("conditionId") or market.get("slug") or ""
-            if key and key not in seen:
-                markets.append(market)
-                seen.add(key)
+            existing_id = open_buy_order_id(client, condition_id, token_id)
+            if existing_id:
+                log.info("Resuming existing BUY %s | order_id=%s", label, existing_id)
+                bid, ask, ratio = spread_ratio(client, token_id)
+                if bid is not None:
+                    pending[existing_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": bid}
+                continue
 
-    return markets[:MAX_MARKETS]
+            bid, ask, ratio = spread_ratio(client, token_id)
+            if ratio is None:
+                log.info("No usable book for %s | bid=%s ask=%s", label, bid, ask)
+                continue
+            if ratio <= SPREAD_RATIO_MIN:
+                log.info("Spread too tight for %s | bid=%.4f ask=%.4f ratio=%.2fx", label, bid, ask, ratio)
+                continue
+
+            buy_price = snap_price(bid, tick_size(client, token_id, market))
+            order_id = place_order(client, token_id, label, buy_price, ORDER_SIZE, Side.BUY)
+            if order_id:
+                pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price}
+                log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid, ask, ratio)
+
+
+def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
+    for order_id, order in list(pending.items()):
+        label = order["label"]
+        token_id = order["token_id"]
+        condition_id = order["condition_id"]
+
+        if not order_is_open(client, condition_id, order_id):
+            shares = get_filled_shares(client, order_id)
+            pending.pop(order_id, None)
+            if shares > 0:
+                log.info("BUY filled %s | shares=%s | entry=$%.4f", label, shares, order["entry_price"])
+                place_take_profit(client, order["market"], token_id, label, order["entry_price"], shares)
+                sold.add(order["key"])
+            else:
+                log.info("BUY gone with 0 fill %s | order_id=%s", label, order_id)
+            continue
+
+        bid, ask, ratio = spread_ratio(client, token_id)
+        if ratio is None:
+            log.info("Keeping %s; no usable updated book | bid=%s ask=%s", label, bid, ask)
+            continue
+        if ratio < SPREAD_RATIO_MIN:
+            log.info("Spread contracted below %.2fx for %s | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, label, bid, ask, ratio)
+            if cancel_order(client, order_id, label):
+                pending.pop(order_id, None)
 
 
 def main() -> None:
-    log.info("Simple Polymarket World Cup Limit Bot")
-    log.info("Mode=%s | outcome=%s | price=$%.4f | size=%s | max_markets=%s", "DRY_RUN" if DRY_RUN else "LIVE", OUTCOME, ORDER_PRICE, ORDER_SIZE, MAX_MARKETS)
+    log.info("Polymarket World Cup Exact Score Spread Bot")
+    log.info(
+        "Mode=%s | current-day exact-score only | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
+        "DRY_RUN" if DRY_RUN else "LIVE",
+        SPREAD_RATIO_MIN,
+        TAKE_PROFIT_MULTIPLIER,
+        ORDER_SIZE,
+    )
 
     client = build_client()
-    markets = collect_markets()
-    if not markets:
-        log.warning("No World Cup markets found. Set WORLD_CUP_MARKET_SLUGS or WORLD_CUP_EVENT_SLUGS for precise targeting.")
-        return
+    pending: dict[str, dict[str, Any]] = {}
+    sold: set[str] = set()
 
-    placed = 0
-    for market in markets:
-        try:
-            if place_limit_buy(client, market):
-                placed += 1
-        except Exception as exc:
-            log.error("Skipping %s: %s", market.get("slug", "unknown"), exc)
-
-    log.info("Done. %s/%s market(s) had an order placed or resumed.", placed, len(markets))
+    while True:
+        scan_and_place(client, pending, sold)
+        monitor_pending(client, pending, sold)
+        if RUN_ONCE:
+            break
+        time.sleep(POLL_SECS)
 
 
 if __name__ == "__main__":
