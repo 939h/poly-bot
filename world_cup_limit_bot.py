@@ -11,9 +11,13 @@ Polymarket World Cup Exact Score Spread Bot
     # Example from CZE vs RSA on 2026-06-18: world-cup/fifwc-cze-rsa-2026-06-18
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
-    WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-0,2-1     # selective exact scores only; empty = no scanner score expansion
     WORLD_CUP_ORDER_SIZE=10
-    WORLD_CUP_BUY_LIMIT_PRICE=0.003          # 0.3c fixed buy limit; rounded up to market tick (e.g. 1c -> 0.01)
+    WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
+    WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
+    WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
+    WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
+    WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # post orders with expires/GTD 60 minutes out
     WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
     WORLD_CUP_POSITION_MONITOR=true          # detect existing World Cup positions and place TP sell tranches
@@ -28,7 +32,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_SCANNER_SCORE_MAX=5              # scans 0-0 through 5-5 exact-score slug pattern
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
-    WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
+    WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
 
 import json
@@ -77,9 +81,13 @@ POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
-DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
+DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
+MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
+ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
+ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
+ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
 PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
@@ -207,6 +215,44 @@ def market_datetime(market: dict[str, Any]) -> datetime | None:
         if market_dt is not None:
             return market_dt
     return event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+
+def local_time(dt: datetime) -> datetime:
+    return dt.astimezone(UTC) + timedelta(hours=DAY_TZ_OFFSET)
+
+def local_time_label(dt: datetime) -> str:
+    sign = "+" if DAY_TZ_OFFSET >= 0 else "-"
+    return f"{local_time(dt):%Y-%m-%d %H:%M} UTC{sign}{abs(DAY_TZ_OFFSET)}"
+
+def market_entry_window(market: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return None
+    return kickoff + timedelta(minutes=ENTRY_DELAY_MINUTES), kickoff + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+
+def market_is_in_entry_window(market: dict[str, Any], now: datetime | None = None) -> bool:
+    window = market_entry_window(market)
+    if window is None:
+        log.info("Skipping market without kickoff time: %s", market.get("slug"))
+        return False
+    start, end = window
+    now = now or datetime.now(UTC)
+    if now < start:
+        log.info(
+            "Waiting for entry window for %s | starts=%s | now=%s",
+            market.get("slug"),
+            local_time_label(start),
+            local_time_label(now),
+        )
+        return False
+    if now >= end:
+        log.info(
+            "Entry window closed for %s | closed=%s | now=%s",
+            market.get("slug"),
+            local_time_label(end),
+            local_time_label(now),
+        )
+        return False
+    return True
 
 def is_upcoming_market(market: dict[str, Any]) -> bool:
     # Slug dates only encode the match date, not kickoff time. Compare against the
@@ -459,12 +505,23 @@ def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
         raise ValueError(f"Cannot match outcomes to token IDs for {market.get('slug')}")
 
     pairs = [(outcome, token_id) for outcome, token_id in zip(outcomes, token_ids, strict=True)]
-    if OUTCOME_FILTERS:
-        pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() in OUTCOME_FILTERS]
+    normalized_filters = {score.replace("–", "-").replace(" ", "").lower() for score in OUTCOME_FILTERS}
+    if normalized_filters:
+        pairs = [
+            (outcome, token_id)
+            for outcome, token_id in pairs
+            if outcome.replace("–", "-").replace(" ", "").lower() in normalized_filters
+            or any(score in str(market.get(field) or "").replace("–", "-").replace(" ", "").lower() for score in normalized_filters for field in ("question", "slug", "description"))
+        ]
     elif {outcome.lower() for outcome in outcomes} >= {"yes", "no"}:
         # Sports exact-score tabs commonly expose each score as a binary market.
         # In that shape, the exact-score bet is the YES token for that score.
         pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes"]
+    else:
+        # Do not sweep every score in a multi-outcome exact-score market unless
+        # the desired scores are explicitly configured.
+        pairs = []
+    pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes" or not {"yes", "no"}.issubset({o.lower() for o in outcomes})]
     return pairs[:MAX_OUTCOMES_PER_MARKET]
 
 def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
@@ -554,15 +611,24 @@ def place_order(client: ClobClient | None, token_id: str, label: str, price: flo
     side_name = "BUY" if side == Side.BUY else "SELL"
     if DRY_RUN:
         dry_id = f"dry-{side_name.lower()}-{int(time.time() * 1000)}"
-        log.info("[DRY RUN] LIMIT %s %s | price=$%.4f | size=%s | order_id=%s", side_name, label, price, size, dry_id)
+        log.info(
+            "[DRY RUN] LIMIT %s %s | price=$%.4f | size=%s | expires_in=%sm | order_id=%s",
+            side_name,
+            label,
+            price,
+            size,
+            ORDER_EXPIRATION_MINUTES,
+            dry_id,
+        )
         return dry_id
     if client is None:
         raise RuntimeError("CLOB client is required when DRY_RUN=false")
 
     try:
+        expiration = int(time.time() + ORDER_EXPIRATION_MINUTES * 60) if ORDER_EXPIRATION_MINUTES > 0 else 0
         response = client.create_and_post_order(
-            order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side),
-            order_type=OrderType.GTC,
+            order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side, expiration=expiration),
+            order_type=OrderType.GTD if expiration else OrderType.GTC,
         )
     except Exception as exc:
         log.error("%s failed for %s | price=$%.4f | size=%s | %s", side_name, label, price, size, exc)
@@ -839,10 +905,14 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
             protected[key] = covered_shares + placed_shares
 
 def buy_price_for_market(client: ClobClient | None, token_id: str, market: dict[str, Any]) -> float | None:
+    bid, ask, ratio = spread_ratio(client, token_id)
+    if bid is None:
+        return None
+    if bid >= MAX_BEST_BID:
+        return None
     if BUY_LIMIT_PRICE is not None:
         return snap_price(BUY_LIMIT_PRICE, tick_size(client, token_id, market))
 
-    bid, ask, ratio = spread_ratio(client, token_id)
     if ratio is None:
         return None
     if ratio <= SPREAD_RATIO_MIN:
@@ -851,6 +921,8 @@ def buy_price_for_market(client: ClobClient | None, token_id: str, market: dict[
 
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
+        if not market_is_in_entry_window(market):
+            continue
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
         question = str(market.get("question") or market.get("slug"))
         for outcome, token_id in market_outcomes(market):
@@ -870,7 +942,9 @@ def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]]
             buy_price = buy_price_for_market(client, token_id, market)
             if buy_price is None:
                 bid, ask, ratio = spread_ratio(client, token_id)
-                if ratio is None:
+                if bid is not None and bid >= MAX_BEST_BID:
+                    log.info("Best bid too high for %s | bid=%.4f max=%.4f", label, bid, MAX_BEST_BID)
+                elif ratio is None:
                     log.info("No usable book for %s | bid=%s ask=%s", label, bid, ask)
                 else:
                     log.info("Spread too tight for %s | bid=%.4f ask=%.4f ratio=%.2fx", label, bid, ask, ratio)
