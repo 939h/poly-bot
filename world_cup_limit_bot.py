@@ -11,8 +11,6 @@ Polymarket World Cup Exact Score Spread Bot
     # Example from CZE vs RSA on 2026-06-18: world-cup/fifwc-cze-rsa-2026-06-18
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
-    WORLD_CUP_SEARCH_QUERY=world cup exact score
-    WORLD_CUP_TAG_ID=102232                   # Polymarket World Cup tag used for paginated Gamma /events discovery
     WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
     WORLD_CUP_ORDER_SIZE=5
     WORLD_CUP_SPREAD_RATIO_MIN=1.8
@@ -21,11 +19,8 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_WALLET=0x...          # optional; defaults to POLY_FUNDER_ADDRESS
     WORLD_CUP_POSITION_TP_MULTIPLIERS=20,60,150
     WORLD_CUP_POSITION_TP_CAP=0.90
-    WORLD_CUP_UPCOMING_MATCHES=3              # scan exact-score markets for the next 3 matches
-    WORLD_CUP_MAX_MARKETS=5
+    WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
-    WORLD_CUP_MIN_SCORE_OUTCOMES=3             # exact-score markets have outcomes like 0-0, 0-1, 1-0, 3-3
-    WORLD_CUP_SCORE_SEARCH_TERMS=0-0,1-1,2-2,3-3  # extra score-line searches if exact score is split into binary markets
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
 """
@@ -51,14 +46,12 @@ load_dotenv()
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
-USER_AGENT = "poly-bot/world-cup-limit-bot (+https://github.com/cemini23/world-cup-bot scanner-compatible)"
+USER_AGENT = "poly-bot/world-cup-limit-bot (+https://github.com/cemini23/world-cup-bot configured-markets)"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split(",") if s.strip()]
 MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
-SEARCH_QUERY = os.getenv("WORLD_CUP_SEARCH_QUERY", "exact score").strip()
-TAG_ID = os.getenv("WORLD_CUP_TAG_ID", "102232").strip()
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
@@ -71,20 +64,12 @@ POSITION_TP_MULTIPLIERS = [
     if s.strip()
 ]
 POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
-UPCOMING_MATCHES = int(os.getenv("WORLD_CUP_UPCOMING_MATCHES", "3"))
-MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", str(UPCOMING_MATCHES)))
+POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
-MIN_SCORE_OUTCOMES = int(os.getenv("WORLD_CUP_MIN_SCORE_OUTCOMES", "3"))
-DEFAULT_SCORE_SEARCH_TERMS = "0-0,1-1,2-2,3-3"
-SCORE_SEARCH_TERMS = [
-    term.strip()
-    for term in os.getenv("WORLD_CUP_SCORE_SEARCH_TERMS", DEFAULT_SCORE_SEARCH_TERMS).split(",")
-    if term.strip()
-]
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -99,7 +84,6 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger(__name__)
-
 
 def build_client() -> ClobClient | None:
     private_key = os.getenv("POLY_PRIVATE_KEY")
@@ -123,7 +107,6 @@ def build_client() -> ClobClient | None:
         funder=funder or None,
     )
 
-
 def gamma_get(path: str, **params: Any) -> Any:
     try:
         response = requests.get(
@@ -138,7 +121,6 @@ def gamma_get(path: str, **params: Any) -> Any:
         log.error("Gamma API request failed for %s with %s: %s", path, params, exc)
         return []
 
-
 def match_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> str:
     """Build a Polymarket World Cup match slug from FIFA codes and date.
 
@@ -147,57 +129,9 @@ def match_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> 
     """
     return f"fifwc-{home_code.strip().lower()}-{away_code.strip().lower()}-{match_date.strip()}"
 
-
 def sports_slug_from_fixture(home_code: str, away_code: str, match_date: str) -> str:
     """Build the Gamma /sports slug for a World Cup fixture."""
     return f"world-cup/{match_slug_from_fixture(home_code, away_code, match_date)}"
-
-
-def fetch_tag_events(tag_id: str = TAG_ID, page_size: int = 100) -> list[dict[str, Any]]:
-    if not tag_id:
-        return []
-    events: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        payload = gamma_get(
-            "/events",
-            tag_id=tag_id,
-            closed="false",
-            limit=page_size,
-            offset=offset,
-        )
-        page = as_list_payload(payload, "events")
-        if not page:
-            break
-        events.extend(page)
-        if len(page) < page_size:
-            break
-        offset += page_size
-    if events:
-        log.debug("Fetched %s event(s) from World Cup tag_id=%s", len(events), tag_id)
-    return events
-
-
-def gamma_public_search(query: str, limit_per_type: int = 50) -> dict[str, Any]:
-    data = gamma_get("/public-search", q=query, limit_per_type=str(limit_per_type))
-    return data if isinstance(data, dict) else {}
-
-
-def public_search_events(query: str) -> list[dict[str, Any]]:
-    return as_list_payload(gamma_public_search(query), "events")
-
-
-def public_search_markets(query: str) -> list[dict[str, Any]]:
-    payload = gamma_public_search(query)
-    markets = as_list_payload(payload, "markets")
-    for event in as_list_payload(payload, "events"):
-        event_slug = str(event.get("slug") or "")
-        for market in event.get("markets") or []:
-            if isinstance(market, dict):
-                market["_event_slug"] = market.get("_event_slug") or event_slug
-                markets.append(market)
-    return markets
-
 
 def sports_slug_from_value(value: str) -> str:
     """Return the Gamma sports slug, e.g. world-cup/fifwc-cze-rsa-2026-06-18."""
@@ -209,7 +143,6 @@ def sports_slug_from_value(value: str) -> str:
     if path.startswith("event/"):
         path = path[len("event/"):]
     return path
-
 
 def slug_from_value(value: str) -> str:
     """Accept a bare slug, sports path, or Polymarket URL and return the final event slug.
@@ -224,14 +157,12 @@ def slug_from_value(value: str) -> str:
     path = parsed.path if parsed.scheme or parsed.netloc else cleaned.split("?", 1)[0]
     return path.rstrip("/").split("/")[-1]
 
-
 def event_date_from_slug(slug: str) -> datetime | None:
     match = FIFWC_EVENT_RE.search(slug_from_value(slug))
     if not match:
         return None
     year, month, day = (int(part) for part in match.groups())
     return datetime(year, month, day, tzinfo=UTC)
-
 
 def local_day_window_utc() -> tuple[datetime, datetime]:
     now = datetime.now(UTC) + timedelta(hours=DAY_TZ_OFFSET)
@@ -240,7 +171,6 @@ def local_day_window_utc() -> tuple[datetime, datetime]:
     end_utc = start_utc + timedelta(days=1)
     return start_utc, end_utc
 
-
 def parse_dt(raw: Any) -> datetime | None:
     if not raw:
         return None
@@ -248,7 +178,6 @@ def parse_dt(raw: Any) -> datetime | None:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
-
 
 def market_datetime(market: dict[str, Any]) -> datetime | None:
     # Sports markets often use startDate/startDateIso for market creation or
@@ -268,7 +197,6 @@ def market_datetime(market: dict[str, Any]) -> datetime | None:
             return market_dt
     return event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
 
-
 def is_upcoming_market(market: dict[str, Any]) -> bool:
     # Slug dates only encode the match date, not kickoff time. Compare against the
     # configured local-day start so today's remaining matches are still eligible.
@@ -278,7 +206,6 @@ def is_upcoming_market(market: dict[str, Any]) -> bool:
         return False
     return market_dt >= start
 
-
 def is_world_cup_market(market: dict[str, Any]) -> bool:
     event_slug = str(market.get("_event_slug") or market.get("slug") or "").lower()
     text = " ".join(
@@ -286,8 +213,6 @@ def is_world_cup_market(market: dict[str, Any]) -> bool:
         for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
     ).lower()
     return event_slug.startswith("fifwc-") or "world cup" in text or "fifa world cup" in text
-
-
 
 def token_ids_from_market(market: dict[str, Any]) -> list[str]:
     token_ids = parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
@@ -310,7 +235,6 @@ def token_ids_from_market(market: dict[str, Any]) -> list[str]:
         return ids
     return []
 
-
 def outcomes_from_market(market: dict[str, Any]) -> list[str]:
     outcomes = parse_json_list(market.get("outcomes"))
     if outcomes:
@@ -331,7 +255,6 @@ def outcomes_from_market(market: dict[str, Any]) -> list[str]:
         return parsed
     return []
 
-
 def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
     outcomes = outcomes_from_market(market)
     # Accept "Any Other Score" variants
@@ -339,14 +262,13 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
         return True
     # Count score-like outcomes (e.g. "1-0")
     score_like = sum(1 for outcome in outcomes if SCORE_OUTCOME_RE.search(outcome))
-    if score_like >= MIN_SCORE_OUTCOMES:
+    if score_like >= 3:
         return True
     # Handle binary markets where each score is a separate YES/NO market and the question contains the score
     question = str(market.get("question") or "")
     if {o.lower() for o in outcomes} >= {"yes", "no"} and SCORE_OUTCOME_RE.search(question):
         return True
     return False
-
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
     sports_market_type = str(market.get("sportsMarketType") or market.get("sports_market_type") or "").lower()
@@ -363,7 +285,6 @@ def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
     score_in_market_text = SCORE_OUTCOME_RE.search(text) is not None
     return is_world_cup_market(market) and (text_match or score_in_market_text or has_exact_score_outcomes(market))
 
-
 def as_list_payload(data: Any, key: str) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -376,7 +297,6 @@ def as_list_payload(data: Any, key: str) -> list[dict[str, Any]]:
         if key == "markets" and (data.get("conditionId") or data.get("condition_id") or data.get("slug")):
             return [data]
     return []
-
 
 def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
     market_slug = slug_from_value(slug)
@@ -403,13 +323,11 @@ def fetch_market_by_slug(slug: str) -> dict[str, Any] | None:
             return nested[0] if nested else None
     return None
 
-
 def looks_like_market(data: dict[str, Any]) -> bool:
     return bool(
         token_ids_from_market(data)
         or (outcomes_from_market(data) and (data.get("conditionId") or data.get("condition_id") or data.get("slug")))
     )
-
 
 def extract_nested_markets(data: Any) -> list[dict[str, Any]]:
     markets: list[dict[str, Any]] = []
@@ -425,7 +343,6 @@ def extract_nested_markets(data: Any) -> list[dict[str, Any]]:
                 markets.extend(extract_nested_markets(nested))
     return markets
 
-
 def fetch_sports_markets(slug: str) -> list[dict[str, Any]]:
     sports_slug = sports_slug_from_value(slug)
     event_slug = slug_from_value(slug)
@@ -439,103 +356,6 @@ def fetch_sports_markets(slug: str) -> list[dict[str, Any]]:
         log.info("Fetched %s nested sports market(s) for %s", len(markets), sports_slug)
     return markets
 
-
-def related_exact_score_market_slugs(event_slug: str) -> list[str]:
-    """Return known companion market slugs for sports exact-score tabs.
-
-    Polymarket's match page can show an Exact Score tab that is not present in
-    the base /events?slug=<match> response. For the World Cup sports pages,
-    that tab is commonly exposed as the companion "-more-markets" market slug.
-    """
-    normalized = slug_from_value(event_slug)
-    candidates = [normalized]
-    if not normalized.endswith("-more-markets"):
-        candidates.append(f"{normalized}-more-markets")
-    return candidates
-
-
-def add_related_market(markets: list[dict[str, Any]], market: dict[str, Any] | None, event_slug: str) -> None:
-    if not market:
-        return
-    market_with_event = {**market, "_event_slug": event_slug}
-    if is_exact_score_world_cup_market(market_with_event):
-        markets.append(market_with_event)
-
-
-def direct_scoreline_market_slugs(event_slug: str, score: str) -> list[str]:
-    normalized = slug_from_value(event_slug)
-    normalized_score = score.replace("–", "-").replace(" ", "")
-    return [
-        f"{normalized}-{normalized_score}",
-        f"{normalized}-exact-score-{normalized_score}",
-        f"{normalized}-correct-score-{normalized_score}",
-    ]
-
-
-def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
-    markets: list[dict[str, Any]] = []
-    normalized = slug_from_value(event_slug)
-    for score in SCORE_SEARCH_TERMS:
-        for direct_slug in direct_scoreline_market_slugs(normalized, score):
-            add_related_market(markets, fetch_market_by_slug(direct_slug), normalized)
-
-        for market in public_search_markets(f"{normalized} {score}"):
-            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
-                add_related_market(markets, market, normalized)
-
-        payload = gamma_get(
-            "/markets",
-            search=f"{normalized} {score}",
-            active="true",
-            closed="false",
-            limit=20,
-        )
-        for market in as_list_payload(payload, "markets"):
-            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
-                add_related_market(markets, market, normalized)
-    return markets
-
-
-def dedupe_markets(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for market in markets:
-        key = str(market.get("conditionId") or market.get("condition_id") or market.get("slug") or id(market))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(market)
-    return deduped
-
-
-def fetch_related_exact_score_markets(event_slug: str) -> list[dict[str, Any]]:
-    markets: list[dict[str, Any]] = []
-    for market_slug in related_exact_score_market_slugs(event_slug):
-        add_related_market(markets, fetch_market_by_slug(market_slug), event_slug)
-    markets.extend(search_scoreline_markets(event_slug))
-    markets = dedupe_markets(markets)
-    if markets:
-        log.info("Fetched %s related exact-score market(s) for event slug: %s", len(markets), event_slug)
-    return markets
-
-
-def fetch_event_markets_from_public_search(event_slug: str) -> list[dict[str, Any]]:
-    normalized = slug_from_value(event_slug).lower()
-    tokens = [token for token in normalized.replace("fifwc-", "").split("-") if token and not token.isdigit()]
-    queries = tuple(dict.fromkeys([normalized, " ".join(tokens[:2]), *tokens[:2]]))
-    markets: list[dict[str, Any]] = []
-    for query in queries:
-        for event in public_search_events(query):
-            found_slug = str(event.get("slug") or "").lower()
-            if not found_slug.startswith(normalized):
-                continue
-            for market in event.get("markets") or []:
-                if isinstance(market, dict):
-                    market["_event_slug"] = event.get("slug") or normalized
-                    add_related_market(markets, market, normalized)
-    return dedupe_markets(markets)
-
-
 def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
     sports_markets = fetch_sports_markets(slug)
     if sports_markets:
@@ -544,15 +364,6 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
             return sports_markets
 
     event_slug = slug_from_value(slug)
-    public_search_markets_found = fetch_event_markets_from_public_search(event_slug)
-    if public_search_markets_found:
-        log.info("Fetched %s exact-score market(s) from Gamma public-search for event slug: %s", len(public_search_markets_found), event_slug)
-        return public_search_markets_found
-
-    related_markets = fetch_related_exact_score_markets(event_slug)
-    if related_markets:
-        return related_markets
-
     event_payloads = (
         gamma_get("/events", slug=event_slug),
         gamma_get(f"/events/slug/{event_slug}"),
@@ -575,53 +386,6 @@ def fetch_event_markets(slug: str) -> list[dict[str, Any]]:
         log.warning("No nested markets found for match/event slug: %s", event_slug)
     return markets
 
-
-def search_match_events() -> list[dict[str, Any]]:
-    events = fetch_tag_events()
-    if not events:
-        events = public_search_events(SEARCH_QUERY)
-    if not events:
-        data = gamma_get("/events", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-        events = as_list_payload(data, "events")
-    upcoming_events: list[tuple[datetime, dict[str, Any]]] = []
-    start, _ = local_day_window_utc()
-    for event in events:
-        slug = str(event.get("slug") or "")
-        title = str(event.get("title") or "")
-        if not slug.lower().startswith("fifwc-") and "world cup" not in title.lower():
-            continue
-        event_dt = market_datetime({**event, "_event_slug": slug})
-        if event_dt is None or event_dt < start:
-            continue
-        upcoming_events.append((event_dt, event))
-    upcoming_events.sort(key=lambda item: item[0])
-    return [event for _, event in upcoming_events[:UPCOMING_MATCHES]]
-
-
-def search_exact_score_markets() -> list[dict[str, Any]]:
-    markets: list[dict[str, Any]] = []
-    for event in search_match_events():
-        slug = str(event.get("slug") or "")
-        title = str(event.get("title") or "")
-        event_dt_raw = event.get("endDate") or event.get("endDateIso") or event.get("startDate")
-        for market in event.get("markets") or []:
-            market["_event_slug"] = slug
-            market["_event_title"] = title
-            if event_dt_raw and not any(market.get(key) for key in ("endDate", "endDateIso", "startDate")):
-                market["endDate"] = event_dt_raw
-            if is_exact_score_world_cup_market(market) and is_upcoming_market(market):
-                markets.append(market)
-
-    if markets:
-        return markets
-
-    found = public_search_markets(SEARCH_QUERY)
-    if not found:
-        data = gamma_get("/markets", search=SEARCH_QUERY, active="true", closed="false", limit=MAX_MARKETS * 10)
-        found = as_list_payload(data, "markets")
-    return [m for m in found if is_exact_score_world_cup_market(m) and is_upcoming_market(m)]
-
-
 def collect_markets() -> list[dict[str, Any]]:
     markets: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -637,11 +401,8 @@ def collect_markets() -> list[dict[str, Any]]:
     for event_slug in [*MATCH_SLUGS, *EVENT_SLUGS]:
         candidates.extend(fetch_event_markets(event_slug))
 
-    if not candidates:
-        candidates.extend(search_exact_score_markets())
-
     if candidates:
-        log.info("Scanning %s candidate market(s) from configured/discovered World Cup match sources", len(candidates))
+        log.info("Scanning %s candidate market(s) from configured World Cup market sources", len(candidates))
 
     for market in candidates:
         key = market.get("conditionId") or market.get("condition_id") or market.get("slug") or ""
@@ -658,15 +419,12 @@ def collect_markets() -> list[dict[str, Any]]:
             continue
         markets.append(market)
         seen.add(key)
-        if len(markets) >= MAX_MARKETS:
-            break
 
     if not markets:
-        log.debug("No upcoming World Cup exact-score CLOB markets found after filtering")
+        log.debug("No configured World Cup exact-score CLOB markets found after filtering")
     else:
-        log.info("Found %s upcoming World Cup exact-score market(s)", len(markets))
+        log.info("Found %s configured World Cup exact-score market(s)", len(markets))
     return markets
-
 
 def parse_json_list(raw: Any) -> list[str]:
     if isinstance(raw, list):
@@ -679,7 +437,6 @@ def parse_json_list(raw: Any) -> list[str]:
         except json.JSONDecodeError:
             return [part.strip() for part in raw.split(",") if part.strip()]
     return []
-
 
 def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
     outcomes = outcomes_from_market(market)
@@ -696,7 +453,6 @@ def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
         pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes"]
     return pairs[:MAX_OUTCOMES_PER_MARKET]
 
-
 def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
     raw_levels = book.get(side_name) if isinstance(book, dict) else getattr(book, side_name, None)
     levels: list[tuple[float, float]] = []
@@ -706,7 +462,6 @@ def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
         if price is not None:
             levels.append((float(price), float(size or 0)))
     return levels
-
 
 def best_bid_ask(client: ClobClient | None, token_id: str) -> tuple[float | None, float | None]:
     if client is None or DRY_RUN:
@@ -721,13 +476,11 @@ def best_bid_ask(client: ClobClient | None, token_id: str) -> tuple[float | None
     best_ask = min((price for price, _ in asks), default=None)
     return best_bid, best_ask
 
-
 def spread_ratio(client: ClobClient | None, token_id: str) -> tuple[float | None, float | None, float | None]:
     bid, ask = best_bid_ask(client, token_id)
     if bid is None or ask is None or bid <= 0:
         return bid, ask, None
     return bid, ask, ask / bid
-
 
 def tick_size(client: ClobClient | None, token_id: str, market: dict[str, Any]) -> float:
     for key in ("minimumTickSize", "minimum_tick_size", "minTickSize", "tickSize"):
@@ -743,10 +496,8 @@ def tick_size(client: ClobClient | None, token_id: str, market: dict[str, Any]) 
 
     return 0.001 if DRY_RUN else 0.01
 
-
 def snap_price(price: float, tick: float) -> float:
     return round(math.ceil(round(price / tick, 10)) * tick, 10)
-
 
 def open_buy_order_id(client: ClobClient | None, condition_id: str, token_id: str) -> str | None:
     if client is None or DRY_RUN or not SKIP_EXISTING:
@@ -757,13 +508,11 @@ def open_buy_order_id(client: ClobClient | None, condition_id: str, token_id: st
             return order.get("id") or order.get("orderID")
     return None
 
-
 def order_is_open(client: ClobClient | None, condition_id: str, order_id: str) -> bool:
     if client is None or DRY_RUN:
         return True
     orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     return any((order.get("id") or order.get("orderID")) == order_id for order in orders)
-
 
 def get_filled_shares(client: ClobClient | None, order_id: str) -> float:
     if client is None or DRY_RUN:
@@ -774,7 +523,6 @@ def get_filled_shares(client: ClobClient | None, order_id: str) -> float:
             if details.get(field) is not None:
                 return float(details[field])
     return 0.0
-
 
 def cancel_order(client: ClobClient | None, order_id: str, label: str) -> bool:
     if client is None or DRY_RUN:
@@ -787,7 +535,6 @@ def cancel_order(client: ClobClient | None, order_id: str, label: str) -> bool:
     except Exception as exc:
         log.warning("Cancel failed for %s | order_id=%s | %s", label, order_id, exc)
         return False
-
 
 def place_order(client: ClobClient | None, token_id: str, label: str, price: float, size: float, side: Side) -> str | None:
     side_name = "BUY" if side == Side.BUY else "SELL"
@@ -809,11 +556,9 @@ def place_order(client: ClobClient | None, token_id: str, label: str, price: flo
     log.info("LIMIT %s placed %s | price=$%.4f | size=%s | order_id=%s", side_name, label, price, size, order_id)
     return order_id
 
-
 def place_take_profit(client: ClobClient | None, market: dict[str, Any], token_id: str, label: str, entry_price: float, shares: float) -> str | None:
     sell_price = snap_price(entry_price * TAKE_PROFIT_MULTIPLIER, tick_size(client, token_id, market))
     return place_order(client, token_id, f"TP {label}", sell_price, shares, Side.SELL)
-
 
 def data_get(path: str, **params: Any) -> Any:
     try:
@@ -829,7 +574,6 @@ def data_get(path: str, **params: Any) -> Any:
         log.error("Data API request failed for %s with %s: %s", path, params, exc)
         return []
 
-
 def as_float(raw: Any, default: float = 0.0) -> float:
     try:
         if raw is None:
@@ -838,20 +582,17 @@ def as_float(raw: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-
 def account_positions(wallet: str) -> list[dict[str, Any]]:
     if not wallet:
         return []
     payload = data_get("/positions", user=wallet, limit=500)
     return payload if isinstance(payload, list) else []
 
-
 def position_token_id(position: dict[str, Any]) -> str:
     for key in ("asset", "assetId", "asset_id", "tokenId", "token_id"):
         if position.get(key):
             return str(position[key]).strip()
     return ""
-
 
 def position_size(position: dict[str, Any]) -> float:
     for key in ("size", "shares", "balance", "quantity"):
@@ -860,7 +601,6 @@ def position_size(position: dict[str, Any]) -> float:
             return size
     return 0.0
 
-
 def position_entry_price(position: dict[str, Any]) -> float:
     for key in ("avgPrice", "avg_price", "averagePrice", "average_price", "price"):
         price = as_float(position.get(key))
@@ -868,13 +608,11 @@ def position_entry_price(position: dict[str, Any]) -> float:
             return price
     return 0.0
 
-
 def position_market_slug(position: dict[str, Any]) -> str:
     for key in ("marketSlug", "market_slug", "slug"):
         if position.get(key):
             return str(position[key]).strip()
     return ""
-
 
 def is_world_cup_position(position: dict[str, Any]) -> bool:
     text = " ".join(
@@ -892,22 +630,27 @@ def is_world_cup_position(position: dict[str, Any]) -> bool:
     ).lower()
     return "world cup" in text or "fifa world cup" in text or "fifwc-" in text
 
+def order_size(order: dict[str, Any]) -> float:
+    for key in ("size", "original_size", "originalSize", "remaining_size", "remainingSize"):
+        size = as_float(order.get(key))
+        if size > 0:
+            return size
+    return 0.0
 
-def count_open_sell_orders(client: ClobClient | None, condition_id: str, token_id: str) -> int:
+def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
     if client is None or DRY_RUN:
-        return 0
+        return 0.0
     try:
         orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     except Exception as exc:
         log.warning("Open SELL check failed for %s: %s", token_id, exc)
-        return 0
+        return 0.0
     return sum(
-        1
+        order_size(order)
         for order in orders
         if str(order.get("asset_id") or order.get("assetId") or "") == token_id
         and str(order.get("side", "")).upper() == "SELL"
     )
-
 
 def tranche_sizes(shares: float, tranches: int) -> list[float]:
     if tranches <= 1:
@@ -920,7 +663,6 @@ def tranche_sizes(shares: float, tranches: int) -> list[float]:
         return [float(size) for size in sizes if size > 0]
     split = shares / tranches
     return [split for _ in range(tranches)]
-
 
 def place_position_sell_tranches(
     client: ClobClient | None,
@@ -935,24 +677,35 @@ def place_position_sell_tranches(
         multipliers.extend([multipliers[-1]] * (3 - len(multipliers)))
     sizes = tranche_sizes(shares, 3)
     tick = tick_size(client, token_id, market)
+    _, best_ask, _ = spread_ratio(client, token_id)
     placed: list[str] = []
     log.info(
-        "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f",
+        "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f | best_ask=%s",
         label,
         shares,
         entry_price,
         "/".join(f"{m:g}x" for m in multipliers[: len(sizes)]),
         POSITION_TP_CAP,
+        f"${best_ask:.4f}" if best_ask is not None else "n/a",
     )
     for idx, (size, multiplier) in enumerate(zip(sizes, multipliers, strict=False), 1):
-        price = snap_price(min(entry_price * multiplier, POSITION_TP_CAP), tick)
+        target_price = min(entry_price * multiplier, POSITION_TP_CAP)
+        if best_ask is not None and best_ask > target_price:
+            log.info(
+                "Raising %s TP%s from $%.4f to best ask $%.4f",
+                label,
+                idx,
+                target_price,
+                best_ask,
+            )
+            target_price = best_ask
+        price = snap_price(target_price, tick)
         order_id = place_order(client, token_id, f"{label}-TP{idx}-{multiplier:g}x", price, size, Side.SELL)
         if order_id:
             placed.append(order_id)
     return placed
 
-
-def monitor_world_cup_positions(client: ClobClient | None, protected: set[str]) -> None:
+def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, float]) -> None:
     if not POSITION_MONITOR:
         return
     if DRY_RUN and not POSITION_WALLET:
@@ -981,16 +734,20 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: set[str]) 
             market = {"conditionId": condition_id, "question": position.get("title") or position.get("market") or market_slug}
         condition_id = str(market.get("conditionId") or market.get("condition_id") or condition_id)
         key = f"{condition_id}:{token_id}:position-tp"
-        if key in protected:
-            continue
-        if count_open_sell_orders(client, condition_id, token_id) > 0:
-            log.info("Open SELL order(s) already exist for World Cup position %s; skipping duplicate TP placement.", market_slug)
-            protected.add(key)
+        covered_shares = max(open_sell_order_size(client, condition_id, token_id), protected.get(key, 0.0))
+        newly_bought_shares = shares - covered_shares
+        if newly_bought_shares < POSITION_MIN_NEW_SHARES:
+            log.info(
+                "World Cup position %s has %.4g uncovered new share(s), below %.4g minimum; skipping TP placement.",
+                market_slug or token_id,
+                max(newly_bought_shares, 0.0),
+                POSITION_MIN_NEW_SHARES,
+            )
+            protected[key] = min(shares, covered_shares)
             continue
         label = str(position.get("title") or position.get("market") or market.get("question") or market_slug)
-        if place_position_sell_tranches(client, market, token_id, label, shares, entry_price):
-            protected.add(key)
-
+        if place_position_sell_tranches(client, market, token_id, label, newly_bought_shares, entry_price):
+            protected[key] = covered_shares + newly_bought_shares
 
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
@@ -1024,7 +781,6 @@ def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]]
                 pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price}
                 log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid, ask, ratio)
 
-
 def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for order_id, order in list(pending.items()):
         label = order["label"]
@@ -1051,13 +807,11 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
             if cancel_order(client, order_id, label):
                 pending.pop(order_id, None)
 
-
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | upcoming_matches=%s | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
+        "Mode=%s | configured market sources only | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
-        UPCOMING_MATCHES,
         SPREAD_RATIO_MIN,
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
@@ -1066,7 +820,7 @@ def main() -> None:
     client = build_client()
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
-    protected_positions: set[str] = set()
+    protected_positions: dict[str, float] = {}
 
     while True:
         monitor_world_cup_positions(client, protected_positions)
