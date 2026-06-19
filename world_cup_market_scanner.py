@@ -40,7 +40,6 @@ SCANNER_SCORES = [
 ]
 
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
-FIFWC_MATCH_SLUG_RE = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -140,19 +139,15 @@ def fetch_tag_events(tag_id: str = SCANNER_TAG_ID, page_size: int = 100) -> list
 
 
 def upcoming_world_cup_events(limit: int = SCANNER_MATCHES) -> list[dict[str, Any]]:
-    now = datetime.now(UTC)
+    start, _ = local_day_window_utc()
     upcoming: list[tuple[datetime, dict[str, Any]]] = []
     for event in fetch_tag_events():
         slug = str(event.get("slug") or "")
         title = str(event.get("title") or "")
-        title_lower = title.lower()
-        is_match_slug = FIFWC_MATCH_SLUG_RE.fullmatch(slug) is not None
-        if not is_match_slug and "world cup" not in title_lower:
-            continue
-        if "player prop" in title_lower or "player-prop" in slug.lower():
+        if not slug.lower().startswith("fifwc-") and "world cup" not in title.lower():
             continue
         event_dt = event_datetime(event)
-        if event_dt is None or event_dt < now:
+        if event_dt is None or event_dt < start:
             continue
         upcoming.append((event_dt, event))
     upcoming.sort(key=lambda item: item[0])
