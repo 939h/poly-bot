@@ -26,7 +26,7 @@ SCANNER_ENABLED = os.getenv("WORLD_CUP_SCANNER_ENABLED", "true").lower() == "tru
 SCANNER_TAG_ID = os.getenv("WORLD_CUP_SCANNER_TAG_ID", "102232").strip()
 SCANNER_MATCHES = int(os.getenv("WORLD_CUP_SCANNER_MATCHES", "1"))
 SCANNER_SCORE_MAX = int(os.getenv("WORLD_CUP_SCANNER_SCORE_MAX", "5"))
-SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
+SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
 SCANNER_SCORES = [
     score.strip().replace("–", "-").replace(" ", "")
@@ -140,7 +140,8 @@ def upcoming_world_cup_events(limit: int = SCANNER_MATCHES) -> list[dict[str, An
 def scanner_scores() -> list[str]:
     if SCANNER_SCORES:
         return SCANNER_SCORES
-    return [f"{home}-{away}" for home in range(SCANNER_SCORE_MAX + 1) for away in range(SCANNER_SCORE_MAX + 1)]
+    log.warning("WORLD_CUP_SCANNER_SCORES is empty; scanner will not expand every score automatically.")
+    return []
 
 
 def exact_score_market_slug(event_slug: str, score: str) -> str:
