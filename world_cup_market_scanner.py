@@ -26,11 +26,16 @@ SCANNER_ENABLED = os.getenv("WORLD_CUP_SCANNER_ENABLED", "true").lower() == "tru
 SCANNER_TAG_ID = os.getenv("WORLD_CUP_SCANNER_TAG_ID", "102232").strip()
 SCANNER_MATCHES = int(os.getenv("WORLD_CUP_SCANNER_MATCHES", "1"))
 SCANNER_SCORE_MAX = int(os.getenv("WORLD_CUP_SCANNER_SCORE_MAX", "5"))
-SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
+SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
+SCANNER_SCORES_RAW = (
+    os.getenv("WORLD_CUP_SCANNER_SCORES", "").strip()
+    or os.getenv("WORLD_CUP_TARGET_SCORES", "").strip()
+    or os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").strip()
+)
 SCANNER_SCORES = [
     score.strip().replace("–", "-").replace(" ", "")
-    for score in os.getenv("WORLD_CUP_SCANNER_SCORES", "").split(",")
+    for score in SCANNER_SCORES_RAW.split(",")
     if score.strip()
 ]
 
@@ -104,6 +109,18 @@ def event_datetime(event: dict[str, Any]) -> datetime | None:
     return event_date_from_slug(str(event.get("slug") or ""))
 
 
+def local_time_label(dt: datetime | None) -> str:
+    if dt is None:
+        return "kickoff=n/a"
+    sign = "+" if SCANNER_DAY_TZ_OFFSET >= 0 else "-"
+    local_dt = dt.astimezone(UTC) + timedelta(hours=SCANNER_DAY_TZ_OFFSET)
+    return f"{local_dt:%Y-%m-%d %H:%M} UTC{sign}{abs(SCANNER_DAY_TZ_OFFSET)}"
+
+
+def event_label(event: dict[str, Any]) -> str:
+    return str(event.get("title") or event.get("name") or event.get("slug") or "unknown match")
+
+
 def fetch_tag_events(tag_id: str = SCANNER_TAG_ID, page_size: int = 100) -> list[dict[str, Any]]:
     if not tag_id:
         return []
@@ -140,7 +157,10 @@ def upcoming_world_cup_events(limit: int = SCANNER_MATCHES) -> list[dict[str, An
 def scanner_scores() -> list[str]:
     if SCANNER_SCORES:
         return SCANNER_SCORES
-    return [f"{home}-{away}" for home in range(SCANNER_SCORE_MAX + 1) for away in range(SCANNER_SCORE_MAX + 1)]
+    log.warning(
+        "No target scores configured; set WORLD_CUP_TARGET_SCORES=1-0,2-1 to scan/place only those scores."
+    )
+    return []
 
 
 def exact_score_market_slug(event_slug: str, score: str) -> str:
@@ -170,10 +190,16 @@ def scan_world_cup_exact_score_markets(limit: int = SCANNER_MATCHES) -> list[dic
 
     markets: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for event in upcoming_world_cup_events(limit):
+    events = upcoming_world_cup_events(limit)
+    event_summaries: list[str] = []
+    for event in events:
         event_slug = str(event.get("slug") or "")
         if not event_slug:
             continue
+        label = event_label(event)
+        kickoff = event_datetime(event)
+        event_summaries.append(f"{label} ({local_time_label(kickoff)})")
+        log.info("World Cup scanner upcoming match: %s | %s", label, local_time_label(kickoff))
         for market_slug in candidate_market_slugs(event_slug):
             market = fetch_market_by_slug(market_slug)
             if not market:
@@ -187,7 +213,12 @@ def scan_world_cup_exact_score_markets(limit: int = SCANNER_MATCHES) -> list[dic
             if event.get("endDate") and not market.get("endDate"):
                 market["endDate"] = event.get("endDate")
             markets.append(market)
-    log.info("World Cup scanner found %s exact-score market(s) across %s upcoming match(es)", len(markets), limit)
+    log.info(
+        "World Cup scanner found %s exact-score market(s) across %s upcoming match(es): %s",
+        len(markets),
+        len(events),
+        "; ".join(event_summaries) if event_summaries else "none",
+    )
     return markets
 
 
