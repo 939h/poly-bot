@@ -24,7 +24,7 @@ USER_AGENT = "poly-bot/world-cup-market-scanner (+https://github.com/cemini23/wo
 
 SCANNER_ENABLED = os.getenv("WORLD_CUP_SCANNER_ENABLED", "true").lower() == "true"
 SCANNER_TAG_ID = os.getenv("WORLD_CUP_SCANNER_TAG_ID", "102232").strip()
-SCANNER_MATCHES = int(os.getenv("WORLD_CUP_SCANNER_MATCHES", "4"))
+SCANNER_MATCHES = int(os.getenv("WORLD_CUP_SCANNER_MATCHES", "1"))
 SCANNER_SCORE_MAX = int(os.getenv("WORLD_CUP_SCANNER_SCORE_MAX", "5"))
 SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
