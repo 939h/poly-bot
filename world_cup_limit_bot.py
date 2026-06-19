@@ -17,6 +17,10 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_ORDER_SIZE=5
     WORLD_CUP_SPREAD_RATIO_MIN=1.8
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
+    WORLD_CUP_POSITION_MONITOR=true          # detect existing World Cup positions and place TP sell tranches
+    WORLD_CUP_POSITION_WALLET=0x...          # optional; defaults to POLY_FUNDER_ADDRESS
+    WORLD_CUP_POSITION_TP_MULTIPLIERS=20,60,150
+    WORLD_CUP_POSITION_TP_CAP=0.90
     WORLD_CUP_UPCOMING_MATCHES=3              # scan exact-score markets for the next 3 matches
     WORLD_CUP_MAX_MARKETS=5
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
@@ -46,6 +50,7 @@ load_dotenv()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 USER_AGENT = "poly-bot/world-cup-limit-bot (+https://github.com/cemini23/world-cup-bot scanner-compatible)"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -58,6 +63,14 @@ OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_O
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
 TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
+POSITION_MONITOR = os.getenv("WORLD_CUP_POSITION_MONITOR", "true").lower() == "true"
+POSITION_WALLET = os.getenv("WORLD_CUP_POSITION_WALLET", os.getenv("POLY_FUNDER_ADDRESS", "")).strip()
+POSITION_TP_MULTIPLIERS = [
+    float(s.strip())
+    for s in os.getenv("WORLD_CUP_POSITION_TP_MULTIPLIERS", "20,60,150").split(",")
+    if s.strip()
+]
+POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
 UPCOMING_MATCHES = int(os.getenv("WORLD_CUP_UPCOMING_MATCHES", "3"))
 MAX_MARKETS = int(os.getenv("WORLD_CUP_MAX_MARKETS", str(UPCOMING_MATCHES)))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
@@ -73,7 +86,9 @@ SCORE_SEARCH_TERMS = [
     if term.strip()
 ]
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
-SCORE_OUTCOME_RE = re.compile(r"\b\d+\s*[-–]\s*\d+\b")
+# Match score lines like "0-0", "0 - 0", or "10–9" without treating the
+# month/day portion of dates like "2026-06-18" as a score.
+SCORE_OUTCOME_RE = re.compile(r"(?<![\d.][-–])(?<!\d{4}[-–])\b\d{1,2}\s*[-–]\s*\d{1,2}\b(?![-–]\d)(?!\.\d)")
 # Match exact/correct score variants with optional punctuation (handles "exact-score", "Exact Score", "exact.score", etc.)
 EXACT_KW_RE = re.compile(r"exact.?score|correct.?score", re.I)
 
@@ -236,7 +251,18 @@ def parse_dt(raw: Any) -> datetime | None:
 
 
 def market_datetime(market: dict[str, Any]) -> datetime | None:
-    for key in ("startDateIso", "start_date_iso", "startDate", "endDateIso", "end_date_iso", "endDate"):
+    # Sports markets often use startDate/startDateIso for market creation or
+    # listing dates, while gameStartTime/endDate carry the actual fixture time.
+    for key in (
+        "gameStartTime",
+        "game_start_time",
+        "endDateIso",
+        "end_date_iso",
+        "endDate",
+        "startDateIso",
+        "start_date_iso",
+        "startDate",
+    ):
         market_dt = parse_dt(market.get(key))
         if market_dt is not None:
             return market_dt
@@ -323,6 +349,9 @@ def has_exact_score_outcomes(market: dict[str, Any]) -> bool:
 
 
 def is_exact_score_world_cup_market(market: dict[str, Any]) -> bool:
+    sports_market_type = str(market.get("sportsMarketType") or market.get("sports_market_type") or "").lower()
+    if sports_market_type and "exact_score" not in sports_market_type and "correct_score" not in sports_market_type:
+        return False
     text = " ".join(
         str(market.get(k, ""))
         for k in ("question", "slug", "description", "groupItemTitle", "_event_title")
@@ -451,7 +480,8 @@ def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
             add_related_market(markets, fetch_market_by_slug(direct_slug), normalized)
 
         for market in public_search_markets(f"{normalized} {score}"):
-            add_related_market(markets, market, normalized)
+            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
+                add_related_market(markets, market, normalized)
 
         payload = gamma_get(
             "/markets",
@@ -461,7 +491,8 @@ def search_scoreline_markets(event_slug: str) -> list[dict[str, Any]]:
             limit=20,
         )
         for market in as_list_payload(payload, "markets"):
-            add_related_market(markets, market, normalized)
+            if str(market.get("slug") or "").lower().startswith(normalized.lower()):
+                add_related_market(markets, market, normalized)
     return markets
 
 
@@ -784,6 +815,183 @@ def place_take_profit(client: ClobClient | None, market: dict[str, Any], token_i
     return place_order(client, token_id, f"TP {label}", sell_price, shares, Side.SELL)
 
 
+def data_get(path: str, **params: Any) -> Any:
+    try:
+        response = requests.get(
+            f"{DATA_API}{path}",
+            params=params,
+            timeout=15,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        log.error("Data API request failed for %s with %s: %s", path, params, exc)
+        return []
+
+
+def as_float(raw: Any, default: float = 0.0) -> float:
+    try:
+        if raw is None:
+            return default
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def account_positions(wallet: str) -> list[dict[str, Any]]:
+    if not wallet:
+        return []
+    payload = data_get("/positions", user=wallet, limit=500)
+    return payload if isinstance(payload, list) else []
+
+
+def position_token_id(position: dict[str, Any]) -> str:
+    for key in ("asset", "assetId", "asset_id", "tokenId", "token_id"):
+        if position.get(key):
+            return str(position[key]).strip()
+    return ""
+
+
+def position_size(position: dict[str, Any]) -> float:
+    for key in ("size", "shares", "balance", "quantity"):
+        size = as_float(position.get(key))
+        if size > 0:
+            return size
+    return 0.0
+
+
+def position_entry_price(position: dict[str, Any]) -> float:
+    for key in ("avgPrice", "avg_price", "averagePrice", "average_price", "price"):
+        price = as_float(position.get(key))
+        if price > 0:
+            return price
+    return 0.0
+
+
+def position_market_slug(position: dict[str, Any]) -> str:
+    for key in ("marketSlug", "market_slug", "slug"):
+        if position.get(key):
+            return str(position[key]).strip()
+    return ""
+
+
+def is_world_cup_position(position: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(position.get(key, ""))
+        for key in (
+            "title",
+            "eventTitle",
+            "eventSlug",
+            "market",
+            "marketSlug",
+            "slug",
+            "conditionId",
+            "outcome",
+        )
+    ).lower()
+    return "world cup" in text or "fifa world cup" in text or "fifwc-" in text
+
+
+def count_open_sell_orders(client: ClobClient | None, condition_id: str, token_id: str) -> int:
+    if client is None or DRY_RUN:
+        return 0
+    try:
+        orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
+    except Exception as exc:
+        log.warning("Open SELL check failed for %s: %s", token_id, exc)
+        return 0
+    return sum(
+        1
+        for order in orders
+        if str(order.get("asset_id") or order.get("assetId") or "") == token_id
+        and str(order.get("side", "")).upper() == "SELL"
+    )
+
+
+def tranche_sizes(shares: float, tranches: int) -> list[float]:
+    if tranches <= 1:
+        return [shares]
+    rounded_shares = math.floor(shares)
+    if rounded_shares >= tranches:
+        first = math.floor(rounded_shares / tranches)
+        sizes = [first for _ in range(tranches - 1)]
+        sizes.append(rounded_shares - sum(sizes))
+        return [float(size) for size in sizes if size > 0]
+    split = shares / tranches
+    return [split for _ in range(tranches)]
+
+
+def place_position_sell_tranches(
+    client: ClobClient | None,
+    market: dict[str, Any],
+    token_id: str,
+    label: str,
+    shares: float,
+    entry_price: float,
+) -> list[str]:
+    multipliers = POSITION_TP_MULTIPLIERS[:3] or [20.0, 60.0, 150.0]
+    if len(multipliers) < 3:
+        multipliers.extend([multipliers[-1]] * (3 - len(multipliers)))
+    sizes = tranche_sizes(shares, 3)
+    tick = tick_size(client, token_id, market)
+    placed: list[str] = []
+    log.info(
+        "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f",
+        label,
+        shares,
+        entry_price,
+        "/".join(f"{m:g}x" for m in multipliers[: len(sizes)]),
+        POSITION_TP_CAP,
+    )
+    for idx, (size, multiplier) in enumerate(zip(sizes, multipliers, strict=False), 1):
+        price = snap_price(min(entry_price * multiplier, POSITION_TP_CAP), tick)
+        order_id = place_order(client, token_id, f"{label}-TP{idx}-{multiplier:g}x", price, size, Side.SELL)
+        if order_id:
+            placed.append(order_id)
+    return placed
+
+
+def monitor_world_cup_positions(client: ClobClient | None, protected: set[str]) -> None:
+    if not POSITION_MONITOR:
+        return
+    if DRY_RUN and not POSITION_WALLET:
+        log.info("[DRY RUN] WORLD_CUP_POSITION_WALLET/POLY_FUNDER_ADDRESS not set; skipping account position monitor.")
+        return
+    if not POSITION_WALLET:
+        log.warning("WORLD_CUP_POSITION_MONITOR=true but WORLD_CUP_POSITION_WALLET/POLY_FUNDER_ADDRESS is not set.")
+        return
+
+    for position in account_positions(POSITION_WALLET):
+        if not is_world_cup_position(position):
+            continue
+        token_id = position_token_id(position)
+        shares = position_size(position)
+        entry_price = position_entry_price(position)
+        if not token_id or shares <= 0 or entry_price <= 0:
+            log.info("Skipping World Cup position with incomplete data: %s", position)
+            continue
+        market_slug = position_market_slug(position)
+        market = fetch_market_by_slug(market_slug) if market_slug else None
+        condition_id = str(position.get("conditionId") or position.get("condition_id") or "")
+        if not market:
+            if not condition_id:
+                log.info("Skipping World Cup position without resolvable market slug/condition: %s", market_slug or token_id)
+                continue
+            market = {"conditionId": condition_id, "question": position.get("title") or position.get("market") or market_slug}
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or condition_id)
+        key = f"{condition_id}:{token_id}:position-tp"
+        if key in protected:
+            continue
+        if count_open_sell_orders(client, condition_id, token_id) > 0:
+            log.info("Open SELL order(s) already exist for World Cup position %s; skipping duplicate TP placement.", market_slug)
+            protected.add(key)
+            continue
+        label = str(position.get("title") or position.get("market") or market.get("question") or market_slug)
+        if place_position_sell_tranches(client, market, token_id, label, shares, entry_price):
+            protected.add(key)
+
+
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
@@ -858,8 +1066,10 @@ def main() -> None:
     client = build_client()
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
+    protected_positions: set[str] = set()
 
     while True:
+        monitor_world_cup_positions(client, protected_positions)
         scan_and_place(client, pending, sold)
         monitor_pending(client, pending, sold)
         if RUN_ONCE:
