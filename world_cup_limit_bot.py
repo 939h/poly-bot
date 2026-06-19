@@ -12,14 +12,14 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     # Choose your scores here. Example: only place YES orders for 1-0 and 2-1.
-    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-0,2-1  # legacy name still supported
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-1,2-2,3-3,3-2,2-3  # legacy name still supported
     WORLD_CUP_TARGET_SCORES=               # optional newer alias; overrides the legacy name when set
-    WORLD_CUP_ORDER_SIZE=10
+    WORLD_CUP_ORDER_SIZE=40
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
     WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
     WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
-    WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
-    WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # BUY orders expire/GTD 60 minutes out
+    WORLD_CUP_ENTRY_WINDOW_MINUTES=75       # stop placing new buys 60 minutes after kickoff
+    WORLD_CUP_ORDER_EXPIRATION_MINUTES=75   # BUY orders expire/GTD 60 minutes out
     WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES=130  # SELL/TP orders expire/GTD 130 minutes out
     WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
@@ -31,10 +31,10 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
     WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
-    WORLD_CUP_SCANNER_MATCHES=4
-    WORLD_CUP_SCANNER_SCORES=                 # optional alias; scanner also uses WORLD_CUP_TARGET_SCORES
+    WORLD_CUP_SCANNER_MATCHES=1
+    WORLD_CUP_SCANNER_SCORES=5                # optional alias; scanner also uses WORLD_CUP_TARGET_SCORES
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
-    WORLD_CUP_POLL_SECS=30
+    WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
 
@@ -77,7 +77,7 @@ TARGET_SCORES_RAW = (
 )
 TARGET_SCORES = parse_score_csv(TARGET_SCORES_RAW)
 OUTCOME_FILTERS = TARGET_SCORES
-ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "10")))
+ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "40")))
 BUY_LIMIT_PRICE_RAW = os.getenv("WORLD_CUP_BUY_LIMIT_PRICE", "0.003").strip()
 BUY_LIMIT_PRICE = float(BUY_LIMIT_PRICE_RAW) if BUY_LIMIT_PRICE_RAW else None
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
@@ -99,8 +99,8 @@ SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
-ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
-ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
+ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "75"))
+ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "75"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
 PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
