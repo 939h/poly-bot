@@ -28,9 +28,14 @@ SCANNER_MATCHES = int(os.getenv("WORLD_CUP_SCANNER_MATCHES", "1"))
 SCANNER_SCORE_MAX = int(os.getenv("WORLD_CUP_SCANNER_SCORE_MAX", "5"))
 SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
+SCANNER_SCORES_RAW = (
+    os.getenv("WORLD_CUP_SCANNER_SCORES", "").strip()
+    or os.getenv("WORLD_CUP_TARGET_SCORES", "").strip()
+    or os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").strip()
+)
 SCANNER_SCORES = [
     score.strip().replace("–", "-").replace(" ", "")
-    for score in os.getenv("WORLD_CUP_SCANNER_SCORES", "").split(",")
+    for score in SCANNER_SCORES_RAW.split(",")
     if score.strip()
 ]
 
@@ -140,7 +145,9 @@ def upcoming_world_cup_events(limit: int = SCANNER_MATCHES) -> list[dict[str, An
 def scanner_scores() -> list[str]:
     if SCANNER_SCORES:
         return SCANNER_SCORES
-    log.warning("WORLD_CUP_SCANNER_SCORES is empty; scanner will not expand every score automatically.")
+    log.warning(
+        "No target scores configured; set WORLD_CUP_TARGET_SCORES=1-0,2-1 to scan/place only those scores."
+    )
     return []
 
 
