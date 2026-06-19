@@ -21,6 +21,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_TP_CAP=0.90
     WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
+    WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
@@ -72,6 +73,7 @@ POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -636,6 +638,53 @@ def is_world_cup_position(position: dict[str, Any]) -> bool:
     ).lower()
     return "world cup" in text or "fifa world cup" in text or "fifwc-" in text
 
+def position_market_record(position: dict[str, Any]) -> dict[str, Any]:
+    market_slug = position_market_slug(position)
+    return {
+        "marketSlug": market_slug,
+        "conditionId": str(position.get("conditionId") or position.get("condition_id") or ""),
+        "tokenId": position_token_id(position),
+        "outcome": str(position.get("outcome") or ""),
+        "title": str(position.get("title") or position.get("market") or position.get("eventTitle") or ""),
+        "size": position_size(position),
+        "avgPrice": position_entry_price(position),
+    }
+
+def print_position_market_slugs() -> None:
+    if not POSITION_WALLET:
+        log.warning("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=true but WORLD_CUP_POSITION_WALLET/POLY_FUNDER_ADDRESS is not set.")
+        return
+
+    records = [
+        position_market_record(position)
+        for position in account_positions(POSITION_WALLET)
+        if is_world_cup_position(position) and position_size(position) > 0
+    ]
+    if not records:
+        log.info("No open World Cup positions found for wallet %s", POSITION_WALLET)
+        print("[]")
+        return
+
+    for record in records:
+        if record["marketSlug"]:
+            log.info(
+                "Detected World Cup position market slug: %s | outcome=%s | size=%s | token_id=%s | condition_id=%s",
+                record["marketSlug"],
+                record["outcome"] or "n/a",
+                record["size"],
+                record["tokenId"] or "n/a",
+                record["conditionId"] or "n/a",
+            )
+        else:
+            log.info(
+                "Detected World Cup position without market slug | outcome=%s | size=%s | token_id=%s | condition_id=%s",
+                record["outcome"] or "n/a",
+                record["size"],
+                record["tokenId"] or "n/a",
+                record["conditionId"] or "n/a",
+            )
+    print(json.dumps(records, indent=2))
+
 def order_size(order: dict[str, Any]) -> float:
     for key in ("size", "original_size", "originalSize", "remaining_size", "remainingSize"):
         size = as_float(order.get(key))
@@ -747,6 +796,13 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
             log.info("Skipping World Cup position with incomplete data: %s", position)
             continue
         market_slug = position_market_slug(position)
+        log.info(
+            "Detected World Cup position | market_slug=%s | outcome=%s | size=%s | token_id=%s",
+            market_slug or "n/a",
+            position.get("outcome") or "n/a",
+            shares,
+            token_id,
+        )
         market = fetch_market_by_slug(market_slug) if market_slug else None
         condition_id = str(position.get("conditionId") or position.get("condition_id") or "")
         if not market:
@@ -839,6 +895,10 @@ def main() -> None:
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
     )
+
+    if PRINT_POSITION_MARKET_SLUGS:
+        print_position_market_slugs()
+        return
 
     client = build_client()
     pending: dict[str, dict[str, Any]] = {}
