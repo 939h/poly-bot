@@ -22,6 +22,9 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
+    WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
+    WORLD_CUP_SCANNER_MATCHES=4
+    WORLD_CUP_SCANNER_SCORE_MAX=5              # scans 0-0 through 5-5 exact-score slug pattern
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
@@ -42,6 +45,7 @@ import requests
 from dotenv import load_dotenv
 from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderType, Side
 from py_clob_client_v2.constants import POLYGON
+from world_cup_market_scanner import scan_world_cup_exact_score_markets, scanner_enabled
 
 load_dotenv()
 
@@ -405,8 +409,11 @@ def collect_markets() -> list[dict[str, Any]]:
     for event_slug in [*MATCH_SLUGS, *EVENT_SLUGS]:
         candidates.extend(fetch_event_markets(event_slug))
 
+    if scanner_enabled():
+        candidates.extend(scan_world_cup_exact_score_markets())
+
     if candidates:
-        log.info("Scanning %s candidate market(s) from configured World Cup market sources", len(candidates))
+        log.info("Scanning %s candidate World Cup market(s)", len(candidates))
 
     for market in candidates:
         key = market.get("conditionId") or market.get("condition_id") or market.get("slug") or ""
@@ -889,8 +896,9 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | configured market sources only | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
+        "Mode=%s | configured sources + scanner=%s | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
+        "ON" if scanner_enabled() else "OFF",
         SPREAD_RATIO_MIN,
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
