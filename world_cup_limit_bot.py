@@ -19,6 +19,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_WALLET=0x...          # optional; defaults to POLY_FUNDER_ADDRESS
     WORLD_CUP_POSITION_TP_MULTIPLIERS=20,60,150
     WORLD_CUP_POSITION_TP_CAP=0.90
+    WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
@@ -63,6 +64,7 @@ POSITION_TP_MULTIPLIERS = [
     if s.strip()
 ]
 POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
+POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
@@ -628,16 +630,23 @@ def is_world_cup_position(position: dict[str, Any]) -> bool:
     ).lower()
     return "world cup" in text or "fifa world cup" in text or "fifwc-" in text
 
-def count_open_sell_orders(client: ClobClient | None, condition_id: str, token_id: str) -> int:
+def order_size(order: dict[str, Any]) -> float:
+    for key in ("size", "original_size", "originalSize", "remaining_size", "remainingSize"):
+        size = as_float(order.get(key))
+        if size > 0:
+            return size
+    return 0.0
+
+def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
     if client is None or DRY_RUN:
-        return 0
+        return 0.0
     try:
         orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     except Exception as exc:
         log.warning("Open SELL check failed for %s: %s", token_id, exc)
-        return 0
+        return 0.0
     return sum(
-        1
+        order_size(order)
         for order in orders
         if str(order.get("asset_id") or order.get("assetId") or "") == token_id
         and str(order.get("side", "")).upper() == "SELL"
@@ -668,23 +677,35 @@ def place_position_sell_tranches(
         multipliers.extend([multipliers[-1]] * (3 - len(multipliers)))
     sizes = tranche_sizes(shares, 3)
     tick = tick_size(client, token_id, market)
+    _, best_ask, _ = spread_ratio(client, token_id)
     placed: list[str] = []
     log.info(
-        "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f",
+        "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f | best_ask=%s",
         label,
         shares,
         entry_price,
         "/".join(f"{m:g}x" for m in multipliers[: len(sizes)]),
         POSITION_TP_CAP,
+        f"${best_ask:.4f}" if best_ask is not None else "n/a",
     )
     for idx, (size, multiplier) in enumerate(zip(sizes, multipliers, strict=False), 1):
-        price = snap_price(min(entry_price * multiplier, POSITION_TP_CAP), tick)
+        target_price = min(entry_price * multiplier, POSITION_TP_CAP)
+        if best_ask is not None and best_ask > target_price:
+            log.info(
+                "Raising %s TP%s from $%.4f to best ask $%.4f",
+                label,
+                idx,
+                target_price,
+                best_ask,
+            )
+            target_price = best_ask
+        price = snap_price(target_price, tick)
         order_id = place_order(client, token_id, f"{label}-TP{idx}-{multiplier:g}x", price, size, Side.SELL)
         if order_id:
             placed.append(order_id)
     return placed
 
-def monitor_world_cup_positions(client: ClobClient | None, protected: set[str]) -> None:
+def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, float]) -> None:
     if not POSITION_MONITOR:
         return
     if DRY_RUN and not POSITION_WALLET:
@@ -713,15 +734,20 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: set[str]) 
             market = {"conditionId": condition_id, "question": position.get("title") or position.get("market") or market_slug}
         condition_id = str(market.get("conditionId") or market.get("condition_id") or condition_id)
         key = f"{condition_id}:{token_id}:position-tp"
-        if key in protected:
-            continue
-        if count_open_sell_orders(client, condition_id, token_id) > 0:
-            log.info("Open SELL order(s) already exist for World Cup position %s; skipping duplicate TP placement.", market_slug)
-            protected.add(key)
+        covered_shares = max(open_sell_order_size(client, condition_id, token_id), protected.get(key, 0.0))
+        newly_bought_shares = shares - covered_shares
+        if newly_bought_shares < POSITION_MIN_NEW_SHARES:
+            log.info(
+                "World Cup position %s has %.4g uncovered new share(s), below %.4g minimum; skipping TP placement.",
+                market_slug or token_id,
+                max(newly_bought_shares, 0.0),
+                POSITION_MIN_NEW_SHARES,
+            )
+            protected[key] = min(shares, covered_shares)
             continue
         label = str(position.get("title") or position.get("market") or market.get("question") or market_slug)
-        if place_position_sell_tranches(client, market, token_id, label, shares, entry_price):
-            protected.add(key)
+        if place_position_sell_tranches(client, market, token_id, label, newly_bought_shares, entry_price):
+            protected[key] = covered_shares + newly_bought_shares
 
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
@@ -794,7 +820,7 @@ def main() -> None:
     client = build_client()
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
-    protected_positions: set[str] = set()
+    protected_positions: dict[str, float] = {}
 
     while True:
         monitor_world_cup_positions(client, protected_positions)
