@@ -89,10 +89,10 @@ POSITION_MONITOR = os.getenv("WORLD_CUP_POSITION_MONITOR", "true").lower() == "t
 POSITION_WALLET = os.getenv("WORLD_CUP_POSITION_WALLET", os.getenv("POLY_FUNDER_ADDRESS", "")).strip()
 POSITION_TP_MULTIPLIERS = [
     float(s.strip())
-    for s in os.getenv("WORLD_CUP_POSITION_TP_MULTIPLIERS", "20,60,150").split(",")
+    for s in os.getenv("WORLD_CUP_POSITION_TP_MULTIPLIERS", "20,50,150").split(",")
     if s.strip()
 ]
-POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
+POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.89"))
 POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
