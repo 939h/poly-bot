@@ -20,6 +20,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_TP_MULTIPLIERS=20,60,150
     WORLD_CUP_POSITION_TP_CAP=0.90
     WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
+    WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
     WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
@@ -65,6 +66,7 @@ POSITION_TP_MULTIPLIERS = [
 ]
 POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
 POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
+POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
@@ -545,10 +547,14 @@ def place_order(client: ClobClient | None, token_id: str, label: str, price: flo
     if client is None:
         raise RuntimeError("CLOB client is required when DRY_RUN=false")
 
-    response = client.create_and_post_order(
-        order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side),
-        order_type=OrderType.GTC,
-    )
+    try:
+        response = client.create_and_post_order(
+            order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side),
+            order_type=OrderType.GTC,
+        )
+    except Exception as exc:
+        log.error("%s failed for %s | price=$%.4f | size=%s | %s", side_name, label, price, size, exc)
+        return None
     if isinstance(response, dict) and not response.get("success", True):
         log.error("%s rejected for %s: %s", side_name, label, response.get("errorMsg", "unknown"))
         return None
@@ -652,17 +658,24 @@ def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id:
         and str(order.get("side", "")).upper() == "SELL"
     )
 
-def tranche_sizes(shares: float, tranches: int) -> list[float]:
+def tranche_sizes(shares: float, tranches: int, min_size: float = 0.0) -> list[float]:
     if tranches <= 1:
-        return [shares]
+        return [shares] if shares >= min_size else []
+
     rounded_shares = math.floor(shares)
-    if rounded_shares >= tranches:
-        first = math.floor(rounded_shares / tranches)
-        sizes = [first for _ in range(tranches - 1)]
-        sizes.append(rounded_shares - sum(sizes))
-        return [float(size) for size in sizes if size > 0]
-    split = shares / tranches
-    return [split for _ in range(tranches)]
+    if rounded_shares <= 0:
+        return []
+
+    tranche_count = tranches
+    if min_size > 0:
+        tranche_count = min(tranches, math.floor(rounded_shares / min_size))
+        if tranche_count <= 0:
+            return []
+
+    first = math.floor(rounded_shares / tranche_count)
+    sizes = [first for _ in range(tranche_count - 1)]
+    sizes.append(rounded_shares - sum(sizes))
+    return [float(size) for size in sizes if size >= min_size]
 
 def place_position_sell_tranches(
     client: ClobClient | None,
@@ -671,14 +684,23 @@ def place_position_sell_tranches(
     label: str,
     shares: float,
     entry_price: float,
-) -> list[str]:
+) -> float:
     multipliers = POSITION_TP_MULTIPLIERS[:3] or [20.0, 60.0, 150.0]
     if len(multipliers) < 3:
         multipliers.extend([multipliers[-1]] * (3 - len(multipliers)))
-    sizes = tranche_sizes(shares, 3)
+    sizes = tranche_sizes(shares, 3, POSITION_MIN_TRANCHE_SHARES)
+    if not sizes:
+        log.info(
+            "World Cup position %s has %s share(s), below minimum SELL tranche size %.4g; skipping TP placement.",
+            label,
+            shares,
+            POSITION_MIN_TRANCHE_SHARES,
+        )
+        return 0.0
+
     tick = tick_size(client, token_id, market)
     _, best_ask, _ = spread_ratio(client, token_id)
-    placed: list[str] = []
+    placed_shares = 0.0
     log.info(
         "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f | best_ask=%s",
         label,
@@ -702,8 +724,8 @@ def place_position_sell_tranches(
         price = snap_price(target_price, tick)
         order_id = place_order(client, token_id, f"{label}-TP{idx}-{multiplier:g}x", price, size, Side.SELL)
         if order_id:
-            placed.append(order_id)
-    return placed
+            placed_shares += size
+    return placed_shares
 
 def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, float]) -> None:
     if not POSITION_MONITOR:
@@ -746,8 +768,9 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
             protected[key] = min(shares, covered_shares)
             continue
         label = str(position.get("title") or position.get("market") or market.get("question") or market_slug)
-        if place_position_sell_tranches(client, market, token_id, label, newly_bought_shares, entry_price):
-            protected[key] = covered_shares + newly_bought_shares
+        placed_shares = place_position_sell_tranches(client, market, token_id, label, newly_bought_shares, entry_price)
+        if placed_shares > 0:
+            protected[key] = covered_shares + placed_shares
 
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
