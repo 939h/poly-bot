@@ -12,17 +12,14 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     # Choose your scores here. Example: only place YES orders for 1-0 and 2-1.
-    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-0,2-1  # legacy name still supported
-    WORLD_CUP_TARGET_SCORES=               # optional newer alias; overrides the legacy name when set
-    WORLD_CUP_ORDER_SIZE=10
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-1,2-2,3-3,3-2,2-3  # legacy name still supported
+    WORLD_CUP_TARGET_SCORES=1-1,2-2,3-3,3-2,2-3              # optional newer alias; overrides the legacy name when set
+    WORLD_CUP_ORDER_SIZE=20
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
-    WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
-    WORLD_CUP_BUY_UPCOMING_ENABLED=false     # allow BUY limit orders before kickoff, e.g. immediate startup mode
-    WORLD_CUP_BUY_LIVE_ENABLED=false         # allow BUY limit orders after kickoff while in the entry window
-    WORLD_CUP_PLACE_IMMEDIATE_ON_START=false  # true = first bot loop can buy upcoming matches before kickoff
+    WORLD_CUP_MAX_BEST_BID=0.04             # only place YES buys while best bid is below 2.0c
     WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
-    WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
-    WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # BUY orders expire/GTD 60 minutes out
+    WORLD_CUP_ENTRY_WINDOW_MINUTES=75       # stop placing new buys 60 minutes after kickoff
+    WORLD_CUP_ORDER_EXPIRATION_MINUTES=75   # BUY orders expire/GTD 60 minutes out
     WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES=130  # SELL/TP orders expire/GTD 130 minutes out
     WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
@@ -80,7 +77,7 @@ TARGET_SCORES_RAW = (
 )
 TARGET_SCORES = parse_score_csv(TARGET_SCORES_RAW)
 OUTCOME_FILTERS = TARGET_SCORES
-ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "0")))
+ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "20")))
 BUY_LIMIT_PRICE_RAW = os.getenv("WORLD_CUP_BUY_LIMIT_PRICE", "0.003").strip()
 BUY_LIMIT_PRICE = float(BUY_LIMIT_PRICE_RAW) if BUY_LIMIT_PRICE_RAW else None
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
@@ -100,13 +97,11 @@ POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
-MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
-BUY_UPCOMING_ENABLED = os.getenv("WORLD_CUP_BUY_UPCOMING_ENABLED", "false").lower() == "true"
-BUY_LIVE_ENABLED = os.getenv("WORLD_CUP_BUY_LIVE_ENABLED", "false").lower() == "true"
-PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "false").lower() == "true"
+MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.04"))
+PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "true").lower() == "true"
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
-ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
-ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
+ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "75"))
+ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "75"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
 PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
@@ -285,23 +280,6 @@ def market_is_in_entry_window(
             local_time_label(end),
             local_time_label(now),
         )
-        return False
-    return True
-
-def market_buy_phase(market: dict[str, Any], now: datetime | None = None) -> str:
-    kickoff = market_datetime(market)
-    if kickoff is None:
-        return "unknown"
-    now = now or datetime.now(UTC)
-    return "upcoming" if now < kickoff else "live"
-
-def market_buy_phase_enabled(market: dict[str, Any], now: datetime | None = None) -> bool:
-    phase = market_buy_phase(market, now)
-    if phase == "upcoming" and not BUY_UPCOMING_ENABLED:
-        log.info("Skipping upcoming BUYs for %s because WORLD_CUP_BUY_UPCOMING_ENABLED=false", market.get("slug"))
-        return False
-    if phase == "live" and not BUY_LIVE_ENABLED:
-        log.info("Skipping live BUYs for %s because WORLD_CUP_BUY_LIVE_ENABLED=false", market.get("slug"))
         return False
     return True
 
@@ -983,8 +961,6 @@ def scan_and_place(
     for market in collect_markets():
         if not market_is_in_entry_window(market, allow_immediate_upcoming=allow_immediate_upcoming):
             continue
-        if not market_buy_phase_enabled(market):
-            continue
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
         question = str(market.get("question") or market.get("slug"))
         for outcome, token_id in market_outcomes(market):
@@ -1053,13 +1029,11 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | configured sources + scanner=%s | target_scores=%s | immediate_on_start=%s | buy_upcoming=%s | buy_live=%s | buy_limit=%s | TP=%.2fx | size=%s",
+        "Mode=%s | configured sources + scanner=%s | target_scores=%s | immediate_on_start=%s | buy_limit=%s | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
         "ON" if scanner_enabled() else "OFF",
         ",".join(TARGET_SCORES) if TARGET_SCORES else "NONE",
         "ON" if PLACE_IMMEDIATE_ON_START else "OFF",
-        "ON" if BUY_UPCOMING_ENABLED else "OFF",
-        "ON" if BUY_LIVE_ENABLED else "OFF",
         f"${BUY_LIMIT_PRICE:.4f}" if BUY_LIMIT_PRICE is not None else f"best bid when spread>{SPREAD_RATIO_MIN:.2f}x",
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
