@@ -14,7 +14,7 @@ Polymarket World Cup Exact Score Spread Bot
     # Choose your scores here. Example: only place YES orders for 1-0 and 2-1.
     WORLD_CUP_EXACT_SCORE_OUTCOMES=1-1,2-2,3-3,3-2,2-3  # legacy name still supported
     WORLD_CUP_TARGET_SCORES=1-1,2-2,3-3,3-2,2-3              # optional newer alias; overrides the legacy name when set
-    WORLD_CUP_ORDER_SIZE=20
+    WORLD_CUP_ORDER_SIZE=0
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
     WORLD_CUP_MAX_BEST_BID=0.04             # only place YES buys while best bid is below 2.0c
     WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
@@ -77,7 +77,7 @@ TARGET_SCORES_RAW = (
 )
 TARGET_SCORES = parse_score_csv(TARGET_SCORES_RAW)
 OUTCOME_FILTERS = TARGET_SCORES
-ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "20")))
+ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "0")))
 BUY_LIMIT_PRICE_RAW = os.getenv("WORLD_CUP_BUY_LIMIT_PRICE", "0.003").strip()
 BUY_LIMIT_PRICE = float(BUY_LIMIT_PRICE_RAW) if BUY_LIMIT_PRICE_RAW else None
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
@@ -98,7 +98,7 @@ DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.04"))
-PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "true").lower() == "true"
+PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "false").lower() == "true"
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "75"))
 ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "75"))
