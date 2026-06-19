@@ -109,6 +109,18 @@ def event_datetime(event: dict[str, Any]) -> datetime | None:
     return event_date_from_slug(str(event.get("slug") or ""))
 
 
+def local_time_label(dt: datetime | None) -> str:
+    if dt is None:
+        return "kickoff=n/a"
+    sign = "+" if SCANNER_DAY_TZ_OFFSET >= 0 else "-"
+    local_dt = dt.astimezone(UTC) + timedelta(hours=SCANNER_DAY_TZ_OFFSET)
+    return f"{local_dt:%Y-%m-%d %H:%M} UTC{sign}{abs(SCANNER_DAY_TZ_OFFSET)}"
+
+
+def event_label(event: dict[str, Any]) -> str:
+    return str(event.get("title") or event.get("name") or event.get("slug") or "unknown match")
+
+
 def fetch_tag_events(tag_id: str = SCANNER_TAG_ID, page_size: int = 100) -> list[dict[str, Any]]:
     if not tag_id:
         return []
@@ -178,10 +190,16 @@ def scan_world_cup_exact_score_markets(limit: int = SCANNER_MATCHES) -> list[dic
 
     markets: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for event in upcoming_world_cup_events(limit):
+    events = upcoming_world_cup_events(limit)
+    event_summaries: list[str] = []
+    for event in events:
         event_slug = str(event.get("slug") or "")
         if not event_slug:
             continue
+        label = event_label(event)
+        kickoff = event_datetime(event)
+        event_summaries.append(f"{label} ({local_time_label(kickoff)})")
+        log.info("World Cup scanner upcoming match: %s | %s", label, local_time_label(kickoff))
         for market_slug in candidate_market_slugs(event_slug):
             market = fetch_market_by_slug(market_slug)
             if not market:
@@ -195,7 +213,12 @@ def scan_world_cup_exact_score_markets(limit: int = SCANNER_MATCHES) -> list[dic
             if event.get("endDate") and not market.get("endDate"):
                 market["endDate"] = event.get("endDate")
             markets.append(market)
-    log.info("World Cup scanner found %s exact-score market(s) across %s upcoming match(es)", len(markets), limit)
+    log.info(
+        "World Cup scanner found %s exact-score market(s) across %s upcoming match(es): %s",
+        len(markets),
+        len(events),
+        "; ".join(event_summaries) if event_summaries else "none",
+    )
     return markets
 
 
