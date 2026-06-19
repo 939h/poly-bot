@@ -11,9 +11,19 @@ Polymarket World Cup Exact Score Spread Bot
     # Example from CZE vs RSA on 2026-06-18: world-cup/fifwc-cze-rsa-2026-06-18
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
-    WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
+    # Choose your scores here. Example: only place YES orders for 1-0 and 2-1.
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-0,2-1  # legacy name still supported
+    WORLD_CUP_TARGET_SCORES=               # optional newer alias; overrides the legacy name when set
     WORLD_CUP_ORDER_SIZE=10
-    WORLD_CUP_BUY_LIMIT_PRICE=0.003          # 0.3c fixed buy limit; rounded up to market tick (e.g. 1c -> 0.01)
+    WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
+    WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
+    WORLD_CUP_BUY_UPCOMING_ENABLED=true     # allow BUY limit orders before kickoff, e.g. immediate startup mode
+    WORLD_CUP_BUY_LIVE_ENABLED=true         # allow BUY limit orders after kickoff while in the entry window
+    WORLD_CUP_PLACE_IMMEDIATE_ON_START=false  # true = first bot loop can buy upcoming matches before kickoff
+    WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
+    WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
+    WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # BUY orders expire/GTD 60 minutes out
+    WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES=130  # SELL/TP orders expire/GTD 130 minutes out
     WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
     WORLD_CUP_POSITION_MONITOR=true          # detect existing World Cup positions and place TP sell tranches
@@ -25,10 +35,10 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
     WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
     WORLD_CUP_SCANNER_MATCHES=4
-    WORLD_CUP_SCANNER_SCORE_MAX=5              # scans 0-0 through 5-5 exact-score slug pattern
+    WORLD_CUP_SCANNER_SCORES=                 # optional alias; scanner also uses WORLD_CUP_TARGET_SCORES
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
     WORLD_CUP_POLL_SECS=30
-    WORLD_CUP_DAY_TZ_OFFSET=0                 # UTC day; use 8 for MYT calendar day
+    WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
 
 import json
@@ -56,10 +66,20 @@ DATA_API = "https://data-api.polymarket.com"
 USER_AGENT = "poly-bot/world-cup-limit-bot (+https://github.com/cemini23/world-cup-bot configured-markets)"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+def parse_score_csv(raw: str) -> list[str]:
+    return [score.strip().replace("–", "-").replace(" ", "").lower() for score in raw.split(",") if score.strip()]
+
+
 MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split(",") if s.strip()]
 MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
-OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
+TARGET_SCORES_RAW = (
+    os.getenv("WORLD_CUP_TARGET_SCORES", "").strip()
+    or os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").strip()
+    or os.getenv("WORLD_CUP_SCANNER_SCORES", "").strip()
+)
+TARGET_SCORES = parse_score_csv(TARGET_SCORES_RAW)
+OUTCOME_FILTERS = TARGET_SCORES
 ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "10")))
 BUY_LIMIT_PRICE_RAW = os.getenv("WORLD_CUP_BUY_LIMIT_PRICE", "0.003").strip()
 BUY_LIMIT_PRICE = float(BUY_LIMIT_PRICE_RAW) if BUY_LIMIT_PRICE_RAW else None
@@ -77,9 +97,17 @@ POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
-DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
+DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
+MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
+BUY_UPCOMING_ENABLED = os.getenv("WORLD_CUP_BUY_UPCOMING_ENABLED", "true").lower() == "true"
+BUY_LIVE_ENABLED = os.getenv("WORLD_CUP_BUY_LIVE_ENABLED", "true").lower() == "true"
+PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "false").lower() == "true"
+ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
+ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
+ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
+SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
 PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
@@ -207,6 +235,75 @@ def market_datetime(market: dict[str, Any]) -> datetime | None:
         if market_dt is not None:
             return market_dt
     return event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+
+def local_time(dt: datetime) -> datetime:
+    return dt.astimezone(UTC) + timedelta(hours=DAY_TZ_OFFSET)
+
+def local_time_label(dt: datetime) -> str:
+    sign = "+" if DAY_TZ_OFFSET >= 0 else "-"
+    return f"{local_time(dt):%Y-%m-%d %H:%M} UTC{sign}{abs(DAY_TZ_OFFSET)}"
+
+def market_entry_window(market: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return None
+    return kickoff + timedelta(minutes=ENTRY_DELAY_MINUTES), kickoff + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+
+def market_is_in_entry_window(
+    market: dict[str, Any],
+    now: datetime | None = None,
+    allow_immediate_upcoming: bool = False,
+) -> bool:
+    window = market_entry_window(market)
+    if window is None:
+        log.info("Skipping market without kickoff time: %s", market.get("slug"))
+        return False
+    start, end = window
+    now = now or datetime.now(UTC)
+    kickoff = market_datetime(market)
+    if allow_immediate_upcoming and kickoff is not None and now < start:
+        log.info(
+            "Immediate startup entry enabled for %s | kickoff=%s | normal_entry_starts=%s | now=%s",
+            market.get("slug"),
+            local_time_label(kickoff),
+            local_time_label(start),
+            local_time_label(now),
+        )
+        return True
+    if now < start:
+        log.info(
+            "Waiting for entry window for %s | starts=%s | now=%s",
+            market.get("slug"),
+            local_time_label(start),
+            local_time_label(now),
+        )
+        return False
+    if now >= end:
+        log.info(
+            "Entry window closed for %s | closed=%s | now=%s",
+            market.get("slug"),
+            local_time_label(end),
+            local_time_label(now),
+        )
+        return False
+    return True
+
+def market_buy_phase(market: dict[str, Any], now: datetime | None = None) -> str:
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return "unknown"
+    now = now or datetime.now(UTC)
+    return "upcoming" if now < kickoff else "live"
+
+def market_buy_phase_enabled(market: dict[str, Any], now: datetime | None = None) -> bool:
+    phase = market_buy_phase(market, now)
+    if phase == "upcoming" and not BUY_UPCOMING_ENABLED:
+        log.info("Skipping upcoming BUYs for %s because WORLD_CUP_BUY_UPCOMING_ENABLED=false", market.get("slug"))
+        return False
+    if phase == "live" and not BUY_LIVE_ENABLED:
+        log.info("Skipping live BUYs for %s because WORLD_CUP_BUY_LIVE_ENABLED=false", market.get("slug"))
+        return False
+    return True
 
 def is_upcoming_market(market: dict[str, Any]) -> bool:
     # Slug dates only encode the match date, not kickoff time. Compare against the
@@ -459,12 +556,24 @@ def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
         raise ValueError(f"Cannot match outcomes to token IDs for {market.get('slug')}")
 
     pairs = [(outcome, token_id) for outcome, token_id in zip(outcomes, token_ids, strict=True)]
-    if OUTCOME_FILTERS:
-        pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() in OUTCOME_FILTERS]
-    elif {outcome.lower() for outcome in outcomes} >= {"yes", "no"}:
-        # Sports exact-score tabs commonly expose each score as a binary market.
-        # In that shape, the exact-score bet is the YES token for that score.
-        pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes"]
+    normalized_filters = set(OUTCOME_FILTERS)
+    market_scores = {
+        match.group(0).replace("–", "-").replace(" ", "").lower()
+        for field in ("question", "slug", "description")
+        for match in SCORE_OUTCOME_RE.finditer(str(market.get(field) or ""))
+    }
+    if normalized_filters:
+        pairs = [
+            (outcome, token_id)
+            for outcome, token_id in pairs
+            if outcome.replace("–", "-").replace(" ", "").lower() in normalized_filters
+            or bool(market_scores & normalized_filters)
+        ]
+    else:
+        # Do not sweep every score unless the desired scores are explicitly
+        # configured in WORLD_CUP_TARGET_SCORES.
+        pairs = []
+    pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes" or not {"yes", "no"}.issubset({o.lower() for o in outcomes})]
     return pairs[:MAX_OUTCOMES_PER_MARKET]
 
 def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
@@ -552,17 +661,27 @@ def cancel_order(client: ClobClient | None, order_id: str, label: str) -> bool:
 
 def place_order(client: ClobClient | None, token_id: str, label: str, price: float, size: float, side: Side) -> str | None:
     side_name = "BUY" if side == Side.BUY else "SELL"
+    expiration_minutes = ORDER_EXPIRATION_MINUTES if side == Side.BUY else SELL_ORDER_EXPIRATION_MINUTES
     if DRY_RUN:
         dry_id = f"dry-{side_name.lower()}-{int(time.time() * 1000)}"
-        log.info("[DRY RUN] LIMIT %s %s | price=$%.4f | size=%s | order_id=%s", side_name, label, price, size, dry_id)
+        log.info(
+            "[DRY RUN] LIMIT %s %s | price=$%.4f | size=%s | expires_in=%sm | order_id=%s",
+            side_name,
+            label,
+            price,
+            size,
+            expiration_minutes,
+            dry_id,
+        )
         return dry_id
     if client is None:
         raise RuntimeError("CLOB client is required when DRY_RUN=false")
 
     try:
+        expiration = int(time.time() + expiration_minutes * 60) if expiration_minutes > 0 else 0
         response = client.create_and_post_order(
-            order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side),
-            order_type=OrderType.GTC,
+            order_args=OrderArgs(token_id=token_id, price=price, size=size, side=side, expiration=expiration),
+            order_type=OrderType.GTD if expiration else OrderType.GTC,
         )
     except Exception as exc:
         log.error("%s failed for %s | price=$%.4f | size=%s | %s", side_name, label, price, size, exc)
@@ -822,35 +941,50 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
             market = {"conditionId": condition_id, "question": position.get("title") or position.get("market") or market_slug}
         condition_id = str(market.get("conditionId") or market.get("condition_id") or condition_id)
         key = f"{condition_id}:{token_id}:position-tp"
-        covered_shares = max(open_sell_order_size(client, condition_id, token_id), protected.get(key, 0.0))
+        open_sell_shares = open_sell_order_size(client, condition_id, token_id)
+        covered_shares = max(open_sell_shares, protected.get(key, 0.0)) if DRY_RUN else open_sell_shares
         newly_bought_shares = shares - covered_shares
         if newly_bought_shares < POSITION_MIN_NEW_SHARES:
             log.debug(
-                "World Cup position %s has %.4g uncovered new share(s), below %.4g minimum; skipping TP placement.",
+                "World Cup position %s has %.4g uncovered share(s), below %.4g minimum; skipping TP placement.",
                 market_slug or token_id,
                 max(newly_bought_shares, 0.0),
                 POSITION_MIN_NEW_SHARES,
             )
-            protected[key] = min(shares, covered_shares)
+            if DRY_RUN:
+                protected[key] = min(shares, covered_shares)
             continue
         label = str(position.get("title") or position.get("market") or market.get("question") or market_slug)
         placed_shares = place_position_sell_tranches(client, market, token_id, label, newly_bought_shares, entry_price)
-        if placed_shares > 0:
+        if DRY_RUN and placed_shares > 0:
             protected[key] = covered_shares + placed_shares
 
 def buy_price_for_market(client: ClobClient | None, token_id: str, market: dict[str, Any]) -> float | None:
+    bid, ask, ratio = spread_ratio(client, token_id)
+    if bid is None:
+        return None
+    if bid >= MAX_BEST_BID:
+        return None
     if BUY_LIMIT_PRICE is not None:
         return snap_price(BUY_LIMIT_PRICE, tick_size(client, token_id, market))
 
-    bid, ask, ratio = spread_ratio(client, token_id)
     if ratio is None:
         return None
     if ratio <= SPREAD_RATIO_MIN:
         return None
     return snap_price(bid, tick_size(client, token_id, market))
 
-def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
+def scan_and_place(
+    client: ClobClient | None,
+    pending: dict[str, dict[str, Any]],
+    sold: set[str],
+    allow_immediate_upcoming: bool = False,
+) -> None:
     for market in collect_markets():
+        if not market_is_in_entry_window(market, allow_immediate_upcoming=allow_immediate_upcoming):
+            continue
+        if not market_buy_phase_enabled(market):
+            continue
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
         question = str(market.get("question") or market.get("slug"))
         for outcome, token_id in market_outcomes(market):
@@ -870,7 +1004,9 @@ def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]]
             buy_price = buy_price_for_market(client, token_id, market)
             if buy_price is None:
                 bid, ask, ratio = spread_ratio(client, token_id)
-                if ratio is None:
+                if bid is not None and bid >= MAX_BEST_BID:
+                    log.info("Best bid too high for %s | bid=%.4f max=%.4f", label, bid, MAX_BEST_BID)
+                elif ratio is None:
                     log.info("No usable book for %s | bid=%s ask=%s", label, bid, ask)
                 else:
                     log.info("Spread too tight for %s | bid=%.4f ask=%.4f ratio=%.2fx", label, bid, ask, ratio)
@@ -917,9 +1053,13 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | configured sources + scanner=%s | buy_limit=%s | TP=%.2fx | size=%s",
+        "Mode=%s | configured sources + scanner=%s | target_scores=%s | immediate_on_start=%s | buy_upcoming=%s | buy_live=%s | buy_limit=%s | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
         "ON" if scanner_enabled() else "OFF",
+        ",".join(TARGET_SCORES) if TARGET_SCORES else "NONE",
+        "ON" if PLACE_IMMEDIATE_ON_START else "OFF",
+        "ON" if BUY_UPCOMING_ENABLED else "OFF",
+        "ON" if BUY_LIVE_ENABLED else "OFF",
         f"${BUY_LIMIT_PRICE:.4f}" if BUY_LIMIT_PRICE is not None else f"best bid when spread>{SPREAD_RATIO_MIN:.2f}x",
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
@@ -933,10 +1073,12 @@ def main() -> None:
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
     protected_positions: dict[str, float] = {}
+    immediate_start_scan = PLACE_IMMEDIATE_ON_START
 
     while True:
         monitor_world_cup_positions(client, protected_positions)
-        scan_and_place(client, pending, sold)
+        scan_and_place(client, pending, sold, allow_immediate_upcoming=immediate_start_scan)
+        immediate_start_scan = False
         monitor_pending(client, pending, sold)
         if RUN_ONCE:
             break
