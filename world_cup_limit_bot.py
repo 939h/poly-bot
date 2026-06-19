@@ -11,13 +11,13 @@ Polymarket World Cup Exact Score Spread Bot
     # Example from CZE vs RSA on 2026-06-18: world-cup/fifwc-cze-rsa-2026-06-18
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
-    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-0,2-1     # selective exact scores only; empty = no scanner score expansion
-    WORLD_CUP_ORDER_SIZE=10
+    WORLD_CUP_EXACT_SCORE_OUTCOMES=1-1,2-2,3-3,3-2,2-3     # selective exact scores only; empty = no scanner score expansion
+    WORLD_CUP_ORDER_SIZE=40
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
     WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
     WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
-    WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
-    WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # post orders with expires/GTD 60 minutes out
+    WORLD_CUP_ENTRY_WINDOW_MINUTES=75       # stop placing new buys 60 minutes after kickoff
+    WORLD_CUP_ORDER_EXPIRATION_MINUTES=75   # post orders with expires/GTD 60 minutes out
     WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
     WORLD_CUP_POSITION_MONITOR=true          # detect existing World Cup positions and place TP sell tranches
@@ -28,10 +28,10 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
     WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
-    WORLD_CUP_SCANNER_MATCHES=4
+    WORLD_CUP_SCANNER_MATCHES=1
     WORLD_CUP_SCANNER_SCORE_MAX=5              # scans 0-0 through 5-5 exact-score slug pattern
     WORLD_CUP_MAX_OUTCOMES_PER_MARKET=40
-    WORLD_CUP_POLL_SECS=30
+    WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
 
