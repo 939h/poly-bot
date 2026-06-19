@@ -12,8 +12,9 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_MATCH_SLUGS=world-cup/fifwc-cze-rsa-2026-06-18  # sports slug, /event URL, bare event slug, path, or URL
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     WORLD_CUP_EXACT_SCORE_OUTCOMES=           # optional CSV, e.g. "1-0,2-1"; empty = all outcomes
-    WORLD_CUP_ORDER_SIZE=5
-    WORLD_CUP_SPREAD_RATIO_MIN=1.8
+    WORLD_CUP_ORDER_SIZE=10
+    WORLD_CUP_BUY_LIMIT_PRICE=0.003          # 0.3c fixed buy limit; rounded up to market tick (e.g. 1c -> 0.01)
+    WORLD_CUP_SPREAD_RATIO_MIN=1.8          # used only when WORLD_CUP_BUY_LIMIT_PRICE is empty
     WORLD_CUP_TAKE_PROFIT_MULTIPLIER=2
     WORLD_CUP_POSITION_MONITOR=true          # detect existing World Cup positions and place TP sell tranches
     WORLD_CUP_POSITION_WALLET=0x...          # optional; defaults to POLY_FUNDER_ADDRESS
@@ -59,7 +60,9 @@ MARKET_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MARKET_SLUGS", "").split
 MATCH_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_MATCH_SLUGS", "").split(",") if s.strip()]
 EVENT_SLUGS = [s.strip() for s in os.getenv("WORLD_CUP_EVENT_SLUGS", "").split(",") if s.strip()]
 OUTCOME_FILTERS = [s.strip().lower() for s in os.getenv("WORLD_CUP_EXACT_SCORE_OUTCOMES", "").split(",") if s.strip()]
-ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "5")))
+ORDER_SIZE = float(os.getenv("WORLD_CUP_ORDER_SIZE", os.getenv("ORDER_SIZE", "10")))
+BUY_LIMIT_PRICE_RAW = os.getenv("WORLD_CUP_BUY_LIMIT_PRICE", "0.003").strip()
+BUY_LIMIT_PRICE = float(BUY_LIMIT_PRICE_RAW) if BUY_LIMIT_PRICE_RAW else None
 SPREAD_RATIO_MIN = float(os.getenv("WORLD_CUP_SPREAD_RATIO_MIN", "1.5"))
 TAKE_PROFIT_MULTIPLIER = float(os.getenv("WORLD_CUP_TAKE_PROFIT_MULTIPLIER", "2"))
 POSITION_MONITOR = os.getenv("WORLD_CUP_POSITION_MONITOR", "true").lower() == "true"
@@ -77,7 +80,7 @@ POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
-PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true"
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -835,6 +838,17 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
         if placed_shares > 0:
             protected[key] = covered_shares + placed_shares
 
+def buy_price_for_market(client: ClobClient | None, token_id: str, market: dict[str, Any]) -> float | None:
+    if BUY_LIMIT_PRICE is not None:
+        return snap_price(BUY_LIMIT_PRICE, tick_size(client, token_id, market))
+
+    bid, ask, ratio = spread_ratio(client, token_id)
+    if ratio is None:
+        return None
+    if ratio <= SPREAD_RATIO_MIN:
+        return None
+    return snap_price(bid, tick_size(client, token_id, market))
+
 def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for market in collect_markets():
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
@@ -853,19 +867,23 @@ def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]]
                     pending[existing_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": bid}
                 continue
 
-            bid, ask, ratio = spread_ratio(client, token_id)
-            if ratio is None:
-                log.info("No usable book for %s | bid=%s ask=%s", label, bid, ask)
-                continue
-            if ratio <= SPREAD_RATIO_MIN:
-                log.info("Spread too tight for %s | bid=%.4f ask=%.4f ratio=%.2fx", label, bid, ask, ratio)
+            buy_price = buy_price_for_market(client, token_id, market)
+            if buy_price is None:
+                bid, ask, ratio = spread_ratio(client, token_id)
+                if ratio is None:
+                    log.info("No usable book for %s | bid=%s ask=%s", label, bid, ask)
+                else:
+                    log.info("Spread too tight for %s | bid=%.4f ask=%.4f ratio=%.2fx", label, bid, ask, ratio)
                 continue
 
-            buy_price = snap_price(bid, tick_size(client, token_id, market))
             order_id = place_order(client, token_id, label, buy_price, ORDER_SIZE, Side.BUY)
             if order_id:
                 pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price}
-                log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid, ask, ratio)
+                if BUY_LIMIT_PRICE is not None:
+                    log.info("BUY pending at fixed exact-score YES limit | requested=$%.4f tick-adjusted=$%.4f", BUY_LIMIT_PRICE, buy_price)
+                else:
+                    bid, ask, ratio = spread_ratio(client, token_id)
+                    log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid or 0, ask or 0, ratio or 0)
 
 def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
     for order_id, order in list(pending.items()):
@@ -884,6 +902,9 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
                 log.info("BUY gone with 0 fill %s | order_id=%s", label, order_id)
             continue
 
+        if BUY_LIMIT_PRICE is not None:
+            continue
+
         bid, ask, ratio = spread_ratio(client, token_id)
         if ratio is None:
             log.info("Keeping %s; no usable updated book | bid=%s ask=%s", label, bid, ask)
@@ -896,10 +917,10 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | configured sources + scanner=%s | spread>%.2fx | buy at best bid | TP=%.2fx | size=%s",
+        "Mode=%s | configured sources + scanner=%s | buy_limit=%s | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
         "ON" if scanner_enabled() else "OFF",
-        SPREAD_RATIO_MIN,
+        f"${BUY_LIMIT_PRICE:.4f}" if BUY_LIMIT_PRICE is not None else f"best bid when spread>{SPREAD_RATIO_MIN:.2f}x",
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
     )
