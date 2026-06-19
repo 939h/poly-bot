@@ -73,11 +73,11 @@ POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.90"))
 POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
-POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "30"))
+POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "0"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
-PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -822,7 +822,7 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
         covered_shares = max(open_sell_order_size(client, condition_id, token_id), protected.get(key, 0.0))
         newly_bought_shares = shares - covered_shares
         if newly_bought_shares < POSITION_MIN_NEW_SHARES:
-            log.info(
+            log.debug(
                 "World Cup position %s has %.4g uncovered new share(s), below %.4g minimum; skipping TP placement.",
                 market_slug or token_id,
                 max(newly_bought_shares, 0.0),
