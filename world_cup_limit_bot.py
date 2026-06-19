@@ -13,7 +13,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_EVENT_SLUGS=event1,event2       # optional alias for match/event slugs
     # Choose your scores here. Example: only place YES orders for 1-0 and 2-1.
     WORLD_CUP_EXACT_SCORE_OUTCOMES=1-1,2-2,3-3,3-2,2-3  # legacy name still supported
-    WORLD_CUP_TARGET_SCORES=               # optional newer alias; overrides the legacy name when set
+    WORLD_CUP_TARGET_SCORES=1-1,2-2,3-3,3-2,2-3              # optional newer alias; overrides the legacy name when set
     WORLD_CUP_ORDER_SIZE=40
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
     WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
