@@ -29,7 +29,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_TP_CAP=0.90
     WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
-    WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
+    WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=true  # print detected World Cup position market slugs and exit
     WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
     WORLD_CUP_SCANNER_MATCHES=1
     WORLD_CUP_SCANNER_SCORES=5                # optional alias; scanner also uses WORLD_CUP_TARGET_SCORES
@@ -98,6 +98,7 @@ DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
+PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "true").lower() == "true"
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "75"))
 ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "75"))
@@ -243,13 +244,27 @@ def market_entry_window(market: dict[str, Any]) -> tuple[datetime, datetime] | N
         return None
     return kickoff + timedelta(minutes=ENTRY_DELAY_MINUTES), kickoff + timedelta(minutes=ENTRY_WINDOW_MINUTES)
 
-def market_is_in_entry_window(market: dict[str, Any], now: datetime | None = None) -> bool:
+def market_is_in_entry_window(
+    market: dict[str, Any],
+    now: datetime | None = None,
+    allow_immediate_upcoming: bool = False,
+) -> bool:
     window = market_entry_window(market)
     if window is None:
         log.info("Skipping market without kickoff time: %s", market.get("slug"))
         return False
     start, end = window
     now = now or datetime.now(UTC)
+    kickoff = market_datetime(market)
+    if allow_immediate_upcoming and kickoff is not None and now < start:
+        log.info(
+            "Immediate startup entry enabled for %s | kickoff=%s | normal_entry_starts=%s | now=%s",
+            market.get("slug"),
+            local_time_label(kickoff),
+            local_time_label(start),
+            local_time_label(now),
+        )
+        return True
     if now < start:
         log.info(
             "Waiting for entry window for %s | starts=%s | now=%s",
@@ -937,9 +952,14 @@ def buy_price_for_market(client: ClobClient | None, token_id: str, market: dict[
         return None
     return snap_price(bid, tick_size(client, token_id, market))
 
-def scan_and_place(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
+def scan_and_place(
+    client: ClobClient | None,
+    pending: dict[str, dict[str, Any]],
+    sold: set[str],
+    allow_immediate_upcoming: bool = False,
+) -> None:
     for market in collect_markets():
-        if not market_is_in_entry_window(market):
+        if not market_is_in_entry_window(market, allow_immediate_upcoming=allow_immediate_upcoming):
             continue
         condition_id = market.get("conditionId") or market.get("condition_id") or ""
         question = str(market.get("question") or market.get("slug"))
@@ -1009,10 +1029,11 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
 def main() -> None:
     log.info("Polymarket World Cup Exact Score Spread Bot")
     log.info(
-        "Mode=%s | configured sources + scanner=%s | target_scores=%s | buy_limit=%s | TP=%.2fx | size=%s",
+        "Mode=%s | configured sources + scanner=%s | target_scores=%s | immediate_on_start=%s | buy_limit=%s | TP=%.2fx | size=%s",
         "DRY_RUN" if DRY_RUN else "LIVE",
         "ON" if scanner_enabled() else "OFF",
         ",".join(TARGET_SCORES) if TARGET_SCORES else "NONE",
+        "ON" if PLACE_IMMEDIATE_ON_START else "OFF",
         f"${BUY_LIMIT_PRICE:.4f}" if BUY_LIMIT_PRICE is not None else f"best bid when spread>{SPREAD_RATIO_MIN:.2f}x",
         TAKE_PROFIT_MULTIPLIER,
         ORDER_SIZE,
@@ -1026,10 +1047,12 @@ def main() -> None:
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
     protected_positions: dict[str, float] = {}
+    immediate_start_scan = PLACE_IMMEDIATE_ON_START
 
     while True:
         monitor_world_cup_positions(client, protected_positions)
-        scan_and_place(client, pending, sold)
+        scan_and_place(client, pending, sold, allow_immediate_upcoming=immediate_start_scan)
+        immediate_start_scan = False
         monitor_pending(client, pending, sold)
         if RUN_ONCE:
             break
