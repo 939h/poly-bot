@@ -174,7 +174,7 @@ def fetch_tag_events(tag_id: str = TAG_ID, page_size: int = 100) -> list[dict[st
             break
         offset += page_size
     if events:
-        log.info("Fetched %s event(s) from World Cup tag_id=%s", len(events), tag_id)
+        log.debug("Fetched %s event(s) from World Cup tag_id=%s", len(events), tag_id)
     return events
 
 
@@ -662,7 +662,7 @@ def collect_markets() -> list[dict[str, Any]]:
             break
 
     if not markets:
-        log.warning("No upcoming World Cup exact-score CLOB markets found after filtering")
+        log.debug("No upcoming World Cup exact-score CLOB markets found after filtering")
     else:
         log.info("Found %s upcoming World Cup exact-score market(s)", len(markets))
     return markets
