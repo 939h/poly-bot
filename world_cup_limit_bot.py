@@ -17,9 +17,9 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_ORDER_SIZE=10
     WORLD_CUP_BUY_LIMIT_PRICE=0.003          # fixed YES buy limit; rounded up to market tick (e.g. 1c -> 0.01)
     WORLD_CUP_MAX_BEST_BID=0.02             # only place YES buys while best bid is below 2.0c
-    WORLD_CUP_BUY_UPCOMING_ENABLED=false     # allow BUY limit orders before kickoff, e.g. immediate startup mode
-    WORLD_CUP_BUY_LIVE_ENABLED=false         # allow BUY limit orders after kickoff while in the entry window
-    WORLD_CUP_PLACE_IMMEDIATE_ON_START=false  # true = first bot loop can buy upcoming matches before kickoff
+    WORLD_CUP_BUY_UPCOMING_ENABLED=true     # allow BUY limit orders before kickoff, e.g. immediate startup mode
+    WORLD_CUP_BUY_LIVE_ENABLED=true         # allow BUY limit orders after kickoff while in the entry window
+    WORLD_CUP_PLACE_IMMEDIATE_ON_START=true  # true = first bot loop can buy upcoming matches before kickoff
     WORLD_CUP_ENTRY_DELAY_MINUTES=1         # start placing 1 minute after kickoff
     WORLD_CUP_ENTRY_WINDOW_MINUTES=60       # stop placing new buys 60 minutes after kickoff
     WORLD_CUP_ORDER_EXPIRATION_MINUTES=60   # BUY orders expire/GTD 60 minutes out
@@ -101,14 +101,14 @@ DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
 MAX_BEST_BID = float(os.getenv("WORLD_CUP_MAX_BEST_BID", "0.02"))
-BUY_UPCOMING_ENABLED = os.getenv("WORLD_CUP_BUY_UPCOMING_ENABLED", "false").lower() == "true"
-BUY_LIVE_ENABLED = os.getenv("WORLD_CUP_BUY_LIVE_ENABLED", "false").lower() == "true"
-PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "false").lower() == "true"
+BUY_UPCOMING_ENABLED = os.getenv("WORLD_CUP_BUY_UPCOMING_ENABLED", "true").lower() == "true"
+BUY_LIVE_ENABLED = os.getenv("WORLD_CUP_BUY_LIVE_ENABLED", "true").lower() == "true"
+PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "true").lower() == "true"
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
 ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
-PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true"
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true"
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
