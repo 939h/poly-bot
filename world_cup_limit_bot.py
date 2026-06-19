@@ -759,7 +759,7 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
         covered_shares = max(open_sell_order_size(client, condition_id, token_id), protected.get(key, 0.0))
         newly_bought_shares = shares - covered_shares
         if newly_bought_shares < POSITION_MIN_NEW_SHARES:
-            log.info(
+            log.debug(
                 "World Cup position %s has %.4g uncovered new share(s), below %.4g minimum; skipping TP placement.",
                 market_slug or token_id,
                 max(newly_bought_shares, 0.0),
