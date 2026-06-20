@@ -32,6 +32,7 @@ Polymarket World Cup Exact Score Spread Bot
     WORLD_CUP_POSITION_TP_CAP=0.89
     WORLD_CUP_POSITION_MIN_NEW_SHARES=10  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
+    WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=true  # print detected World Cup position market slugs and exit
     WORLD_CUP_SCANNER_ENABLED=true              # run separate exact-score scanner for upcoming matches
     WORLD_CUP_SCANNER_MATCHES=1
@@ -95,6 +96,7 @@ POSITION_TP_MULTIPLIERS = [
 POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.89"))
 POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "10"))
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
+POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD = int(os.getenv("WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
 POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
@@ -218,23 +220,49 @@ def parse_dt(raw: Any) -> datetime | None:
     except ValueError:
         return None
 
+def market_datetime_from_keys(market: dict[str, Any], keys: tuple[str, ...], require_time: bool = False) -> datetime | None:
+    for key in keys:
+        raw = market.get(key)
+        if require_time and isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw.strip()):
+            continue
+        market_dt = parse_dt(raw)
+        if market_dt is not None:
+            return market_dt
+    return None
+
 def market_datetime(market: dict[str, Any]) -> datetime | None:
     # Sports markets often use startDate/startDateIso for market creation or
     # listing dates, while gameStartTime/endDate carry the actual fixture time.
-    for key in (
-        "gameStartTime",
-        "game_start_time",
-        "endDateIso",
-        "end_date_iso",
-        "endDate",
-        "startDateIso",
-        "start_date_iso",
-        "startDate",
-    ):
-        market_dt = parse_dt(market.get(key))
-        if market_dt is not None:
-            return market_dt
-    return event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+    field_dt = market_datetime_from_keys(
+        market,
+        (
+            "gameStartTime",
+            "game_start_time",
+            "endDateIso",
+            "end_date_iso",
+            "endDate",
+            "startDateIso",
+            "start_date_iso",
+            "startDate",
+        ),
+    )
+    return field_dt or event_date_from_slug(str(market.get("_event_slug") or market.get("slug") or ""))
+
+def market_position_sell_datetime(market: dict[str, Any]) -> datetime | None:
+    # For existing wallet positions, only close the TP sell window when Gamma
+    # gives an explicit fixture timestamp. A slug only contains the match date
+    # (midnight UTC), which can make later same-day matches look expired.
+    return market_datetime_from_keys(
+        market,
+        (
+            "gameStartTime",
+            "game_start_time",
+            "endDateIso",
+            "end_date_iso",
+            "endDate",
+        ),
+        require_time=True,
+    )
 
 def local_time(dt: datetime) -> datetime:
     return dt.astimezone(UTC) + timedelta(hours=DAY_TZ_OFFSET)
@@ -302,6 +330,39 @@ def market_buy_phase_enabled(market: dict[str, Any], now: datetime | None = None
         return False
     if phase == "live" and not BUY_LIVE_ENABLED:
         log.info("Skipping live BUYs for %s because WORLD_CUP_BUY_LIVE_ENABLED=false", market.get("slug"))
+        return False
+    return True
+
+
+def market_is_closed_or_resolved(market: dict[str, Any]) -> bool:
+    for key in ("closed", "closedForTrading", "archived", "resolved"):
+        value = market.get(key)
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().lower() == "true":
+            return True
+    return False
+
+def position_sell_window_open(market: dict[str, Any], now: datetime | None = None) -> bool:
+    if market_is_closed_or_resolved(market):
+        return False
+    kickoff = market_position_sell_datetime(market)
+    if kickoff is None:
+        log.info(
+            "Keeping World Cup position sell window open for %s because no precise kickoff timestamp was found.",
+            market.get("slug") or market.get("_event_slug") or market.get("question"),
+        )
+        return True
+    now = now or datetime.now(UTC)
+    cutoff = kickoff + timedelta(minutes=SELL_ORDER_EXPIRATION_MINUTES)
+    if now >= cutoff:
+        log.info(
+            "Skipping World Cup position for ended match %s | kickoff=%s | sell_window_closed=%s | now=%s",
+            market.get("slug") or market.get("_event_slug") or market.get("question"),
+            local_time_label(kickoff),
+            local_time_label(cutoff),
+            local_time_label(now),
+        )
         return False
     return True
 
@@ -592,12 +653,26 @@ def best_bid_ask(client: ClobClient | None, token_id: str) -> tuple[float | None
         dry_ask = float(os.getenv("WORLD_CUP_DRY_BEST_ASK", "0.044"))
         return dry_bid, dry_ask
 
-    book = client.get_order_book(token_id)
+    try:
+        book = client.get_order_book(token_id)
+    except Exception as exc:
+        log.info("No usable order book for token %s; skipping active order logic: %s", token_id, exc)
+        return None, None
     bids = get_levels(book, "bids")
     asks = get_levels(book, "asks")
     best_bid = max((price for price, _ in bids), default=None)
     best_ask = min((price for price, _ in asks), default=None)
     return best_bid, best_ask
+
+def order_book_exists(client: ClobClient | None, token_id: str) -> bool:
+    if client is None or DRY_RUN:
+        return True
+    try:
+        client.get_order_book(token_id)
+    except Exception as exc:
+        log.info("No order book detected for token %s: %s", token_id, exc)
+        return False
+    return True
 
 def spread_ratio(client: ClobClient | None, token_id: str) -> tuple[float | None, float | None, float | None]:
     bid, ask = best_bid_ask(client, token_id)
@@ -612,10 +687,14 @@ def tick_size(client: ClobClient | None, token_id: str, market: dict[str, Any]) 
             return float(raw)
 
     if client is not None and not DRY_RUN:
-        book = client.get_order_book(token_id)
-        raw_tick = book.get("tick_size") if isinstance(book, dict) else getattr(book, "tick_size", None)
-        if raw_tick is not None and float(raw_tick) > 0:
-            return float(raw_tick)
+        try:
+            book = client.get_order_book(token_id)
+        except Exception as exc:
+            log.info("Unable to read tick size from order book for token %s; using default tick: %s", token_id, exc)
+        else:
+            raw_tick = book.get("tick_size") if isinstance(book, dict) else getattr(book, "tick_size", None)
+            if raw_tick is not None and float(raw_tick) > 0:
+                return float(raw_tick)
 
     return 0.001 if DRY_RUN else 0.01
 
@@ -876,8 +955,8 @@ def place_position_sell_tranches(
         )
         return 0.0
 
-    tick = tick_size(client, token_id, market)
     _, best_ask, _ = spread_ratio(client, token_id)
+    tick = tick_size(client, token_id, market)
     placed_shares = 0.0
     log.info(
         "Placing World Cup position sell tranches for %s | shares=%s | entry=$%.4f | multipliers=%s | cap=$%.2f | best_ask=%s",
@@ -905,7 +984,12 @@ def place_position_sell_tranches(
             placed_shares += size
     return placed_shares
 
-def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, float]) -> None:
+def monitor_world_cup_positions(
+    client: ClobClient | None,
+    protected: dict[str, float],
+    no_order_book_counts: dict[str, int],
+    skipped_position_markets: set[str],
+) -> None:
     if not POSITION_MONITOR:
         return
     if DRY_RUN and not POSITION_WALLET:
@@ -941,8 +1025,28 @@ def monitor_world_cup_positions(client: ClobClient | None, protected: dict[str, 
             market = {"conditionId": condition_id, "question": position.get("title") or position.get("market") or market_slug}
         condition_id = str(market.get("conditionId") or market.get("condition_id") or condition_id)
         key = f"{condition_id}:{token_id}:position-tp"
+        if key in skipped_position_markets:
+            log.debug("Skipping World Cup position %s after repeated missing order-book checks.", market_slug or token_id)
+            continue
+
         open_sell_shares = open_sell_order_size(client, condition_id, token_id)
         covered_shares = max(open_sell_shares, protected.get(key, 0.0)) if DRY_RUN else open_sell_shares
+        if covered_shares > 0:
+            if order_book_exists(client, token_id):
+                no_order_book_counts.pop(key, None)
+            else:
+                no_order_book_counts[key] = no_order_book_counts.get(key, 0) + 1
+                log.info(
+                    "World Cup position %s has sell coverage but no order book (%s/%s consecutive checks).",
+                    market_slug or token_id,
+                    no_order_book_counts[key],
+                    POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD,
+                )
+                if no_order_book_counts[key] >= POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD:
+                    skipped_position_markets.add(key)
+                    log.info("Skipping World Cup position %s; match appears ended after repeated missing order-book checks.", market_slug or token_id)
+                continue
+
         newly_bought_shares = shares - covered_shares
         if newly_bought_shares < POSITION_MIN_NEW_SHARES:
             log.debug(
@@ -1073,10 +1177,12 @@ def main() -> None:
     pending: dict[str, dict[str, Any]] = {}
     sold: set[str] = set()
     protected_positions: dict[str, float] = {}
+    no_order_book_counts: dict[str, int] = {}
+    skipped_position_markets: set[str] = set()
     immediate_start_scan = PLACE_IMMEDIATE_ON_START
 
     while True:
-        monitor_world_cup_positions(client, protected_positions)
+        monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         scan_and_place(client, pending, sold, allow_immediate_upcoming=immediate_start_scan)
         immediate_start_scan = False
         monitor_pending(client, pending, sold)
