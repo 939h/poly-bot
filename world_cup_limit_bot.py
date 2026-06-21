@@ -21,7 +21,7 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
-    WORLD_CUP_POLL_SECS=60
+    WORLD_CUP_POLL_SECS=6
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
 
@@ -81,7 +81,7 @@ POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD = int(os.getenv("WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD", "5"))
 MAX_OUTCOMES_PER_MARKET = int(os.getenv("WORLD_CUP_MAX_OUTCOMES_PER_MARKET", "40"))
-POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "60"))
+POLL_SECS = int(os.getenv("WORLD_CUP_POLL_SECS", "6"))
 DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SKIP_EXISTING = os.getenv("WORLD_CUP_SKIP_EXISTING", "true").lower() == "true"
 RUN_ONCE = os.getenv("WORLD_CUP_RUN_ONCE", "false").lower() == "true"
