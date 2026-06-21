@@ -1110,11 +1110,11 @@ def scan_and_place(
     allow_immediate_upcoming: bool = False,
 ) -> None:
     for market in collect_markets():
-        if not market_is_in_entry_window(market, allow_immediate_upcoming=allow_immediate_upcoming):
-            continue
-        if not market_buy_phase_enabled(market):
-            continue
-        condition_id = market.get("conditionId") or market.get("condition_id") or ""
+        can_place_new_buy = market_is_in_entry_window(
+            market,
+            allow_immediate_upcoming=allow_immediate_upcoming,
+        ) and market_buy_phase_enabled(market)
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
         question = str(market.get("question") or market.get("slug"))
         for outcome, token_id in market_outcomes(market):
             key = f"{condition_id}:{token_id}"
@@ -1132,6 +1132,9 @@ def scan_and_place(
                     price = bid or 0.0
                 if existing_id and price > 0:
                     pending[existing_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": price, "buy_size": order_size(existing_order) or ORDER_SIZE}
+                continue
+
+            if key in skipped_reorders or not can_place_new_buy:
                 continue
 
             buy_price = buy_price_for_market(client, token_id, market)
