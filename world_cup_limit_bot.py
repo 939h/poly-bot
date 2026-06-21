@@ -701,14 +701,30 @@ def tick_size(client: ClobClient | None, token_id: str, market: dict[str, Any]) 
 def snap_price(price: float, tick: float) -> float:
     return round(math.ceil(round(price / tick, 10)) * tick, 10)
 
-def open_buy_order_id(client: ClobClient | None, condition_id: str, token_id: str) -> str | None:
+def open_buy_order(client: ClobClient | None, condition_id: str, token_id: str) -> dict[str, Any] | None:
     if client is None or DRY_RUN or not SKIP_EXISTING:
         return None
     orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     for order in orders:
-        if order.get("asset_id") == token_id and order.get("side", "").upper() == "BUY":
-            return order.get("id") or order.get("orderID")
+        if (
+            str(order.get("asset_id") or order.get("assetId") or "") == token_id
+            and str(order.get("side", "")).upper() == "BUY"
+        ):
+            return order
     return None
+
+def open_buy_order_id(client: ClobClient | None, condition_id: str, token_id: str) -> str | None:
+    order = open_buy_order(client, condition_id, token_id)
+    if not order:
+        return None
+    return order.get("id") or order.get("orderID")
+
+def order_price(order: dict[str, Any]) -> float:
+    for key in ("price", "original_price", "originalPrice"):
+        price = as_float(order.get(key))
+        if price > 0:
+            return price
+    return 0.0
 
 def order_is_open(client: ClobClient | None, condition_id: str, order_id: str) -> bool:
     if client is None or DRY_RUN:
@@ -1082,6 +1098,7 @@ def scan_and_place(
     client: ClobClient | None,
     pending: dict[str, dict[str, Any]],
     sold: set[str],
+    skipped_reorders: set[str],
     allow_immediate_upcoming: bool = False,
 ) -> None:
     for market in collect_markets():
@@ -1094,15 +1111,19 @@ def scan_and_place(
         for outcome, token_id in market_outcomes(market):
             key = f"{condition_id}:{token_id}"
             label = f"{question} | {outcome}"
-            if key in sold or any(order["key"] == key for order in pending.values()):
+            if key in sold or key in skipped_reorders or any(order["key"] == key for order in pending.values()):
                 continue
 
-            existing_id = open_buy_order_id(client, condition_id, token_id)
-            if existing_id:
+            existing_order = open_buy_order(client, condition_id, token_id)
+            if existing_order:
+                existing_id = existing_order.get("id") or existing_order.get("orderID")
                 log.info("Resuming existing BUY %s | order_id=%s", label, existing_id)
-                bid, ask, ratio = spread_ratio(client, token_id)
-                if bid is not None:
-                    pending[existing_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": bid}
+                price = order_price(existing_order)
+                if price <= 0:
+                    bid, ask, ratio = spread_ratio(client, token_id)
+                    price = bid or 0.0
+                if existing_id and price > 0:
+                    pending[existing_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": price, "buy_size": order_size(existing_order) or ORDER_SIZE}
                 continue
 
             buy_price = buy_price_for_market(client, token_id, market)
@@ -1118,14 +1139,54 @@ def scan_and_place(
 
             order_id = place_order(client, token_id, label, buy_price, ORDER_SIZE, Side.BUY)
             if order_id:
-                pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price}
+                pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price, "buy_size": ORDER_SIZE}
                 if BUY_LIMIT_PRICE is not None:
                     log.info("BUY pending at fixed exact-score YES limit | requested=$%.4f tick-adjusted=$%.4f", BUY_LIMIT_PRICE, buy_price)
                 else:
                     bid, ask, ratio = spread_ratio(client, token_id)
                     log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid or 0, ask or 0, ratio or 0)
 
-def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]], sold: set[str]) -> None:
+def market_still_reorderable(market: dict[str, Any]) -> bool:
+    if market_is_closed_or_resolved(market):
+        return False
+    return market_is_in_entry_window(market) and market_buy_phase_enabled(market)
+
+def reorder_cancelled_buys(
+    client: ClobClient | None,
+    pending: dict[str, dict[str, Any]],
+    reorder_queue: dict[str, dict[str, Any]],
+    skipped_reorders: set[str],
+) -> None:
+    for key, order in list(reorder_queue.items()):
+        if key in skipped_reorders or any(pending_order["key"] == key for pending_order in pending.values()):
+            reorder_queue.pop(key, None)
+            continue
+        market = order["market"]
+        market_slug = market.get("slug") or market.get("_event_slug")
+        refreshed = fetch_market_by_slug(str(market_slug)) if market_slug else market
+        if not refreshed:
+            log.info("Not reordering cancelled BUY for %s; market not found. Future reorders for this market token are disabled.", order["label"])
+            skipped_reorders.add(key)
+            reorder_queue.pop(key, None)
+            continue
+        if not market_still_reorderable(refreshed):
+            log.info("Not reordering cancelled BUY for %s; match is ended or outside the buy window. Future reorders for this market token are disabled.", order["label"])
+            skipped_reorders.add(key)
+            reorder_queue.pop(key, None)
+            continue
+        order_id = place_order(client, order["token_id"], order["label"], order["entry_price"], order.get("buy_size") or ORDER_SIZE, Side.BUY)
+        reorder_queue.pop(key, None)
+        if order_id:
+            pending[order_id] = {**order, "market": refreshed}
+            log.info("Reordered cancelled BUY %s | price=$%.4f | size=%s | order_id=%s", order["label"], order["entry_price"], order.get("buy_size") or ORDER_SIZE, order_id)
+
+def monitor_pending(
+    client: ClobClient | None,
+    pending: dict[str, dict[str, Any]],
+    sold: set[str],
+    reorder_queue: dict[str, dict[str, Any]],
+    skipped_reorders: set[str],
+) -> None:
     for order_id, order in list(pending.items()):
         label = order["label"]
         token_id = order["token_id"]
@@ -1139,7 +1200,9 @@ def monitor_pending(client: ClobClient | None, pending: dict[str, dict[str, Any]
                 place_take_profit(client, order["market"], token_id, label, order["entry_price"], shares)
                 sold.add(order["key"])
             else:
-                log.info("BUY gone with 0 fill %s | order_id=%s", label, order_id)
+                log.info("BUY gone with 0 fill %s | order_id=%s; queued reorder for next poll", label, order_id)
+                if order["key"] not in skipped_reorders:
+                    reorder_queue[order["key"]] = order
             continue
 
         if BUY_LIMIT_PRICE is not None:
@@ -1179,13 +1242,16 @@ def main() -> None:
     protected_positions: dict[str, float] = {}
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
+    reorder_queue: dict[str, dict[str, Any]] = {}
+    skipped_reorders: set[str] = set()
     immediate_start_scan = PLACE_IMMEDIATE_ON_START
 
     while True:
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
-        scan_and_place(client, pending, sold, allow_immediate_upcoming=immediate_start_scan)
+        reorder_cancelled_buys(client, pending, reorder_queue, skipped_reorders)
+        scan_and_place(client, pending, sold, skipped_reorders, allow_immediate_upcoming=immediate_start_scan)
         immediate_start_scan = False
-        monitor_pending(client, pending, sold)
+        monitor_pending(client, pending, sold, reorder_queue, skipped_reorders)
         if RUN_ONCE:
             break
         time.sleep(POLL_SECS)
