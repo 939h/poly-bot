@@ -93,7 +93,7 @@ ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
 ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
-PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true" #set true will disable auto sell
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true" #set true will disable auto sell
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
