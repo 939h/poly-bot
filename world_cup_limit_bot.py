@@ -729,13 +729,21 @@ def order_price(order: dict[str, Any]) -> float:
 def order_is_open(client: ClobClient | None, condition_id: str, order_id: str) -> bool:
     if client is None or DRY_RUN:
         return True
-    orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
-    return any((order.get("id") or order.get("orderID")) == order_id for order in orders)
+    try:
+        orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
+    except Exception as exc:
+        log.warning("Open BUY check failed for order_id=%s; keeping it pending this poll: %s", order_id, exc)
+        return True
+    return any(str(order.get("id") or order.get("orderID")) == str(order_id) for order in orders)
 
 def get_filled_shares(client: ClobClient | None, order_id: str) -> float:
     if client is None or DRY_RUN:
         return ORDER_SIZE
-    details = client.get_order(order_id)
+    try:
+        details = client.get_order(order_id)
+    except Exception as exc:
+        log.warning("Filled-size lookup failed for missing BUY order_id=%s; treating as 0 fill for reorder detection: %s", order_id, exc)
+        return 0.0
     if isinstance(details, dict):
         for field in ("size_matched", "sizeMatched", "sizeFilled", "size_filled", "filledSize"):
             if details.get(field) is not None:
@@ -1117,7 +1125,7 @@ def scan_and_place(
             existing_order = open_buy_order(client, condition_id, token_id)
             if existing_order:
                 existing_id = existing_order.get("id") or existing_order.get("orderID")
-                log.info("Resuming existing BUY %s | order_id=%s", label, existing_id)
+                log.info("Detected new open BUY order %s | order_id=%s", label, existing_id)
                 price = order_price(existing_order)
                 if price <= 0:
                     bid, ask, ratio = spread_ratio(client, token_id)
@@ -1140,16 +1148,35 @@ def scan_and_place(
             order_id = place_order(client, token_id, label, buy_price, ORDER_SIZE, Side.BUY)
             if order_id:
                 pending[order_id] = {"key": key, "condition_id": condition_id, "token_id": token_id, "market": market, "label": label, "entry_price": buy_price, "buy_size": ORDER_SIZE}
+                log.info("Detected new BUY order %s | price=$%.4f | size=%s | order_id=%s", label, buy_price, ORDER_SIZE, order_id)
                 if BUY_LIMIT_PRICE is not None:
                     log.info("BUY pending at fixed exact-score YES limit | requested=$%.4f tick-adjusted=$%.4f", BUY_LIMIT_PRICE, buy_price)
                 else:
                     bid, ask, ratio = spread_ratio(client, token_id)
                     log.info("BUY pending while ratio stays > %.2fx | bid=%.4f ask=%.4f ratio=%.2fx", SPREAD_RATIO_MIN, bid or 0, ask or 0, ratio or 0)
 
-def market_still_reorderable(market: dict[str, Any]) -> bool:
+def market_still_reorderable(market: dict[str, Any], now: datetime | None = None) -> bool:
     if market_is_closed_or_resolved(market):
         return False
-    return market_is_in_entry_window(market) and market_buy_phase_enabled(market)
+    kickoff = market_position_sell_datetime(market)
+    if kickoff is None:
+        log.info(
+            "Allowing cancelled BUY reorder for %s because no precise kickoff timestamp was found.",
+            market.get("slug") or market.get("_event_slug") or market.get("question"),
+        )
+        return True
+    now = now or datetime.now(UTC)
+    cutoff = kickoff + timedelta(minutes=SELL_ORDER_EXPIRATION_MINUTES)
+    if now >= cutoff:
+        log.info(
+            "Cancelled BUY reorder window closed for %s | kickoff=%s | cutoff=%s | now=%s",
+            market.get("slug") or market.get("_event_slug") or market.get("question"),
+            local_time_label(kickoff),
+            local_time_label(cutoff),
+            local_time_label(now),
+        )
+        return False
+    return market_buy_phase_enabled(market, now)
 
 def reorder_cancelled_buys(
     client: ClobClient | None,
@@ -1170,15 +1197,18 @@ def reorder_cancelled_buys(
             reorder_queue.pop(key, None)
             continue
         if not market_still_reorderable(refreshed):
-            log.info("Not reordering cancelled BUY for %s; match is ended or outside the buy window. Future reorders for this market token are disabled.", order["label"])
+            log.info("Not reordering cancelled BUY for %s; match is ended. Future reorders for this market token are disabled.", order["label"])
             skipped_reorders.add(key)
             reorder_queue.pop(key, None)
             continue
-        order_id = place_order(client, order["token_id"], order["label"], order["entry_price"], order.get("buy_size") or ORDER_SIZE, Side.BUY)
-        reorder_queue.pop(key, None)
+        size = order.get("buy_size") or ORDER_SIZE
+        order_id = place_order(client, order["token_id"], order["label"], order["entry_price"], size, Side.BUY)
         if order_id:
-            pending[order_id] = {**order, "market": refreshed}
-            log.info("Reordered cancelled BUY %s | price=$%.4f | size=%s | order_id=%s", order["label"], order["entry_price"], order.get("buy_size") or ORDER_SIZE, order_id)
+            reorder_queue.pop(key, None)
+            pending[order_id] = {**order, "market": refreshed, "buy_size": size}
+            log.info("Reordered cancelled BUY order %s | price=$%.4f | size=%s | new_order_id=%s", order["label"], order["entry_price"], size, order_id)
+        else:
+            log.warning("Cancelled BUY reorder failed for %s; will retry on next poll while the match remains active.", order["label"])
 
 def monitor_pending(
     client: ClobClient | None,
@@ -1200,7 +1230,7 @@ def monitor_pending(
                 place_take_profit(client, order["market"], token_id, label, order["entry_price"], shares)
                 sold.add(order["key"])
             else:
-                log.info("BUY gone with 0 fill %s | order_id=%s; queued reorder for next poll", label, order_id)
+                log.info("Detected cancelled BUY order %s | order_id=%s | price=$%.4f | size=%s; queued reorder for next poll", label, order_id, order["entry_price"], order.get("buy_size") or ORDER_SIZE)
                 if order["key"] not in skipped_reorders:
                     reorder_queue[order["key"]] = order
             continue
