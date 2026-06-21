@@ -1119,7 +1119,7 @@ def scan_and_place(
         for outcome, token_id in market_outcomes(market):
             key = f"{condition_id}:{token_id}"
             label = f"{question} | {outcome}"
-            if key in sold or any(order["key"] == key for order in pending.values()):
+            if key in sold or key in skipped_reorders or any(order["key"] == key for order in pending.values()):
                 continue
 
             existing_order = open_buy_order(client, condition_id, token_id)
