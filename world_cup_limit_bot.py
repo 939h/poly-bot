@@ -21,6 +21,10 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position/open-order market slugs and exit
+    WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED=true  # place next-match 1H corners Under 3.5 BUY orders
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
+    WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
+    WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -40,7 +44,11 @@ import requests
 from dotenv import load_dotenv
 from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderType, Side
 from py_clob_client_v2.constants import POLYGON
-from world_cup_market_scanner import scan_world_cup_exact_score_markets, scanner_enabled
+from world_cup_market_scanner import (
+    scan_world_cup_exact_score_markets,
+    scan_world_cup_first_half_corners_markets,
+    scanner_enabled,
+)
 
 load_dotenv()
 
@@ -93,7 +101,12 @@ ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
 ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
-PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "true").lower() == "true" #set true will disable auto sell
+PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true" #set true will disable auto sell
+FIRST_HALF_CORNERS_BUY_ENABLED = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED", "true").lower() == "true"
+FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES", "2"))
+FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
+FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
+FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -620,6 +633,13 @@ def market_outcomes(market: dict[str, Any]) -> list[tuple[str, str]]:
     pairs = [(outcome, token_id) for outcome, token_id in pairs if outcome.lower() == "yes" or not {"yes", "no"}.issubset({o.lower() for o in outcomes})]
     return pairs[:MAX_OUTCOMES_PER_MARKET]
 
+def token_id_for_outcome(market: dict[str, Any], wanted_outcome: str) -> str:
+    wanted = wanted_outcome.strip().lower()
+    for outcome, token_id in zip(outcomes_from_market(market), token_ids_from_market(market), strict=False):
+        if outcome.strip().lower() == wanted:
+            return token_id
+    return ""
+
 def get_levels(book: Any, side_name: str) -> list[tuple[float, float]]:
     raw_levels = book.get(side_name) if isinstance(book, dict) else getattr(book, side_name, None)
     levels: list[tuple[float, float]] = []
@@ -970,6 +990,21 @@ def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id:
         and str(order.get("side", "")).upper() == "SELL"
     )
 
+def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
+    if client is None or DRY_RUN:
+        return 0.0
+    try:
+        orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
+    except Exception as exc:
+        log.warning("Open BUY check failed for %s: %s", token_id, exc)
+        return 0.0
+    return sum(
+        order_size(order)
+        for order in orders
+        if str(order.get("asset_id") or order.get("assetId") or "") == token_id
+        and str(order.get("side", "")).upper() == "BUY"
+    )
+
 def tranche_sizes(shares: float, tranches: int, min_size: float = 0.0) -> list[float]:
     if tranches <= 1:
         return [shares] if shares >= min_size else []
@@ -1038,6 +1073,57 @@ def place_position_sell_tranches(
         if order_id:
             placed_shares += size
     return placed_shares
+
+def place_first_half_corners_orders(client: ClobClient | None, protected: set[str]) -> None:
+    if not FIRST_HALF_CORNERS_BUY_ENABLED:
+        return
+    if FIRST_HALF_CORNERS_SIZE <= 0 or FIRST_HALF_CORNERS_PRICE <= 0:
+        log.warning("Skipping 1H corners BUY placement because size/price is not positive.")
+        return
+
+    markets = scan_world_cup_first_half_corners_markets(FIRST_HALF_CORNERS_MATCHES)
+    if not markets:
+        log.info("No next-match World Cup 1H corners O/U 3.5 markets found.")
+        return
+
+    for market in markets:
+        market_slug = str(market.get("slug") or "")
+        token_id = token_id_for_outcome(market, FIRST_HALF_CORNERS_OUTCOME)
+        if not token_id:
+            log.info(
+                "Skipping 1H corners market without %s outcome token: %s | outcomes=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or market.get("question"),
+                outcomes_from_market(market),
+            )
+            continue
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
+        key = f"{condition_id}:{token_id}:1h-corners-buy"
+        if key in protected:
+            log.debug("Already placed/protected 1H corners BUY for %s", market_slug or token_id)
+            continue
+        open_buy_shares = open_buy_order_size(client, condition_id, token_id)
+        if open_buy_shares >= FIRST_HALF_CORNERS_SIZE:
+            log.info(
+                "Existing 1H corners BUY already covers %s | market_slug=%s | size=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+                open_buy_shares,
+            )
+            protected.add(key)
+            continue
+
+        label = f"{market.get('question') or market_slug} {FIRST_HALF_CORNERS_OUTCOME}"
+        order_id = place_order(
+            client,
+            token_id,
+            label,
+            FIRST_HALF_CORNERS_PRICE,
+            FIRST_HALF_CORNERS_SIZE,
+            Side.BUY,
+        )
+        if order_id:
+            protected.add(key)
 
 def monitor_world_cup_positions(
     client: ClobClient | None,
@@ -1133,10 +1219,12 @@ def main() -> None:
         print_position_market_slugs(client)
         return
     protected_positions: dict[str, float] = {}
+    protected_corners_orders: set[str] = set()
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
 
     while True:
+        place_first_half_corners_orders(client, protected_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:
             break
