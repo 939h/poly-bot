@@ -4,7 +4,7 @@ Polymarket World Cup position monitor / take-profit bot.
 This script no longer places or reorders exact-score BUY orders. It only:
     - detects existing World Cup positions for the configured wallet
     - places/maintains take-profit SELL tranches for uncovered shares
-    - optionally prints detected World Cup position market slugs and exits
+    - optionally prints detected World Cup position/open-order market slugs and exits
 
     POLY_PRIVATE_KEY=0x...
     POLY_API_KEY=...
@@ -20,7 +20,7 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_POSITION_MIN_NEW_SHARES=5  # minimum newly bought shares before placing another TP tranche set
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
-    WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position market slugs and exit
+    WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position/open-order market slugs and exit
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -795,6 +795,7 @@ def is_world_cup_position(position: dict[str, Any]) -> bool:
 def position_market_record(position: dict[str, Any]) -> dict[str, Any]:
     market_slug = position_market_slug(position)
     return {
+        "type": "position",
         "marketSlug": market_slug,
         "conditionId": str(position.get("conditionId") or position.get("condition_id") or ""),
         "tokenId": position_token_id(position),
@@ -804,23 +805,131 @@ def position_market_record(position: dict[str, Any]) -> dict[str, Any]:
         "avgPrice": position_entry_price(position),
     }
 
-def print_position_market_slugs() -> None:
+def order_token_id(order: dict[str, Any]) -> str:
+    for key in ("asset_id", "assetId", "tokenId", "token_id", "asset"):
+        if order.get(key):
+            return str(order[key]).strip()
+    return ""
+
+def order_condition_id(order: dict[str, Any]) -> str:
+    for key in ("market", "conditionId", "condition_id"):
+        if order.get(key):
+            return str(order[key]).strip()
+    return ""
+
+def order_market_slug(order: dict[str, Any]) -> str:
+    for key in ("marketSlug", "market_slug", "slug"):
+        if order.get(key):
+            return str(order[key]).strip()
+    return ""
+
+def order_price(order: dict[str, Any]) -> float:
+    for key in ("price", "original_price", "originalPrice"):
+        price = as_float(order.get(key))
+        if price > 0:
+            return price
+    return 0.0
+
+def fetch_market_by_condition_id(condition_id: str) -> dict[str, Any] | None:
+    if not condition_id:
+        return None
+
+    for params in ({"condition_ids": condition_id}, {"condition_id": condition_id}, {"conditionId": condition_id}):
+        markets = as_list_payload(gamma_get("/markets", **params), "markets")
+        if markets:
+            return markets[0]
+    return None
+
+def open_order_market_record(order: dict[str, Any], market_cache: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    condition_id = order_condition_id(order)
+    market_slug = order_market_slug(order)
+    market = None
+    if not market_slug and condition_id:
+        if condition_id not in market_cache:
+            market_cache[condition_id] = fetch_market_by_condition_id(condition_id)
+        market = market_cache[condition_id]
+        if market:
+            market_slug = str(market.get("slug") or "").strip()
+
+    return {
+        "type": "open_order",
+        "marketSlug": market_slug,
+        "conditionId": condition_id,
+        "tokenId": order_token_id(order),
+        "outcome": str(order.get("outcome") or ""),
+        "side": str(order.get("side") or ""),
+        "size": order_size(order),
+        "price": order_price(order),
+        "orderId": str(order.get("id") or order.get("orderID") or order.get("order_id") or ""),
+        "title": str(order.get("title") or order.get("marketTitle") or (market or {}).get("question") or ""),
+    }
+
+def account_open_orders(client: ClobClient | None) -> list[dict[str, Any]]:
+    if client is None:
+        return []
+    try:
+        orders = client.get_open_orders(OpenOrderParams()) or []
+    except Exception as exc:
+        log.warning("Open order slug print failed: %s", exc)
+        return []
+    return [order for order in orders if isinstance(order, dict)]
+
+def is_world_cup_open_order_record(record: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(record.get(key, ""))
+        for key in ("title", "marketSlug", "conditionId", "outcome", "side")
+    ).lower()
+    return "world cup" in text or "fifa world cup" in text or "fifwc-" in text
+
+def print_position_market_slugs(client: ClobClient | None = None) -> None:
     if not POSITION_WALLET:
         log.warning("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=true but WORLD_CUP_POSITION_WALLET/POLY_FUNDER_ADDRESS is not set.")
-        return
 
     records = [
         position_market_record(position)
         for position in account_positions(POSITION_WALLET)
         if is_world_cup_position(position) and position_size(position) > 0
+    ] if POSITION_WALLET else []
+
+    market_cache: dict[str, dict[str, Any] | None] = {}
+    open_order_records = [
+        record
+        for record in (open_order_market_record(order, market_cache) for order in account_open_orders(client))
+        if is_world_cup_open_order_record(record)
     ]
+    records.extend(open_order_records)
+
     if not records:
-        log.info("No open World Cup positions found for wallet %s", POSITION_WALLET)
+        log.info("No open World Cup positions or open orders found for wallet %s", POSITION_WALLET or "n/a")
         print("[]")
         return
 
     for record in records:
-        if record["marketSlug"]:
+        if record["type"] == "open_order":
+            if record["marketSlug"]:
+                log.info(
+                    "Detected World Cup open order market slug: %s | side=%s | outcome=%s | size=%s | price=%s | token_id=%s | condition_id=%s | order_id=%s",
+                    record["marketSlug"],
+                    record["side"] or "n/a",
+                    record["outcome"] or "n/a",
+                    record["size"],
+                    f"${record['price']:.4f}" if record["price"] else "n/a",
+                    record["tokenId"] or "n/a",
+                    record["conditionId"] or "n/a",
+                    record["orderId"] or "n/a",
+                )
+            else:
+                log.info(
+                    "Detected World Cup open order without market slug | side=%s | outcome=%s | size=%s | price=%s | token_id=%s | condition_id=%s | order_id=%s",
+                    record["side"] or "n/a",
+                    record["outcome"] or "n/a",
+                    record["size"],
+                    f"${record['price']:.4f}" if record["price"] else "n/a",
+                    record["tokenId"] or "n/a",
+                    record["conditionId"] or "n/a",
+                    record["orderId"] or "n/a",
+                )
+        elif record["marketSlug"]:
             log.info(
                 "Detected World Cup position market slug: %s | outcome=%s | size=%s | token_id=%s | condition_id=%s",
                 record["marketSlug"],
@@ -1018,11 +1127,11 @@ def main() -> None:
         TAKE_PROFIT_MULTIPLIER,
     )
 
-    if PRINT_POSITION_MARKET_SLUGS:
-        print_position_market_slugs()
-        return
-
     client = build_client()
+
+    if PRINT_POSITION_MARKET_SLUGS:
+        print_position_market_slugs(client)
+        return
     protected_positions: dict[str, float] = {}
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
