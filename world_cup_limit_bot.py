@@ -25,7 +25,8 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
-    WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=50  # blacklist 1H corners BUYs after kickoff + this many minutes
+    WORLD_CUP_ORDER_ACTIVE_WINDOWS=01:01-02:20,05:01-06:00,08:01-09:00,1:01-12:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -108,8 +109,9 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
+FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "50"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:01-00:50,04:00-06:00,18:00-18:52").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "01:01-02:20,05:01-06:00,08:01-09:00,1:01-12:00,19:00-21:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -450,6 +452,16 @@ def market_is_closed_or_resolved(market: dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip().lower() == "true":
             return True
     return False
+
+
+def first_half_corners_market_has_ended(market: dict[str, Any], now: datetime | None = None) -> bool:
+    if market_is_closed_or_resolved(market):
+        return True
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return False
+    now = now or datetime.now(UTC)
+    return now >= kickoff + timedelta(minutes=FIRST_HALF_CORNERS_MATCH_END_MINUTES)
 
 def position_sell_window_open(market: dict[str, Any], now: datetime | None = None) -> bool:
     if market_is_closed_or_resolved(market):
@@ -1213,10 +1225,20 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
         key = f"{condition_id}:{token_id}:1h-corners-buy"
         if key in completed:
             log.info(
-                "Skipping 1H corners BUY for %s; this side was already filled and marked complete for market_slug=%s",
+                "Skipping 1H corners BUY for %s; this side was already filled or blacklisted for market_slug=%s",
                 FIRST_HALF_CORNERS_OUTCOME,
                 market_slug or "n/a",
             )
+            continue
+
+        if first_half_corners_market_has_ended(market):
+            log.info(
+                "Skipping and blacklisting 1H corners BUY for %s because match/market has ended | market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            save_first_half_corners_completed(completed)
             continue
 
         filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
