@@ -25,6 +25,7 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
+    WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -108,6 +109,7 @@ FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:00-02:00,04:00-06:00,19:00-21:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -123,6 +125,78 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+
+def parse_time_of_day_minutes(raw: str) -> int:
+    value = raw.strip().lower().replace(".", "")
+    if value in {"12am", "12:00am"}:
+        return 0
+    if value in {"12pm", "12:00pm"}:
+        return 12 * 60
+
+    suffix = ""
+    if value.endswith(("am", "pm")):
+        suffix = value[-2:]
+        value = value[:-2].strip()
+
+    if ":" in value:
+        hour_raw, minute_raw = value.split(":", 1)
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+    else:
+        hour = int(value)
+        minute = 0
+
+    if suffix:
+        if hour < 1 or hour > 12:
+            raise ValueError(f"Invalid 12-hour time: {raw}")
+        if suffix == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    elif hour < 0 or hour > 23:
+        raise ValueError(f"Invalid 24-hour time: {raw}")
+
+    if minute < 0 or minute > 59:
+        raise ValueError(f"Invalid minute in time: {raw}")
+    return hour * 60 + minute
+
+def parse_order_active_windows(raw: str) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
+    for part in re.split(r"[,;]+", raw):
+        value = part.strip()
+        if not value:
+            continue
+        if "-" not in value:
+            raise ValueError(f"Active window must be start-end: {value}")
+        start_raw, end_raw = value.split("-", 1)
+        start = parse_time_of_day_minutes(start_raw)
+        end = parse_time_of_day_minutes(end_raw)
+        if start == end:
+            raise ValueError(f"Active window cannot have identical start/end: {value}")
+        windows.append((start, end))
+    return windows
+
+ORDER_ACTIVE_WINDOWS = parse_order_active_windows(ORDER_ACTIVE_WINDOWS_RAW)
+
+def format_minutes_as_hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+def order_active_windows_label() -> str:
+    return ", ".join(f"{format_minutes_as_hhmm(start)}-{format_minutes_as_hhmm(end)}" for start, end in ORDER_ACTIVE_WINDOWS)
+
+def is_order_active_time(now: datetime | None = None) -> bool:
+    if not ORDER_ACTIVE_WINDOWS:
+        return True
+    now = now or datetime.now(UTC)
+    local_now = local_time(now)
+    minute = local_now.hour * 60 + local_now.minute
+    for start, end in ORDER_ACTIVE_WINDOWS:
+        if start < end and start <= minute < end:
+            return True
+        if start > end and (minute >= start or minute < end):
+            return True
+    return False
 
 def load_first_half_corners_completed() -> set[str]:
     if not FIRST_HALF_CORNERS_STATE_FILE:
@@ -1278,6 +1352,14 @@ def main() -> None:
         TAKE_PROFIT_MULTIPLIER,
     )
 
+    if not is_order_active_time():
+        log.info(
+            "Current local time is outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); turning off bot.",
+            order_active_windows_label() or "always off",
+            DAY_TZ_OFFSET,
+        )
+        return
+
     client = build_client()
 
     if PRINT_POSITION_MARKET_SLUGS:
@@ -1290,6 +1372,13 @@ def main() -> None:
     skipped_position_markets: set[str] = set()
 
     while True:
+        if not is_order_active_time():
+            log.info(
+                "Current local time moved outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); turning off bot.",
+                order_active_windows_label() or "always off",
+                DAY_TZ_OFFSET,
+            )
+            return
         place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:
