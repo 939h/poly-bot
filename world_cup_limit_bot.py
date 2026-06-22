@@ -1099,19 +1099,26 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             continue
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
         key = f"{condition_id}:{token_id}:1h-corners-buy"
-        if key in protected:
-            log.debug("Already placed/protected 1H corners BUY for %s", market_slug or token_id)
-            continue
         open_buy_shares = open_buy_order_size(client, condition_id, token_id)
-        if open_buy_shares >= FIRST_HALF_CORNERS_SIZE:
+        if open_buy_shares > 0:
             log.info(
-                "Existing 1H corners BUY already covers %s | market_slug=%s | size=%s",
+                "Existing 1H corners BUY is still open for %s | market_slug=%s | open_size=%s",
                 FIRST_HALF_CORNERS_OUTCOME,
                 market_slug or "n/a",
                 open_buy_shares,
             )
             protected.add(key)
             continue
+        if DRY_RUN and key in protected:
+            log.debug("Already placed/protected dry-run 1H corners BUY for %s", market_slug or token_id)
+            continue
+        if key in protected:
+            log.info(
+                "No open 1H corners BUY found for %s; replacing order for market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+            )
+            protected.discard(key)
 
         label = f"{market.get('question') or market_slug} {FIRST_HALF_CORNERS_OUTCOME}"
         order_id = place_order(
