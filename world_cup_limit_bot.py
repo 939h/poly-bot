@@ -107,6 +107,7 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
+FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -121,6 +122,43 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger(__name__)
+
+
+def load_first_half_corners_completed() -> set[str]:
+    if not FIRST_HALF_CORNERS_STATE_FILE:
+        return set()
+    try:
+        with open(FIRST_HALF_CORNERS_STATE_FILE, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Unable to load 1H corners completed state from %s: %s", FIRST_HALF_CORNERS_STATE_FILE, exc)
+        return set()
+    if isinstance(payload, list):
+        return {str(item) for item in payload if item}
+    if isinstance(payload, dict):
+        return {str(item) for item in payload.get("completed", []) if item}
+    return set()
+
+def save_first_half_corners_completed(completed: set[str]) -> None:
+    if not FIRST_HALF_CORNERS_STATE_FILE:
+        return
+    try:
+        with open(FIRST_HALF_CORNERS_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"completed": sorted(completed)}, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        log.warning("Unable to save 1H corners completed state to %s: %s", FIRST_HALF_CORNERS_STATE_FILE, exc)
+
+def account_position_size_for_token(wallet: str, token_id: str) -> float:
+    if not wallet or not token_id or DRY_RUN:
+        return 0.0
+    return sum(
+        position_size(position)
+        for position in account_positions(wallet)
+        if position_token_id(position) == token_id
+    )
 
 def build_client() -> ClobClient | None:
     private_key = os.getenv("POLY_PRIVATE_KEY")
@@ -1074,7 +1112,7 @@ def place_position_sell_tranches(
             placed_shares += size
     return placed_shares
 
-def place_first_half_corners_orders(client: ClobClient | None, protected: set[str]) -> None:
+def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
     if FIRST_HALF_CORNERS_SIZE <= 0 or FIRST_HALF_CORNERS_PRICE <= 0:
@@ -1099,6 +1137,26 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             continue
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
         key = f"{condition_id}:{token_id}:1h-corners-buy"
+        if key in completed:
+            log.info(
+                "Skipping 1H corners BUY for %s; this side was already filled and marked complete for market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+            )
+            continue
+
+        filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
+        if filled_position_shares > 0:
+            log.info(
+                "Skipping 1H corners BUY for %s; wallet already holds %s filled share(s) for market_slug=%s. Marking complete.",
+                FIRST_HALF_CORNERS_OUTCOME,
+                filled_position_shares,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            save_first_half_corners_completed(completed)
+            continue
+
         open_buy_shares = open_buy_order_size(client, condition_id, token_id)
         if open_buy_shares > 0:
             log.info(
@@ -1114,7 +1172,7 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             continue
         if key in protected:
             log.info(
-                "No open 1H corners BUY found for %s; replacing order for market_slug=%s",
+                "No open 1H corners BUY found for %s; replacing order for market_slug=%s because no filled position was detected yet",
                 FIRST_HALF_CORNERS_OUTCOME,
                 market_slug or "n/a",
             )
@@ -1227,11 +1285,12 @@ def main() -> None:
         return
     protected_positions: dict[str, float] = {}
     protected_corners_orders: set[str] = set()
+    completed_corners_orders = load_first_half_corners_completed()
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
 
     while True:
-        place_first_half_corners_orders(client, protected_corners_orders)
+        place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:
             break
