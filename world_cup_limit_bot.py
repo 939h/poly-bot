@@ -25,8 +25,9 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
-    WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=50  # blacklist 1H corners BUYs after kickoff + this many minutes
-    WORLD_CUP_ORDER_ACTIVE_WINDOWS=01:01-02:20,05:01-06:00,08:01-09:00,1:01-12:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
+    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
+    WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -44,7 +45,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderType, Side
+from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderPayload, OrderType, Side
 from py_clob_client_v2.constants import POLYGON
 from world_cup_market_scanner import (
     scan_world_cup_exact_score_markets,
@@ -109,9 +110,10 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "5"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
+FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:55-03:00,03:55-06:00,06:55-09:00,09:55-15:00").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:55-03:00,03:55-06:00,06:55-09:00,09:55-13:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -462,6 +464,14 @@ def first_half_corners_market_has_ended(market: dict[str, Any], now: datetime | 
         return False
     now = now or datetime.now(UTC)
     return now >= kickoff + timedelta(minutes=FIRST_HALF_CORNERS_MATCH_END_MINUTES)
+
+
+def first_half_corners_live_unfilled_cancel_due(market: dict[str, Any], now: datetime | None = None) -> bool:
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return False
+    now = now or datetime.now(UTC)
+    return now >= kickoff + timedelta(minutes=FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES)
 
 def position_sell_window_open(market: dict[str, Any], now: datetime | None = None) -> bool:
     if market_is_closed_or_resolved(market):
@@ -1114,20 +1124,49 @@ def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id:
         and str(order.get("side", "")).upper() == "SELL"
     )
 
-def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
+def open_buy_orders(client: ClobClient | None, condition_id: str, token_id: str) -> list[dict[str, Any]]:
     if client is None or DRY_RUN:
-        return 0.0
+        return []
     try:
         orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     except Exception as exc:
         log.warning("Open BUY check failed for %s: %s", token_id, exc)
-        return 0.0
-    return sum(
-        order_size(order)
+        return []
+    return [
+        order
         for order in orders
         if str(order.get("asset_id") or order.get("assetId") or "") == token_id
         and str(order.get("side", "")).upper() == "BUY"
-    )
+    ]
+
+def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
+    return sum(order_size(order) for order in open_buy_orders(client, condition_id, token_id))
+
+def order_id(order: dict[str, Any]) -> str:
+    for key in ("id", "orderID", "order_id"):
+        if order.get(key):
+            return str(order[key])
+    return ""
+
+def cancel_order(client: ClobClient | None, order_id_value: str, label: str) -> bool:
+    if not order_id_value:
+        return False
+    if DRY_RUN:
+        log.info("[DRY RUN] CANCEL %s | order_id=%s", label, order_id_value)
+        return True
+    if client is None:
+        log.warning("Cannot cancel %s without CLOB client | order_id=%s", label, order_id_value)
+        return False
+    try:
+        if hasattr(client, "cancel_order"):
+            client.cancel_order(OrderPayload(orderID=order_id_value))
+        else:
+            client.cancel(order_id_value)
+    except Exception as exc:
+        log.error("Cancel failed for %s | order_id=%s | %s", label, order_id_value, exc)
+        return False
+    log.info("Cancelled %s | order_id=%s", label, order_id_value)
+    return True
 
 def tranche_sizes(shares: float, tranches: int, min_size: float = 0.0) -> list[float]:
     if tranches <= 1:
@@ -1241,6 +1280,28 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             save_first_half_corners_completed(completed)
             continue
 
+        live_unfilled_cancel_due = first_half_corners_live_unfilled_cancel_due(market)
+        open_buys = open_buy_orders(client, condition_id, token_id)
+        open_buy_shares = sum(order_size(order) for order in open_buys)
+        if live_unfilled_cancel_due:
+            if open_buys:
+                for order in open_buys:
+                    cancel_order(
+                        client,
+                        order_id(order),
+                        f"1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
+                    )
+            log.info(
+                "Skipping and blacklisting 1H corners BUY for %s because live match is past %s minutes without a filled BUY | market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            protected.discard(key)
+            save_first_half_corners_completed(completed)
+            continue
+
         filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
         if filled_position_shares > 0:
             log.info(
@@ -1253,7 +1314,6 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             save_first_half_corners_completed(completed)
             continue
 
-        open_buy_shares = open_buy_order_size(client, condition_id, token_id)
         if open_buy_shares > 0:
             log.info(
                 "Existing 1H corners BUY is still open for %s | market_slug=%s | open_size=%s",
