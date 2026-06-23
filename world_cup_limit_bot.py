@@ -113,7 +113,7 @@ FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE",
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:55-03:00,03:55-06:00,06:55-09:00,09:55-17:00").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:35-13:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -1142,7 +1142,7 @@ def open_buy_orders(client: ClobClient | None, condition_id: str, token_id: str)
 def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
     return sum(order_size(order) for order in open_buy_orders(client, condition_id, token_id))
 
-def order_id(order: dict[str, Any]) -> str:
+def order_id_from_order(order: dict[str, Any]) -> str:
     for key in ("id", "orderID", "order_id"):
         if order.get(key):
             return str(order[key])
@@ -1288,7 +1288,7 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
                 for order in open_buys:
                     cancel_order(
                         client,
-                        order_id(order),
+                        order_id_from_order(order),
                         f"1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
                     )
             log.info(
