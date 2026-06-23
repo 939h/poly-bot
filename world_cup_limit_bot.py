@@ -1237,6 +1237,55 @@ def place_position_sell_tranches(
             placed_shares += size
     return placed_shares
 
+
+def is_first_half_corners_buy_record(record: dict[str, Any]) -> bool:
+    slug = str(record.get("marketSlug") or "").lower()
+    title = str(record.get("title") or "").lower()
+    side = str(record.get("side") or "").upper()
+    outcome = str(record.get("outcome") or "").strip().lower()
+    wanted_outcome = FIRST_HALF_CORNERS_OUTCOME.strip().lower()
+    return (
+        side == "BUY"
+        and (not wanted_outcome or outcome in {"", wanted_outcome})
+        and ("corners-first-half-total-3pt5" in slug or "1st half" in title and "corner" in title)
+    )
+
+def cancel_stale_first_half_corners_open_orders(
+    client: ClobClient | None,
+    completed: set[str],
+    market_cache: dict[str, dict[str, Any] | None],
+) -> None:
+    if client is None or DRY_RUN:
+        return
+    for order in account_open_orders(client):
+        record = open_order_market_record(order, market_cache)
+        if not is_first_half_corners_buy_record(record):
+            continue
+        market_slug = str(record.get("marketSlug") or "")
+        condition_id = str(record.get("conditionId") or "")
+        token_id = str(record.get("tokenId") or "")
+        if not condition_id or not token_id:
+            log.info("Skipping stale 1H corners open-order check with incomplete record: %s", record)
+            continue
+        market = fetch_market_by_slug(market_slug) if market_slug else None
+        if not market:
+            market = {"slug": market_slug, "conditionId": condition_id, "question": record.get("title") or market_slug}
+        if not (first_half_corners_market_has_ended(market) or first_half_corners_live_unfilled_cancel_due(market)):
+            continue
+        key = f"{condition_id}:{token_id}:1h-corners-buy"
+        cancel_order(
+            client,
+            str(record.get("orderId") or order_id_from_order(order)),
+            f"stale 1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
+        )
+        log.info(
+            "Blacklisting stale 1H corners BUY open order outside scanner window | market_slug=%s | token_id=%s",
+            market_slug or "n/a",
+            token_id,
+        )
+        completed.add(key)
+        save_first_half_corners_completed(completed)
+
 def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
@@ -1452,6 +1501,7 @@ def main() -> None:
     completed_corners_orders = load_first_half_corners_completed()
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
+    open_order_market_cache: dict[str, dict[str, Any] | None] = {}
 
     while True:
         if not is_order_active_time():
@@ -1461,6 +1511,7 @@ def main() -> None:
                 DAY_TZ_OFFSET,
             )
             return
+        cancel_stale_first_half_corners_open_orders(client, completed_corners_orders, open_order_market_cache)
         place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:

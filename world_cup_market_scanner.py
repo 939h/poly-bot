@@ -144,6 +144,7 @@ def upcoming_world_cup_events(
     limit: int = SCANNER_MATCHES,
     include_started_within_minutes: int = 0,
     now: datetime | None = None,
+    require_match_slug: bool = False,
 ) -> list[dict[str, Any]]:
     now = now or datetime.now(UTC)
     upcoming: list[tuple[datetime, dict[str, Any]]] = []
@@ -152,6 +153,8 @@ def upcoming_world_cup_events(
         title = str(event.get("title") or "")
         title_lower = title.lower()
         is_match_slug = FIFWC_MATCH_SLUG_RE.fullmatch(slug) is not None
+        if require_match_slug and not is_match_slug:
+            continue
         if not is_match_slug and "world cup" not in title_lower:
             continue
         if "player prop" in title_lower or "player-prop" in slug.lower():
@@ -248,7 +251,11 @@ def scan_world_cup_first_half_corners_markets(limit: int = 2) -> list[dict[str, 
 
     markets: list[dict[str, Any]] = []
     seen: set[str] = set()
-    events = upcoming_world_cup_events(limit, include_started_within_minutes=FIRST_HALF_CORNERS_LIVE_SCAN_MINUTES)
+    events = upcoming_world_cup_events(
+        limit,
+        include_started_within_minutes=FIRST_HALF_CORNERS_LIVE_SCAN_MINUTES,
+        require_match_slug=True,
+    )
     event_summaries: list[str] = []
     for event in events:
         event_slug = str(event.get("slug") or "")
