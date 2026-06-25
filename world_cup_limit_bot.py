@@ -25,6 +25,9 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
+    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
+    WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
     WORLD_CUP_DAY_TZ_OFFSET=8                 # UTC+8 local day/display by default
 """
@@ -42,7 +45,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderType, Side
+from py_clob_client_v2 import ApiCreds, ClobClient, OpenOrderParams, OrderArgs, OrderPayload, OrderType, Side
 from py_clob_client_v2.constants import POLYGON
 from world_cup_market_scanner import (
     scan_world_cup_exact_score_markets,
@@ -107,6 +110,10 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
+FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
+FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
+FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:00-02:00,04:00-06:00,19:00-21:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -121,6 +128,139 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger(__name__)
+
+
+
+def parse_time_of_day_minutes(raw: str) -> int:
+    value = raw.strip().lower().replace(".", "")
+    if value in {"12am", "12:00am"}:
+        return 0
+    if value in {"12pm", "12:00pm"}:
+        return 12 * 60
+
+    suffix = ""
+    if value.endswith(("am", "pm")):
+        suffix = value[-2:]
+        value = value[:-2].strip()
+
+    if ":" in value:
+        hour_raw, minute_raw = value.split(":", 1)
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+    else:
+        hour = int(value)
+        minute = 0
+
+    if suffix:
+        if hour < 1 or hour > 12:
+            raise ValueError(f"Invalid 12-hour time: {raw}")
+        if suffix == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    elif hour < 0 or hour > 23:
+        raise ValueError(f"Invalid 24-hour time: {raw}")
+
+    if minute < 0 or minute > 59:
+        raise ValueError(f"Invalid minute in time: {raw}")
+    return hour * 60 + minute
+
+def parse_order_active_windows(raw: str) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
+    for part in re.split(r"[,;]+", raw):
+        value = part.strip()
+        if not value:
+            continue
+        if "-" not in value:
+            raise ValueError(f"Active window must be start-end: {value}")
+        start_raw, end_raw = value.split("-", 1)
+        start = parse_time_of_day_minutes(start_raw)
+        end = parse_time_of_day_minutes(end_raw)
+        if start == end:
+            raise ValueError(f"Active window cannot have identical start/end: {value}")
+        windows.append((start, end))
+    return windows
+
+ORDER_ACTIVE_WINDOWS = parse_order_active_windows(ORDER_ACTIVE_WINDOWS_RAW)
+
+def format_minutes_as_hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+def order_active_windows_label() -> str:
+    return ", ".join(f"{format_minutes_as_hhmm(start)}-{format_minutes_as_hhmm(end)}" for start, end in ORDER_ACTIVE_WINDOWS)
+
+def is_order_active_time(now: datetime | None = None) -> bool:
+    if not ORDER_ACTIVE_WINDOWS:
+        return True
+    now = now or datetime.now(UTC)
+    local_now = local_time(now)
+    minute = local_now.hour * 60 + local_now.minute
+    for start, end in ORDER_ACTIVE_WINDOWS:
+        if start < end and start <= minute < end:
+            return True
+        if start > end and (minute >= start or minute < end):
+            return True
+    return False
+
+
+def seconds_until_next_order_active_window(now: datetime | None = None) -> int:
+    if not ORDER_ACTIVE_WINDOWS or is_order_active_time(now):
+        return 0
+    now = now or datetime.now(UTC)
+    local_now = local_time(now)
+    current_seconds = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
+    starts = sorted(start * 60 for start, _ in ORDER_ACTIVE_WINDOWS)
+    for start_seconds in starts:
+        if start_seconds > current_seconds:
+            return start_seconds - current_seconds
+    return 24 * 3600 - current_seconds + starts[0]
+
+def sleep_until_active_window() -> None:
+    wait_seconds = seconds_until_next_order_active_window()
+    sleep_seconds = min(max(wait_seconds, 1), max(POLL_SECS, 1))
+    log.info(
+        "Current local time is outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); sleeping %ss until next check.",
+        order_active_windows_label() or "always on",
+        DAY_TZ_OFFSET,
+        sleep_seconds,
+    )
+    time.sleep(sleep_seconds)
+
+def load_first_half_corners_completed() -> set[str]:
+    if not FIRST_HALF_CORNERS_STATE_FILE:
+        return set()
+    try:
+        with open(FIRST_HALF_CORNERS_STATE_FILE, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Unable to load 1H corners completed state from %s: %s", FIRST_HALF_CORNERS_STATE_FILE, exc)
+        return set()
+    if isinstance(payload, list):
+        return {str(item) for item in payload if item}
+    if isinstance(payload, dict):
+        return {str(item) for item in payload.get("completed", []) if item}
+    return set()
+
+def save_first_half_corners_completed(completed: set[str]) -> None:
+    if not FIRST_HALF_CORNERS_STATE_FILE:
+        return
+    try:
+        with open(FIRST_HALF_CORNERS_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"completed": sorted(completed)}, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        log.warning("Unable to save 1H corners completed state to %s: %s", FIRST_HALF_CORNERS_STATE_FILE, exc)
+
+def account_position_size_for_token(wallet: str, token_id: str) -> float:
+    if not wallet or not token_id or DRY_RUN:
+        return 0.0
+    return sum(
+        position_size(position)
+        for position in account_positions(wallet)
+        if position_token_id(position) == token_id
+    )
 
 def build_client() -> ClobClient | None:
     private_key = os.getenv("POLY_PRIVATE_KEY")
@@ -338,6 +478,24 @@ def market_is_closed_or_resolved(market: dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip().lower() == "true":
             return True
     return False
+
+
+def first_half_corners_market_has_ended(market: dict[str, Any], now: datetime | None = None) -> bool:
+    if market_is_closed_or_resolved(market):
+        return True
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return False
+    now = now or datetime.now(UTC)
+    return now >= kickoff + timedelta(minutes=FIRST_HALF_CORNERS_MATCH_END_MINUTES)
+
+
+def first_half_corners_live_unfilled_cancel_due(market: dict[str, Any], now: datetime | None = None) -> bool:
+    kickoff = market_datetime(market)
+    if kickoff is None:
+        return False
+    now = now or datetime.now(UTC)
+    return now >= kickoff + timedelta(minutes=FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES)
 
 def position_sell_window_open(market: dict[str, Any], now: datetime | None = None) -> bool:
     if market_is_closed_or_resolved(market):
@@ -990,20 +1148,49 @@ def open_sell_order_size(client: ClobClient | None, condition_id: str, token_id:
         and str(order.get("side", "")).upper() == "SELL"
     )
 
-def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
+def open_buy_orders(client: ClobClient | None, condition_id: str, token_id: str) -> list[dict[str, Any]]:
     if client is None or DRY_RUN:
-        return 0.0
+        return []
     try:
         orders = client.get_open_orders(OpenOrderParams(market=condition_id)) or []
     except Exception as exc:
         log.warning("Open BUY check failed for %s: %s", token_id, exc)
-        return 0.0
-    return sum(
-        order_size(order)
+        return []
+    return [
+        order
         for order in orders
         if str(order.get("asset_id") or order.get("assetId") or "") == token_id
         and str(order.get("side", "")).upper() == "BUY"
-    )
+    ]
+
+def open_buy_order_size(client: ClobClient | None, condition_id: str, token_id: str) -> float:
+    return sum(order_size(order) for order in open_buy_orders(client, condition_id, token_id))
+
+def order_id_from_order(order: dict[str, Any]) -> str:
+    for key in ("id", "orderID", "order_id"):
+        if order.get(key):
+            return str(order[key])
+    return ""
+
+def cancel_order(client: ClobClient | None, order_id_value: str, label: str) -> bool:
+    if not order_id_value:
+        return False
+    if DRY_RUN:
+        log.info("[DRY RUN] CANCEL %s | order_id=%s", label, order_id_value)
+        return True
+    if client is None:
+        log.warning("Cannot cancel %s without CLOB client | order_id=%s", label, order_id_value)
+        return False
+    try:
+        if hasattr(client, "cancel_order"):
+            client.cancel_order(OrderPayload(orderID=order_id_value))
+        else:
+            client.cancel(order_id_value)
+    except Exception as exc:
+        log.error("Cancel failed for %s | order_id=%s | %s", label, order_id_value, exc)
+        return False
+    log.info("Cancelled %s | order_id=%s", label, order_id_value)
+    return True
 
 def tranche_sizes(shares: float, tranches: int, min_size: float = 0.0) -> list[float]:
     if tranches <= 1:
@@ -1074,7 +1261,56 @@ def place_position_sell_tranches(
             placed_shares += size
     return placed_shares
 
-def place_first_half_corners_orders(client: ClobClient | None, protected: set[str]) -> None:
+
+def is_first_half_corners_buy_record(record: dict[str, Any]) -> bool:
+    slug = str(record.get("marketSlug") or "").lower()
+    title = str(record.get("title") or "").lower()
+    side = str(record.get("side") or "").upper()
+    outcome = str(record.get("outcome") or "").strip().lower()
+    wanted_outcome = FIRST_HALF_CORNERS_OUTCOME.strip().lower()
+    return (
+        side == "BUY"
+        and (not wanted_outcome or outcome in {"", wanted_outcome})
+        and ("corners-first-half-total-3pt5" in slug or "1st half" in title and "corner" in title)
+    )
+
+def cancel_stale_first_half_corners_open_orders(
+    client: ClobClient | None,
+    completed: set[str],
+    market_cache: dict[str, dict[str, Any] | None],
+) -> None:
+    if client is None or DRY_RUN:
+        return
+    for order in account_open_orders(client):
+        record = open_order_market_record(order, market_cache)
+        if not is_first_half_corners_buy_record(record):
+            continue
+        market_slug = str(record.get("marketSlug") or "")
+        condition_id = str(record.get("conditionId") or "")
+        token_id = str(record.get("tokenId") or "")
+        if not condition_id or not token_id:
+            log.info("Skipping stale 1H corners open-order check with incomplete record: %s", record)
+            continue
+        market = fetch_market_by_slug(market_slug) if market_slug else None
+        if not market:
+            market = {"slug": market_slug, "conditionId": condition_id, "question": record.get("title") or market_slug}
+        if not (first_half_corners_market_has_ended(market) or first_half_corners_live_unfilled_cancel_due(market)):
+            continue
+        key = f"{condition_id}:{token_id}:1h-corners-buy"
+        cancel_order(
+            client,
+            str(record.get("orderId") or order_id_from_order(order)),
+            f"stale 1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
+        )
+        log.info(
+            "Blacklisting stale 1H corners BUY open order outside scanner window | market_slug=%s | token_id=%s",
+            market_slug or "n/a",
+            token_id,
+        )
+        completed.add(key)
+        save_first_half_corners_completed(completed)
+
+def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
     if FIRST_HALF_CORNERS_SIZE <= 0 or FIRST_HALF_CORNERS_PRICE <= 0:
@@ -1099,7 +1335,58 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             continue
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
         key = f"{condition_id}:{token_id}:1h-corners-buy"
-        open_buy_shares = open_buy_order_size(client, condition_id, token_id)
+        if key in completed:
+            log.info(
+                "Skipping 1H corners BUY for %s; this side was already filled or blacklisted for market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+            )
+            continue
+
+        if first_half_corners_market_has_ended(market):
+            log.info(
+                "Skipping and blacklisting 1H corners BUY for %s because match/market has ended | market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            save_first_half_corners_completed(completed)
+            continue
+
+        live_unfilled_cancel_due = first_half_corners_live_unfilled_cancel_due(market)
+        open_buys = open_buy_orders(client, condition_id, token_id)
+        open_buy_shares = sum(order_size(order) for order in open_buys)
+        if live_unfilled_cancel_due:
+            if open_buys:
+                for order in open_buys:
+                    cancel_order(
+                        client,
+                        order_id_from_order(order),
+                        f"1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
+                    )
+            log.info(
+                "Skipping and blacklisting 1H corners BUY for %s because live match is past %s minutes without a filled BUY | market_slug=%s",
+                FIRST_HALF_CORNERS_OUTCOME,
+                FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            protected.discard(key)
+            save_first_half_corners_completed(completed)
+            continue
+
+        filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
+        if filled_position_shares > 0:
+            log.info(
+                "Skipping 1H corners BUY for %s; wallet already holds %s filled share(s) for market_slug=%s. Marking complete.",
+                FIRST_HALF_CORNERS_OUTCOME,
+                filled_position_shares,
+                market_slug or "n/a",
+            )
+            completed.add(key)
+            save_first_half_corners_completed(completed)
+            continue
+
         if open_buy_shares > 0:
             log.info(
                 "Existing 1H corners BUY is still open for %s | market_slug=%s | open_size=%s",
@@ -1114,7 +1401,7 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             continue
         if key in protected:
             log.info(
-                "No open 1H corners BUY found for %s; replacing order for market_slug=%s",
+                "No open 1H corners BUY found for %s; replacing order for market_slug=%s because no filled position was detected yet",
                 FIRST_HALF_CORNERS_OUTCOME,
                 market_slug or "n/a",
             )
@@ -1220,6 +1507,9 @@ def main() -> None:
         TAKE_PROFIT_MULTIPLIER,
     )
 
+    while not is_order_active_time():
+        sleep_until_active_window()
+
     client = build_client()
 
     if PRINT_POSITION_MARKET_SLUGS:
@@ -1227,11 +1517,17 @@ def main() -> None:
         return
     protected_positions: dict[str, float] = {}
     protected_corners_orders: set[str] = set()
+    completed_corners_orders = load_first_half_corners_completed()
     no_order_book_counts: dict[str, int] = {}
     skipped_position_markets: set[str] = set()
+    open_order_market_cache: dict[str, dict[str, Any] | None] = {}
 
     while True:
-        place_first_half_corners_orders(client, protected_corners_orders)
+        if not is_order_active_time():
+            sleep_until_active_window()
+            continue
+        cancel_stale_first_half_corners_open_orders(client, completed_corners_orders, open_order_market_cache)
+        place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:
             break
