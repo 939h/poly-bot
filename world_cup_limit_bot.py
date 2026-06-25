@@ -113,7 +113,7 @@ FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE",
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:35-00:59").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "01:15-01:19,01:21-01:23").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -201,6 +201,30 @@ def is_order_active_time(now: datetime | None = None) -> bool:
         if start > end and (minute >= start or minute < end):
             return True
     return False
+
+
+def seconds_until_next_order_active_window(now: datetime | None = None) -> int:
+    if not ORDER_ACTIVE_WINDOWS or is_order_active_time(now):
+        return 0
+    now = now or datetime.now(UTC)
+    local_now = local_time(now)
+    current_seconds = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
+    starts = sorted(start * 60 for start, _ in ORDER_ACTIVE_WINDOWS)
+    for start_seconds in starts:
+        if start_seconds > current_seconds:
+            return start_seconds - current_seconds
+    return 24 * 3600 - current_seconds + starts[0]
+
+def sleep_until_active_window() -> None:
+    wait_seconds = seconds_until_next_order_active_window()
+    sleep_seconds = min(max(wait_seconds, 1), max(POLL_SECS, 1))
+    log.info(
+        "Current local time is outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); sleeping %ss until next check.",
+        order_active_windows_label() or "always on",
+        DAY_TZ_OFFSET,
+        sleep_seconds,
+    )
+    time.sleep(sleep_seconds)
 
 def load_first_half_corners_completed() -> set[str]:
     if not FIRST_HALF_CORNERS_STATE_FILE:
@@ -1483,13 +1507,8 @@ def main() -> None:
         TAKE_PROFIT_MULTIPLIER,
     )
 
-    if not is_order_active_time():
-        log.info(
-            "Current local time is outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); turning off bot.",
-            order_active_windows_label() or "always off",
-            DAY_TZ_OFFSET,
-        )
-        return
+    while not is_order_active_time():
+        sleep_until_active_window()
 
     client = build_client()
 
@@ -1505,12 +1524,8 @@ def main() -> None:
 
     while True:
         if not is_order_active_time():
-            log.info(
-                "Current local time moved outside WORLD_CUP_ORDER_ACTIVE_WINDOWS=%s (UTC%+d); turning off bot.",
-                order_active_windows_label() or "always off",
-                DAY_TZ_OFFSET,
-            )
-            return
+            sleep_until_active_window()
+            continue
         cancel_stale_first_half_corners_open_orders(client, completed_corners_orders, open_order_market_cache)
         place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
