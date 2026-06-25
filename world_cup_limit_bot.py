@@ -22,8 +22,8 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position/open-order market slugs and exit
     WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED=true  # place next-match 1H corners Under 3.5 BUY orders
-    WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
-    WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=5
+    WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
     WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
     WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
@@ -84,10 +84,10 @@ POSITION_MONITOR = os.getenv("WORLD_CUP_POSITION_MONITOR", "true").lower() == "t
 POSITION_WALLET = os.getenv("WORLD_CUP_POSITION_WALLET", os.getenv("POLY_FUNDER_ADDRESS", "")).strip()
 POSITION_TP_MULTIPLIERS = [
     float(s.strip())
-    for s in os.getenv("WORLD_CUP_POSITION_TP_MULTIPLIERS", "20,50,150").split(",")
+    for s in os.getenv("WORLD_CUP_POSITION_TP_MULTIPLIERS", "15,30,150").split(",")
     if s.strip()
 ]
-POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.89"))
+POSITION_TP_CAP = float(os.getenv("WORLD_CUP_POSITION_TP_CAP", "0.99"))
 POSITION_MIN_NEW_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_NEW_SHARES", "5"))
 POSITION_MIN_TRANCHE_SHARES = float(os.getenv("WORLD_CUP_POSITION_MIN_TRANCHE_SHARES", "5"))
 POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD = int(os.getenv("WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD", "5"))
@@ -102,18 +102,18 @@ BUY_LIVE_ENABLED = os.getenv("WORLD_CUP_BUY_LIVE_ENABLED", "true").lower() == "t
 PLACE_IMMEDIATE_ON_START = os.getenv("WORLD_CUP_PLACE_IMMEDIATE_ON_START", "true").lower() == "true"
 ENTRY_DELAY_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_DELAY_MINUTES", "1"))
 ENTRY_WINDOW_MINUTES = int(os.getenv("WORLD_CUP_ENTRY_WINDOW_MINUTES", "60"))
-ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "60"))
+ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_ORDER_EXPIRATION_MINUTES", "240"))
 SELL_ORDER_EXPIRATION_MINUTES = int(os.getenv("WORLD_CUP_SELL_ORDER_EXPIRATION_MINUTES", "130"))
 PRINT_POSITION_MARKET_SLUGS = os.getenv("WORLD_CUP_PRINT_POSITION_MARKET_SLUGS", "false").lower() == "true" #set true will disable auto sell
 FIRST_HALF_CORNERS_BUY_ENABLED = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED", "true").lower() == "true"
-FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES", "2"))
+FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES", "6"))
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
-FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "50"))
+FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "90"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:00-02:00,04:00-06:00,19:00-21:00").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "01:15-01:19,01:21-01:23").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
