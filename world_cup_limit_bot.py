@@ -25,6 +25,7 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=5
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
+    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs; overrides single price/size
     WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
     WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
     WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
@@ -110,10 +111,11 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "90"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
-FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "30"))
+FIRST_HALF_CORNERS_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES", "0.03:10,0.04:5").strip()
+FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "38"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:21-09:50").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:21-16:50").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -180,6 +182,30 @@ def parse_order_active_windows(raw: str) -> list[tuple[int, int]]:
             raise ValueError(f"Active window cannot have identical start/end: {value}")
         windows.append((start, end))
     return windows
+
+
+def parse_first_half_corners_entries(raw: str) -> list[tuple[float, float]]:
+    if not raw:
+        return [(FIRST_HALF_CORNERS_PRICE, FIRST_HALF_CORNERS_SIZE)]
+    entries: list[tuple[float, float]] = []
+    for part in re.split(r"[,;]+", raw):
+        value = part.strip()
+        if not value:
+            continue
+        if ":" in value:
+            price_raw, size_raw = value.split(":", 1)
+        elif "@" in value:
+            size_raw, price_raw = value.split("@", 1)
+        else:
+            raise ValueError(f"1H corners entry must be price:size or size@price: {value}")
+        price = float(price_raw.strip())
+        size = float(size_raw.strip())
+        if price <= 0 or size <= 0:
+            raise ValueError(f"1H corners entry price/size must be positive: {value}")
+        entries.append((price, size))
+    return entries
+
+FIRST_HALF_CORNERS_ENTRIES = parse_first_half_corners_entries(FIRST_HALF_CORNERS_ENTRIES_RAW)
 
 ORDER_ACTIVE_WINDOWS = parse_order_active_windows(ORDER_ACTIVE_WINDOWS_RAW)
 
@@ -1313,8 +1339,8 @@ def cancel_stale_first_half_corners_open_orders(
 def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
-    if FIRST_HALF_CORNERS_SIZE <= 0 or FIRST_HALF_CORNERS_PRICE <= 0:
-        log.warning("Skipping 1H corners BUY placement because size/price is not positive.")
+    if not FIRST_HALF_CORNERS_ENTRIES:
+        log.warning("Skipping 1H corners BUY placement because no price/size entries are configured.")
         return
 
     markets = scan_world_cup_first_half_corners_markets(FIRST_HALF_CORNERS_MATCHES)
@@ -1408,15 +1434,18 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
             protected.discard(key)
 
         label = f"{market.get('question') or market_slug} {FIRST_HALF_CORNERS_OUTCOME}"
-        order_id = place_order(
-            client,
-            token_id,
-            label,
-            FIRST_HALF_CORNERS_PRICE,
-            FIRST_HALF_CORNERS_SIZE,
-            Side.BUY,
-        )
-        if order_id:
+        placed_any = False
+        for entry_price, entry_size in FIRST_HALF_CORNERS_ENTRIES:
+            order_id = place_order(
+                client,
+                token_id,
+                f"{label} entry-${entry_price:.4f}",
+                entry_price,
+                entry_size,
+                Side.BUY,
+            )
+            placed_any = placed_any or bool(order_id)
+        if placed_any:
             protected.add(key)
 
 def monitor_world_cup_positions(
