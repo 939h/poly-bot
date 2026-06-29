@@ -21,14 +21,15 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_POSITION_MIN_TRANCHE_SHARES=5  # Polymarket CLOB minimum order size for each SELL tranche
     WORLD_CUP_POSITION_NO_ORDER_BOOK_SKIP_THRESHOLD=5  # after TP sells exist, skip after this many missing-book checks
     WORLD_CUP_PRINT_POSITION_MARKET_SLUGS=false  # print detected World Cup position/open-order market slugs and exit
-    WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED=true  # place next-match 1H corners Under 3.5 BUY orders
-    WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=5
-    WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
+    WORLD_CUP_FIRST_HALF_CORNERS_BUY_ENABLED=true  # place next-match 1H corners O/U 3.5 and 4.5 BUY orders
+    WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=2
+    WORLD_CUP_FIRST_HALF_CORNERS_SIZE=50
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
-    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=  # optional price:size pairs for configured outcome; overrides single price/size
-    WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES=0.02:60,0.03:20,0.04:10  # optional Under entries; falls back to entries/single size
-    WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES=0.04:10,0.05:5   # optional Over entries; empty disables Over BUYs
-    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=30  # cancel/blacklist live 1H corners BUYs after this many minutes
+    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs for configured outcome; overrides single price/size
+    WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES=0.03:10,0.04:5  # optional Under entries; falls back to entries/single size
+    WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES=0.03:10,0.04:5   # optional Over entries; empty disables Over BUYs
+    WORLD_CUP_FIRST_HALF_CORNERS_TOTALS=3.5,4.5
+    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
     WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
     WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
@@ -115,7 +116,7 @@ FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
 FIRST_HALF_CORNERS_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES", "").strip()
 FIRST_HALF_CORNERS_UNDER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES", "0.02:60,0.03:20,0.04:10").strip()
-FIRST_HALF_CORNERS_OVER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES", "0.04:10,0.05:5").strip()
+FIRST_HALF_CORNERS_OVER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES", "0.05:5").strip()
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "30"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
@@ -1318,7 +1319,7 @@ def is_first_half_corners_buy_record(record: dict[str, Any]) -> bool:
     return (
         side == "BUY"
         and outcome in {"", "under", "over"}
-        and ("corners-first-half-total-3pt5" in slug or "1st half" in title and "corner" in title)
+        and ("corners-first-half-total-" in slug or "1st half" in title and "corner" in title)
     )
 
 def cancel_stale_first_half_corners_open_orders(

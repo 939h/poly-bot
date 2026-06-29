@@ -29,6 +29,11 @@ SCANNER_SCORE_MAX = int(os.getenv("WORLD_CUP_SCANNER_SCORE_MAX", "5"))
 SCANNER_DAY_TZ_OFFSET = int(os.getenv("WORLD_CUP_DAY_TZ_OFFSET", "8"))
 SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
 FIRST_HALF_CORNERS_LIVE_SCAN_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
+FIRST_HALF_CORNERS_TOTALS = [
+    total.strip()
+    for total in os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_TOTALS", "3.5,4.5").split(",")
+    if total.strip()
+]
 SCANNER_SCORES_RAW = (
     os.getenv("WORLD_CUP_SCANNER_SCORES", "").strip()
     or os.getenv("WORLD_CUP_TARGET_SCORES", "").strip()
@@ -187,8 +192,14 @@ def exact_score_market_slug(event_slug: str, score: str) -> str:
     return f"{event_slug}-exact-score-{normalized_score}"
 
 
+def first_half_corners_total_slug_part(total: str) -> str:
+    return total.strip().replace(".", "pt")
+
+def first_half_corners_market_slug(event_slug: str, total: str) -> str:
+    return f"{event_slug}-corners-first-half-total-{first_half_corners_total_slug_part(total)}"
+
 def first_half_corners_3pt5_market_slug(event_slug: str) -> str:
-    return f"{event_slug}-corners-first-half-total-3pt5"
+    return first_half_corners_market_slug(event_slug, "3.5")
 
 
 def candidate_market_slugs(event_slug: str) -> list[str]:
@@ -264,22 +275,25 @@ def scan_world_cup_first_half_corners_markets(limit: int = 2) -> list[dict[str, 
         label = event_label(event)
         kickoff = event_datetime(event)
         event_summaries.append(f"{label} ({local_time_label(kickoff)})")
-        market = fetch_market_by_slug(first_half_corners_3pt5_market_slug(event_slug))
-        if not market:
-            log.info("World Cup scanner did not find 1H corners O/U 3.5 market for %s", label)
-            continue
-        key = market_key(market)
-        if key in seen:
-            continue
-        seen.add(key)
-        market["_event_slug"] = event_slug
-        market["_event_title"] = event.get("title") or ""
-        if event.get("endDate") and not market.get("endDate"):
-            market["endDate"] = event.get("endDate")
-        markets.append(market)
+        for total in FIRST_HALF_CORNERS_TOTALS:
+            market = fetch_market_by_slug(first_half_corners_market_slug(event_slug, total))
+            if not market:
+                log.info("World Cup scanner did not find 1H corners O/U %s market for %s", total, label)
+                continue
+            key = market_key(market)
+            if key in seen:
+                continue
+            seen.add(key)
+            market["_event_slug"] = event_slug
+            market["_event_title"] = event.get("title") or ""
+            market["_corners_total"] = total
+            if event.get("endDate") and not market.get("endDate"):
+                market["endDate"] = event.get("endDate")
+            markets.append(market)
     log.info(
-        "World Cup scanner found %s 1H corners O/U 3.5 market(s) across %s upcoming/live match(es): %s",
+        "World Cup scanner found %s 1H corners O/U market(s) for total(s) %s across %s upcoming/live match(es): %s",
         len(markets),
+        ",".join(FIRST_HALF_CORNERS_TOTALS) or "none",
         len(events),
         "; ".join(event_summaries) if event_summaries else "none",
     )
