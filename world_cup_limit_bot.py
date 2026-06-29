@@ -25,8 +25,10 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=5
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
-    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs; overrides single price/size
-    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
+    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs for configured outcome; overrides single price/size
+    WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES=0.02:60,0.03:20,0.04:10  # optional Under entries; falls back to entries/single size
+    WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES=0.04:10,0.05:5   # optional Over entries; empty disables Over BUYs
+    WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=30  # cancel/blacklist live 1H corners BUYs after this many minutes
     WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
     WORLD_CUP_ORDER_ACTIVE_WINDOWS=00:00-02:00,04:00-06:00,19:00-21:00  # local time via WORLD_CUP_DAY_TZ_OFFSET
     WORLD_CUP_POLL_SECS=60
@@ -111,11 +113,13 @@ FIRST_HALF_CORNERS_MATCHES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCHES
 FIRST_HALF_CORNERS_OUTCOME = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OUTCOME", "Under").strip()
 FIRST_HALF_CORNERS_SIZE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_SIZE", "90"))
 FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE", "0.02"))
-FIRST_HALF_CORNERS_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES", "0.02:50,0.03:20,0.04:20").strip()
+FIRST_HALF_CORNERS_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES", "").strip()
+FIRST_HALF_CORNERS_UNDER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES", "").strip()
+FIRST_HALF_CORNERS_OVER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES", "").strip()
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "30"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
-ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:21-16:50").strip()
+ORDER_ACTIVE_WINDOWS_RAW = os.getenv("WORLD_CUP_ORDER_ACTIVE_WINDOWS", "00:00-02:00,04:00-06:00,19:00-21:00").strip()
 FIFWC_EVENT_RE = re.compile(r"fifwc-[a-z0-9]+-[a-z0-9]+-(\d{4})-(\d{2})-(\d{2})", re.IGNORECASE)
 # Match score lines like "0-0", "0 - 0", or "10–9" without treating the
 # month/day portion of dates like "2026-06-18" as a score.
@@ -184,9 +188,12 @@ def parse_order_active_windows(raw: str) -> list[tuple[int, int]]:
     return windows
 
 
-def parse_first_half_corners_entries(raw: str) -> list[tuple[float, float]]:
+def parse_first_half_corners_entries(
+    raw: str,
+    default_entries: list[tuple[float, float]] | None = None,
+) -> list[tuple[float, float]]:
     if not raw:
-        return [(FIRST_HALF_CORNERS_PRICE, FIRST_HALF_CORNERS_SIZE)]
+        return list(default_entries or [])
     entries: list[tuple[float, float]] = []
     for part in re.split(r"[,;]+", raw):
         value = part.strip()
@@ -205,7 +212,22 @@ def parse_first_half_corners_entries(raw: str) -> list[tuple[float, float]]:
         entries.append((price, size))
     return entries
 
-FIRST_HALF_CORNERS_ENTRIES = parse_first_half_corners_entries(FIRST_HALF_CORNERS_ENTRIES_RAW)
+FIRST_HALF_CORNERS_ENTRIES = parse_first_half_corners_entries(
+    FIRST_HALF_CORNERS_ENTRIES_RAW,
+    [(FIRST_HALF_CORNERS_PRICE, FIRST_HALF_CORNERS_SIZE)],
+)
+FIRST_HALF_CORNERS_UNDER_ENTRIES = parse_first_half_corners_entries(
+    FIRST_HALF_CORNERS_UNDER_ENTRIES_RAW,
+    FIRST_HALF_CORNERS_ENTRIES if FIRST_HALF_CORNERS_OUTCOME.strip().lower() == "under" else [],
+)
+FIRST_HALF_CORNERS_OVER_ENTRIES = parse_first_half_corners_entries(
+    FIRST_HALF_CORNERS_OVER_ENTRIES_RAW,
+    FIRST_HALF_CORNERS_ENTRIES if FIRST_HALF_CORNERS_OUTCOME.strip().lower() == "over" else [],
+)
+FIRST_HALF_CORNERS_ENTRY_CONFIGS = [
+    ("Under", FIRST_HALF_CORNERS_UNDER_ENTRIES),
+    ("Over", FIRST_HALF_CORNERS_OVER_ENTRIES),
+]
 
 ORDER_ACTIVE_WINDOWS = parse_order_active_windows(ORDER_ACTIVE_WINDOWS_RAW)
 
@@ -1293,10 +1315,9 @@ def is_first_half_corners_buy_record(record: dict[str, Any]) -> bool:
     title = str(record.get("title") or "").lower()
     side = str(record.get("side") or "").upper()
     outcome = str(record.get("outcome") or "").strip().lower()
-    wanted_outcome = FIRST_HALF_CORNERS_OUTCOME.strip().lower()
     return (
         side == "BUY"
-        and (not wanted_outcome or outcome in {"", wanted_outcome})
+        and outcome in {"", "under", "over"}
         and ("corners-first-half-total-3pt5" in slug or "1st half" in title and "corner" in title)
     )
 
@@ -1339,8 +1360,9 @@ def cancel_stale_first_half_corners_open_orders(
 def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
-    if not FIRST_HALF_CORNERS_ENTRIES:
-        log.warning("Skipping 1H corners BUY placement because no price/size entries are configured.")
+    active_entry_configs = [(outcome, entries) for outcome, entries in FIRST_HALF_CORNERS_ENTRY_CONFIGS if entries]
+    if not active_entry_configs:
+        log.warning("Skipping 1H corners BUY placement because no Under/Over price/size entries are configured.")
         return
 
     markets = scan_world_cup_first_half_corners_markets(FIRST_HALF_CORNERS_MATCHES)
@@ -1350,103 +1372,104 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
 
     for market in markets:
         market_slug = str(market.get("slug") or "")
-        token_id = token_id_for_outcome(market, FIRST_HALF_CORNERS_OUTCOME)
-        if not token_id:
-            log.info(
-                "Skipping 1H corners market without %s outcome token: %s | outcomes=%s",
-                FIRST_HALF_CORNERS_OUTCOME,
-                market_slug or market.get("question"),
-                outcomes_from_market(market),
-            )
-            continue
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
-        key = f"{condition_id}:{token_id}:1h-corners-buy"
-        if key in completed:
-            log.info(
-                "Skipping 1H corners BUY for %s; this side was already filled or blacklisted for market_slug=%s",
-                FIRST_HALF_CORNERS_OUTCOME,
-                market_slug or "n/a",
-            )
-            continue
+        for outcome_name, entries in active_entry_configs:
+            token_id = token_id_for_outcome(market, outcome_name)
+            if not token_id:
+                log.info(
+                    "Skipping 1H corners market without %s outcome token: %s | outcomes=%s",
+                    outcome_name,
+                    market_slug or market.get("question"),
+                    outcomes_from_market(market),
+                )
+                continue
+            key = f"{condition_id}:{token_id}:1h-corners-buy"
+            if key in completed:
+                log.info(
+                    "Skipping 1H corners BUY for %s; this side was already filled or blacklisted for market_slug=%s",
+                    outcome_name,
+                    market_slug or "n/a",
+                )
+                continue
 
-        if first_half_corners_market_has_ended(market):
-            log.info(
-                "Skipping and blacklisting 1H corners BUY for %s because match/market has ended | market_slug=%s",
-                FIRST_HALF_CORNERS_OUTCOME,
-                market_slug or "n/a",
-            )
-            completed.add(key)
-            save_first_half_corners_completed(completed)
-            continue
+            if first_half_corners_market_has_ended(market):
+                log.info(
+                    "Skipping and blacklisting 1H corners BUY for %s because match/market has ended | market_slug=%s",
+                    outcome_name,
+                    market_slug or "n/a",
+                )
+                completed.add(key)
+                save_first_half_corners_completed(completed)
+                continue
 
-        live_unfilled_cancel_due = first_half_corners_live_unfilled_cancel_due(market)
-        open_buys = open_buy_orders(client, condition_id, token_id)
-        open_buy_shares = sum(order_size(order) for order in open_buys)
-        if live_unfilled_cancel_due:
-            if open_buys:
-                for order in open_buys:
-                    cancel_order(
-                        client,
-                        order_id_from_order(order),
-                        f"1H corners BUY {FIRST_HALF_CORNERS_OUTCOME} {market_slug or token_id}",
-                    )
-            log.info(
-                "Skipping and blacklisting 1H corners BUY for %s because live match is past %s minutes without a filled BUY | market_slug=%s",
-                FIRST_HALF_CORNERS_OUTCOME,
-                FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES,
-                market_slug or "n/a",
-            )
-            completed.add(key)
-            protected.discard(key)
-            save_first_half_corners_completed(completed)
-            continue
+            live_unfilled_cancel_due = first_half_corners_live_unfilled_cancel_due(market)
+            open_buys = open_buy_orders(client, condition_id, token_id)
+            open_buy_shares = sum(order_size(order) for order in open_buys)
+            if live_unfilled_cancel_due:
+                if open_buys:
+                    for order in open_buys:
+                        cancel_order(
+                            client,
+                            order_id_from_order(order),
+                            f"1H corners BUY {outcome_name} {market_slug or token_id}",
+                        )
+                log.info(
+                    "Skipping and blacklisting 1H corners BUY for %s because live match is past %s minutes without a filled BUY | market_slug=%s",
+                    outcome_name,
+                    FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES,
+                    market_slug or "n/a",
+                )
+                completed.add(key)
+                protected.discard(key)
+                save_first_half_corners_completed(completed)
+                continue
 
-        filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
-        if filled_position_shares > 0:
-            log.info(
-                "Skipping 1H corners BUY for %s; wallet already holds %s filled share(s) for market_slug=%s. Marking complete.",
-                FIRST_HALF_CORNERS_OUTCOME,
-                filled_position_shares,
-                market_slug or "n/a",
-            )
-            completed.add(key)
-            save_first_half_corners_completed(completed)
-            continue
+            filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
+            if filled_position_shares > 0:
+                log.info(
+                    "Skipping 1H corners BUY for %s; wallet already holds %s filled share(s) for market_slug=%s. Marking complete.",
+                    outcome_name,
+                    filled_position_shares,
+                    market_slug or "n/a",
+                )
+                completed.add(key)
+                save_first_half_corners_completed(completed)
+                continue
 
-        if open_buy_shares > 0:
-            log.info(
-                "Existing 1H corners BUY is still open for %s | market_slug=%s | open_size=%s",
-                FIRST_HALF_CORNERS_OUTCOME,
-                market_slug or "n/a",
-                open_buy_shares,
-            )
-            protected.add(key)
-            continue
-        if DRY_RUN and key in protected:
-            log.debug("Already placed/protected dry-run 1H corners BUY for %s", market_slug or token_id)
-            continue
-        if key in protected:
-            log.info(
-                "No open 1H corners BUY found for %s; replacing order for market_slug=%s because no filled position was detected yet",
-                FIRST_HALF_CORNERS_OUTCOME,
-                market_slug or "n/a",
-            )
-            protected.discard(key)
+            if open_buy_shares > 0:
+                log.info(
+                    "Existing 1H corners BUY is still open for %s | market_slug=%s | open_size=%s",
+                    outcome_name,
+                    market_slug or "n/a",
+                    open_buy_shares,
+                )
+                protected.add(key)
+                continue
+            if DRY_RUN and key in protected:
+                log.debug("Already placed/protected dry-run 1H corners BUY for %s", market_slug or token_id)
+                continue
+            if key in protected:
+                log.info(
+                    "No open 1H corners BUY found for %s; replacing order for market_slug=%s because no filled position was detected yet",
+                    outcome_name,
+                    market_slug or "n/a",
+                )
+                protected.discard(key)
 
-        label = f"{market.get('question') or market_slug} {FIRST_HALF_CORNERS_OUTCOME}"
-        placed_any = False
-        for entry_price, entry_size in FIRST_HALF_CORNERS_ENTRIES:
-            order_id = place_order(
-                client,
-                token_id,
-                f"{label} entry-${entry_price:.4f}",
-                entry_price,
-                entry_size,
-                Side.BUY,
-            )
-            placed_any = placed_any or bool(order_id)
-        if placed_any:
-            protected.add(key)
+            label = f"{market.get('question') or market_slug} {outcome_name}"
+            placed_any = False
+            for entry_price, entry_size in entries:
+                order_id = place_order(
+                    client,
+                    token_id,
+                    f"{label} entry-${entry_price:.4f}",
+                    entry_price,
+                    entry_size,
+                    Side.BUY,
+                )
+                placed_any = placed_any or bool(order_id)
+            if placed_any:
+                protected.add(key)
 
 def monitor_world_cup_positions(
     client: ClobClient | None,
