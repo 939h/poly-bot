@@ -25,7 +25,7 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_MATCHES=5
     WORLD_CUP_FIRST_HALF_CORNERS_SIZE=130
     WORLD_CUP_FIRST_HALF_CORNERS_PRICE=0.02
-    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs for configured outcome; overrides single price/size
+    WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=  # optional price:size pairs for configured outcome; overrides single price/size
     WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES=0.02:60,0.03:20,0.04:10  # optional Under entries; falls back to entries/single size
     WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES=0.04:10,0.05:5   # optional Over entries; empty disables Over BUYs
     WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=30  # cancel/blacklist live 1H corners BUYs after this many minutes
