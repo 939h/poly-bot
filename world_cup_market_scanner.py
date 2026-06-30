@@ -31,7 +31,7 @@ SCANNER_TIMEOUT = float(os.getenv("WORLD_CUP_SCANNER_TIMEOUT", "15"))
 FIRST_HALF_CORNERS_LIVE_SCAN_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_TOTALS = [
     total.strip()
-    for total in os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_TOTALS", "3.5,4.5").split(",")
+    for total in os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_TOTALS", "4.5").split(",")
     if total.strip()
 ]
 SCANNER_SCORES_RAW = (
