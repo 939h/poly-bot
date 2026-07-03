@@ -28,6 +28,8 @@ This script no longer places or reorders exact-score BUY orders. It only:
     WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES=0.03:10,0.04:5  # optional price:size pairs for configured outcome; overrides single price/size
     WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES=0.03:10,0.04:5  # optional Under entries; falls back to entries/single size
     WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES=0.03:10,0.04:5   # optional Over entries; empty disables Over BUYs
+    WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL=3.5=0.03:50,0.04:10|4.5=0.02:100,0.05:20  # optional per-total Under entries
+    WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL=3.5=0.03:50,0.04:10|4.5=0.02:100,0.05:20   # optional per-total Over entries
     WORLD_CUP_FIRST_HALF_CORNERS_TOTALS=3.5,4.5
     WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES=38  # cancel/blacklist live 1H corners BUYs after this many minutes
     WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES=130  # blacklist 1H corners BUYs after kickoff + this many minutes
@@ -117,6 +119,8 @@ FIRST_HALF_CORNERS_PRICE = float(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_PRICE",
 FIRST_HALF_CORNERS_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_ENTRIES", "").strip()
 FIRST_HALF_CORNERS_UNDER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES", "0.02:60,0.03:20,0.04:10").strip()
 FIRST_HALF_CORNERS_OVER_ENTRIES_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES", "0.02:50,0.04:10,0.05:5").strip()
+FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL", "").strip()
+FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL_RAW = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL", "").strip()
 FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_LIVE_UNFILLED_CANCEL_MINUTES", "30"))
 FIRST_HALF_CORNERS_MATCH_END_MINUTES = int(os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_MATCH_END_MINUTES", "130"))
 FIRST_HALF_CORNERS_STATE_FILE = os.getenv("WORLD_CUP_FIRST_HALF_CORNERS_STATE_FILE", ".world_cup_first_half_corners_completed.json").strip()
@@ -189,6 +193,9 @@ def parse_order_active_windows(raw: str) -> list[tuple[int, int]]:
     return windows
 
 
+def normalize_first_half_corners_total(total: Any) -> str:
+    return str(total or "").strip().lower().replace("pt", ".")
+
 def parse_first_half_corners_entries(
     raw: str,
     default_entries: list[tuple[float, float]] | None = None,
@@ -213,6 +220,31 @@ def parse_first_half_corners_entries(
         entries.append((price, size))
     return entries
 
+
+def parse_first_half_corners_entries_by_total(raw: str) -> dict[str, list[tuple[float, float]]]:
+    entries_by_total: dict[str, list[tuple[float, float]]] = {}
+    if not raw:
+        return entries_by_total
+    for part in re.split(r"[|]+", raw):
+        value = part.strip()
+        if not value:
+            continue
+        if "=" not in value:
+            raise ValueError(f"1H corners per-total entries must be total=price:size,...: {value}")
+        total_raw, entries_raw = value.split("=", 1)
+        total = normalize_first_half_corners_total(total_raw)
+        if not total:
+            raise ValueError(f"1H corners per-total entry is missing total: {value}")
+        entries_by_total[total] = parse_first_half_corners_entries(entries_raw)
+    return entries_by_total
+
+def first_half_corners_entries_for_total(
+    entries_by_total: dict[str, list[tuple[float, float]]],
+    default_entries: list[tuple[float, float]],
+    total: Any,
+) -> list[tuple[float, float]]:
+    return entries_by_total.get(normalize_first_half_corners_total(total), default_entries)
+
 FIRST_HALF_CORNERS_ENTRIES = parse_first_half_corners_entries(
     FIRST_HALF_CORNERS_ENTRIES_RAW,
     [(FIRST_HALF_CORNERS_PRICE, FIRST_HALF_CORNERS_SIZE)],
@@ -225,9 +257,15 @@ FIRST_HALF_CORNERS_OVER_ENTRIES = parse_first_half_corners_entries(
     FIRST_HALF_CORNERS_OVER_ENTRIES_RAW,
     FIRST_HALF_CORNERS_ENTRIES if FIRST_HALF_CORNERS_OUTCOME.strip().lower() == "over" else [],
 )
+FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL = parse_first_half_corners_entries_by_total(
+    FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL_RAW
+)
+FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL = parse_first_half_corners_entries_by_total(
+    FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL_RAW
+)
 FIRST_HALF_CORNERS_ENTRY_CONFIGS = [
-    ("Under", FIRST_HALF_CORNERS_UNDER_ENTRIES),
-    ("Over", FIRST_HALF_CORNERS_OVER_ENTRIES),
+    ("Under", FIRST_HALF_CORNERS_UNDER_ENTRIES, FIRST_HALF_CORNERS_UNDER_ENTRIES_BY_TOTAL),
+    ("Over", FIRST_HALF_CORNERS_OVER_ENTRIES, FIRST_HALF_CORNERS_OVER_ENTRIES_BY_TOTAL),
 ]
 
 ORDER_ACTIVE_WINDOWS = parse_order_active_windows(ORDER_ACTIVE_WINDOWS_RAW)
@@ -1361,7 +1399,11 @@ def cancel_stale_first_half_corners_open_orders(
 def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
-    active_entry_configs = [(outcome, entries) for outcome, entries in FIRST_HALF_CORNERS_ENTRY_CONFIGS if entries]
+    active_entry_configs = [
+        (outcome, default_entries, entries_by_total)
+        for outcome, default_entries, entries_by_total in FIRST_HALF_CORNERS_ENTRY_CONFIGS
+        if default_entries or entries_by_total
+    ]
     if not active_entry_configs:
         log.warning("Skipping 1H corners BUY placement because no Under/Over price/size entries are configured.")
         return
@@ -1374,7 +1416,17 @@ def place_first_half_corners_orders(client: ClobClient | None, protected: set[st
     for market in markets:
         market_slug = str(market.get("slug") or "")
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
-        for outcome_name, entries in active_entry_configs:
+        corners_total = market.get("_corners_total")
+        for outcome_name, default_entries, entries_by_total in active_entry_configs:
+            entries = first_half_corners_entries_for_total(entries_by_total, default_entries, corners_total)
+            if not entries:
+                log.info(
+                    "Skipping 1H corners BUY for %s O/U %s; no price/size entries configured for this total | market_slug=%s",
+                    outcome_name,
+                    corners_total or "n/a",
+                    market_slug or "n/a",
+                )
+                continue
             token_id = token_id_for_outcome(market, outcome_name)
             if not token_id:
                 log.info(
