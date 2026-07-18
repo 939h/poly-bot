@@ -1,10 +1,11 @@
 """
 Polymarket World Cup position monitor / take-profit bot.
 
-This script no longer places or reorders exact-score BUY orders. It only:
-    - detects existing World Cup positions for the configured wallet
-    - places/maintains take-profit SELL tranches for uncovered shares
-    - optionally prints detected World Cup position/open-order market slugs and exits
+This script manages World Cup orders by:
+    - detecting existing World Cup positions for the configured wallet
+    - placing/maintaining take-profit SELL tranches for uncovered shares
+    - replacing configured World Cup BUY orders if a previously protected order disappears/cancels
+    - optionally printing detected World Cup position/open-order market slugs and exiting
 
     POLY_PRIVATE_KEY=0x...
     POLY_API_KEY=...
@@ -1396,6 +1397,54 @@ def cancel_stale_first_half_corners_open_orders(
         completed.add(key)
         save_first_half_corners_completed(completed)
 
+def place_world_cup_buy_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
+    if not BUY_LIMIT_PRICE or ORDER_SIZE <= 0:
+        log.info("Skipping configured World Cup BUY placement because WORLD_CUP_BUY_LIMIT_PRICE/ORDER_SIZE is not configured.")
+        return
+
+    for market in collect_markets():
+        if market_is_closed_or_resolved(market):
+            continue
+        if not market_buy_phase_enabled(market):
+            continue
+        if not market_is_in_entry_window(market, allow_immediate_upcoming=PLACE_IMMEDIATE_ON_START):
+            continue
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
+        market_slug = str(market.get("slug") or market.get("_event_slug") or "")
+        for outcome, token_id in market_outcomes(market):
+            key = f"{condition_id}:{token_id}:world-cup-buy"
+            label = f"{market.get('question') or market_slug} {outcome}"
+            if key in completed:
+                log.info("Skipping World Cup BUY for %s; this outcome was already filled.", label)
+                continue
+
+            filled_position_shares = account_position_size_for_token(POSITION_WALLET, token_id)
+            if filled_position_shares > 0:
+                log.info(
+                    "Skipping World Cup BUY for %s; wallet already holds %s filled share(s). Marking complete.",
+                    label,
+                    filled_position_shares,
+                )
+                completed.add(key)
+                continue
+
+            open_buy_shares = open_buy_order_size(client, condition_id, token_id)
+            if open_buy_shares > 0:
+                log.info("Existing World Cup BUY is still open for %s | open_size=%s", label, open_buy_shares)
+                protected.add(key)
+                continue
+            if DRY_RUN and key in protected:
+                log.debug("Already placed/protected dry-run World Cup BUY for %s", label)
+                continue
+            if key in protected:
+                log.info("No open World Cup BUY found for %s; replacing order because no filled position was detected yet", label)
+                protected.discard(key)
+
+            order_id = place_order(client, token_id, f"{label} entry", BUY_LIMIT_PRICE, ORDER_SIZE, Side.BUY)
+            if order_id:
+                protected.add(key)
+
+
 def place_first_half_corners_orders(client: ClobClient | None, protected: set[str], completed: set[str]) -> None:
     if not FIRST_HALF_CORNERS_BUY_ENABLED:
         return
@@ -1621,6 +1670,8 @@ def main() -> None:
         print_position_market_slugs(client)
         return
     protected_positions: dict[str, float] = {}
+    protected_world_cup_buy_orders: set[str] = set()
+    completed_world_cup_buy_orders: set[str] = set()
     protected_corners_orders: set[str] = set()
     completed_corners_orders = load_first_half_corners_completed()
     no_order_book_counts: dict[str, int] = {}
@@ -1632,6 +1683,7 @@ def main() -> None:
             sleep_until_active_window()
             continue
         cancel_stale_first_half_corners_open_orders(client, completed_corners_orders, open_order_market_cache)
+        place_world_cup_buy_orders(client, protected_world_cup_buy_orders, completed_world_cup_buy_orders)
         place_first_half_corners_orders(client, protected_corners_orders, completed_corners_orders)
         monitor_world_cup_positions(client, protected_positions, no_order_book_counts, skipped_position_markets)
         if RUN_ONCE:
